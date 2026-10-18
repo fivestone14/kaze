@@ -22,7 +22,7 @@ BARS_CACHE_SECONDS = 20
 HANDLER_TIMEOUT_SECONDS = 15
 LOGGED_ROUTE_CHARS = 120
 NO_STORE = "no-store"
-PAGE_POLICY = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+PAGE_POLICY = "default-src 'self'"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".json": "application/json", ".woff2": "font/woff2",
                  ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -69,23 +69,31 @@ def feed_document():
 
 
 def feed_trade_date():
-    """The session the live feed describes (the date of its cut), or today's New York date when there is none."""
+    """The session the live feed describes (the date of its cut), or today's New York date when there is none or
+    the file is half-written."""
     document = feed_document()
-    if document:
-        cut_at = json.loads(document).get("cut_at")
-        if cut_at:
-            return session_clock.parse_iso(cut_at).date().isoformat()
+    try:
+        cut_at = json.loads(document).get("cut_at") if document else None
+    except ValueError:
+        cut_at = None
+    if cut_at:
+        return session_clock.parse_iso(cut_at).date().isoformat()
     return session_clock.to_eastern(session_clock.now_utc()).date().isoformat()
 
 
+class StoreMissing(Exception):
+    """The store file is not there: /bars.json answers 503 and the log says so by name."""
+
+
 def read_only_store():
-    """A connection that only reads: opened read-only when the WAL sidecars exist (SQLite refuses a read-only open
-    of a WAL store without them, as after a restore from backup), else a plain open that is only ever queried."""
+    """A connection that only reads an existing store: opened read-only when the WAL sidecars exist (SQLite refuses a
+    read-only open of a WAL store without them, as after a restore from backup), else opened without create and
+    only ever queried."""
     file = paths.store_file()
-    if file.with_name(file.name + "-wal").exists():
-        conn = sqlite3.connect(f"file:{file}?mode=ro", uri=True, timeout=store.BUSY_TIMEOUT_SECONDS)
-    else:
-        conn = sqlite3.connect(str(file), timeout=store.BUSY_TIMEOUT_SECONDS)
+    if not file.is_file():
+        raise StoreMissing(f"no store at {file.name}")
+    mode = "ro" if file.with_name(file.name + "-wal").exists() else "rw"
+    conn = sqlite3.connect(f"file:{file}?mode={mode}", uri=True, timeout=store.BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -110,8 +118,9 @@ def bars_document():
 
 class AppHandler(BaseHTTPRequestHandler):
     """One request: the token first, then one of the five things this server serves; a crash inside is a 503 and
-    one log line, never a traceback."""
+    one log line, a client gone mid-reply is one log line, never a traceback."""
     timeout = HANDLER_TIMEOUT_SECONDS
+    status_sent = None
 
     def do_GET(self):
         started = time.monotonic()
@@ -119,15 +128,30 @@ class AppHandler(BaseHTTPRequestHandler):
         logged = route[:LOGGED_ROUTE_CHARS]
         try:
             self.answer(route)
+        except OSError as failure:
+            job_log.write_line(JOB, f"client gone {logged} {type(failure).__name__}")
         except Exception as failure:
             job_log.write_line(JOB, f"error {logged} {type(failure).__name__}: {failure}")
-            self.send_plain(HTTPStatus.SERVICE_UNAVAILABLE, "Kaze: not available right now")
-        job_log.write_line(JOB, f"GET {logged} {self.status_sent} {round((time.monotonic() - started) * 1000)} ms")
+            if self.status_sent is None:
+                self.reply_if_possible(HTTPStatus.SERVICE_UNAVAILABLE, "Kaze: not available right now")
+        job_log.write_line(JOB, f"{self.command} {logged} {self.status_sent} "
+                                f"{round((time.monotonic() - started) * 1000)} ms")
+
+    do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_GET
+
+    def reply_if_possible(self, status, text):
+        """A short reply that gives up quietly when the client has already gone."""
+        try:
+            self.send_plain(status, text)
+        except OSError:
+            pass
 
     def answer(self, route):
-        """Route one authorised request; the token gate comes first."""
+        """Route one request: the token gate first, then the method (only GET and HEAD read anything)."""
         if not authorized(self.headers.get("Authorization")):
             self.send_plain(HTTPStatus.UNAUTHORIZED, "Kaze: sign in", {"WWW-Authenticate": 'Basic realm="Kaze"'})
+        elif self.command not in ("GET", "HEAD"):
+            self.send_plain(HTTPStatus.METHOD_NOT_ALLOWED, "Kaze: GET only", {"Allow": "GET, HEAD"})
         elif route == FEED_ROUTE:
             document = feed_document()
             if document is None:
@@ -143,9 +167,6 @@ class AppHandler(BaseHTTPRequestHandler):
             else:
                 self.send_bytes(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache",
                                 PAGE_POLICY if file.suffix == ".html" else None)
-
-    def do_HEAD(self):
-        self.do_GET()
 
     def send_bytes(self, status, body, content_type, cache_control, policy=None):
         """Send a response with its content type, cache rule, length and, for the page, its content security policy
@@ -184,10 +205,19 @@ class AppHandler(BaseHTTPRequestHandler):
         """Silence the default stderr line: the job log holds the one line per request, without headers or bodies."""
 
 
+class QuietServer(ThreadingHTTPServer):
+    """The threaded server with its traceback printer replaced by one log line, so launchd's capture file stays
+    empty whatever a client does."""
+
+    def handle_error(self, request, client_address):
+        failure = sys.exc_info()[1]
+        job_log.write_line(JOB, f"request dropped {type(failure).__name__}: {failure}")
+
+
 def main():
     """Serve until stopped; launchd keeps it alive."""
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), AppHandler)
+        server = QuietServer(("127.0.0.1", PORT), AppHandler)
     except OSError as failure:
         raise SystemExit(f"kaze app: cannot listen on 127.0.0.1:{PORT} ({failure.strerror}); is another copy running?")
     server.daemon_threads = True

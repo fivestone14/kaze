@@ -500,7 +500,8 @@ alike:
   `rung_points`, `bands` and `owner_rule_bands` (the stored decision values), `chain` (how that read worked its band
   out, read back from its stored values so the phone's Sight and Steps explain the read the live window belongs to:
   `speed`, `speed_fast`, `speed_slow`, `swing`, `stretch`, `average_stretch`, `fit_sessions`, `fit_windows`,
-  `stays_inside_share`, `dials_product` (`raw`, `applied`), `straddle`, `minutes_left`, `options_swing`,
+  `stays_inside_share`, `dials` (per dial: `raw`, `applied`), `dials_product` (`raw`, `applied`), `straddle`,
+  `minutes_left`, `options_swing`,
   `options_over_tape`, `options_check`, `chance_up_if_moves`, `trust_applied`), `minutes_held` (bars held since
   `window_from`, 0 at the read itself), `now` (`price` = the newest close at the cut and `move` from the read price,
   always present; `average` = the running mean of the window's closes, `average_move`, `high`, `low`, `farthest_up`,

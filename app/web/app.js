@@ -17,7 +17,7 @@ const C = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", 
 const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, liveShare: 0.25 };
 const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6 };
 const BAR = { width: 312, centre: 156, reach: 136.7 };
-const SPEED = { width: 230, barWidth: 46, step: 84, left: 8, baseline: 50, top: 2 };
+const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2 };
 const METER = { width: 86, small: 50 };
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
 const PUSH_LABELS = { price_trend: "Price Trend", straightness: "Straightness", breadth: "Breadth",
@@ -32,16 +32,17 @@ const DIAL_LABELS = { fed_window: "Fed", release_window: "News", closing_window:
 const REPLY_WORDS = { 401: "Sign-In Refused (401) · Check The Token",
                       404: "No Live Feed Yet · The Engine Has Not Written One",
                       503: "The Mac's Server Can't Read The Store (503)" };
-const state = { feed: null, bars: [], channel: "30_minutes", tab: "read", fetchedAt: null, unreachable: false,
+const state = { feed: null, bars: [], channel: "30_minutes", fetchedAt: null, unreachable: false, unreadable: false,
                 feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false };
 
 // ---- the one number formatter, the one clock formatter, small text helpers ------------------------------------------
 
 function fmt(value, decimals = 0, signed = false) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  const text = Math.abs(value).toLocaleString("en-US", { minimumFractionDigits: decimals,
-                                                          maximumFractionDigits: decimals });
-  if (value < 0 && Number(text.replace(/,/g, "")) !== 0) return "−" + text;
+  const number = value === null || value === undefined || value === "" ? NaN : Number(value);
+  if (Number.isNaN(number)) return "—";
+  const text = Math.abs(number).toLocaleString("en-US", { minimumFractionDigits: decimals,
+                                                           maximumFractionDigits: decimals });
+  if (number < 0 && Number(text.replace(/,/g, "")) !== 0) return "−" + text;
   return signed ? "+" + text : text;
 }
 
@@ -166,6 +167,8 @@ function feedAgeSeconds() {
 function feedState() {
   const feed = state.feed;
   if (!feed) return "none";
+  if (state.unreachable) return "unreachable";
+  if (state.unreadable) return "unreadable";
   if (feed.status === "failed") return "failed";
   const session = feed.session;
   const closesAt = session && session.closes_at ? new Date(session.closes_at).getTime() : null;
@@ -192,7 +195,8 @@ function explainedRead() {
            status: ch.status, reason: ch.reason, rung_points: ch.rung_points, speed: block.speed,
            speed_fast: block.speed_fast, speed_slow: block.speed_slow, swing: ch.swing, stretch: ch.stretch,
            average_stretch: ch.average_stretch, fit_sessions: ch.fit_sessions, fit_windows: ch.fit_windows,
-           stays_inside_share: ch.stays_inside_share, dials_product: ch.dials_product, straddle: block.straddle,
+           stays_inside_share: ch.stays_inside_share, dials: ch.dials, dials_product: ch.dials_product,
+           straddle: block.straddle,
            minutes_left: block.minutes_left, options_swing: ch.options_swing, options_over_tape: ch.options_over_tape,
            options_check: ch.options_check, chance_up_if_moves: ch.direction ? ch.direction.chance_up_if_moves : null,
            trust_applied: ch.direction ? ch.direction.trust_applied : null };
@@ -200,7 +204,10 @@ function explainedRead() {
 
 function emptyReason() {
   const feed = state.feed;
-  if (!feed) return state.unreachable ? "Can't Reach The Mac" : REPLY_WORDS[state.feedReply] || "No Live Feed Yet";
+  if (!feed) {
+    if (state.unreachable) return "Can't Reach The Mac";
+    return state.unreadable ? "Feed Unreadable" : REPLY_WORDS[state.feedReply] || "No Live Feed Yet";
+  }
   if (feed.status === "failed") return `Read Failed · ${feed.status_reason}`;
   if (!range()) return "Range Step Failed On This Read";
   const read = explainedRead();
@@ -231,8 +238,11 @@ async function loadFeed() {
                                                       fetchWithTimeout("/bars.json")]);
     state.feedReply = feedReply.status;
     state.barsReply = barsReply.status;
-    state.feed = feedReply.ok ? await feedReply.json() : null;
-    state.bars = barsReply.ok ? (await barsReply.json()).bars : [];
+    const feed = feedReply.ok ? await parsed(feedReply) : null;
+    state.unreadable = feedReply.ok && feed === undefined;
+    state.feed = state.unreadable ? state.feed : feed;
+    const bars = barsReply.ok ? await parsed(barsReply) : null;
+    state.bars = bars ? bars.bars : [];
     state.unreachable = false;
     state.failures = 0;
     state.fetchedAt = Date.now();
@@ -243,6 +253,14 @@ async function loadFeed() {
   state.inFlight = false;
   render();
   schedulePoll();
+}
+
+async function parsed(reply) {
+  try {
+    return await reply.json();
+  } catch (failure) {
+    return undefined;
+  }
 }
 
 function schedulePoll() {
@@ -262,9 +280,9 @@ function guarded(draw, noteId) {
 }
 
 function render() {
-  guarded(renderClock, "notice");
+  guarded(renderClock, "clock-note");
   guarded(renderNotice, "notice");
-  guarded(renderSwitches, "notice");
+  guarded(renderSwitches, "clock-note");
   guarded(renderRead, "chart-note");
   guarded(renderStrip, "strip-note");
   guarded(renderReadsList, "list-note");
@@ -279,7 +297,10 @@ function render() {
 function renderClock() {
   const feed = state.feed;
   const kind = feedState();
-  const words = { none: "No Feed", failed: `Failed · ${clock(feed && feed.failed_at)}`,
+  const last = clock(feed && (feed.cut_at || feed.failed_at));
+  const words = { none: state.unreadable ? "Feed Unreadable" : "No Feed",
+                  failed: `Failed · ${clock(feed && feed.failed_at)}`,
+                  unreachable: `Can't Reach · Last Read ${last}`, unreadable: `Feed Unreadable · Last Read ${last}`,
                   closed: `Closed · Last Read ${clock(feed && feed.cut_at)}`,
                   late: `Late · Last Read ${clock(feed && feed.cut_at)} · ${ago(feedAgeSeconds())} Ago`,
                   live: `Live · ${clock(feed && feed.cut_at)}` };
@@ -298,6 +319,8 @@ function renderNotice() {
   const lines = [];
   if (state.unreachable) {
     lines.push(`Can't Reach The Mac${state.fetchedAt ? " · Last Fetched " + clock(state.fetchedAt) : ""}`);
+  } else if (state.unreadable) {
+    lines.push(`Feed Unreadable${feed ? " · Showing The Last Good Read" : ""}`);
   } else if (!feed && state.feedReply) {
     lines.push(REPLY_WORDS[state.feedReply] || `Server Error (${state.feedReply})`);
   }
@@ -324,7 +347,8 @@ function renderRead() {
   const band = current && current.bands["80"];
   el("range-line").textContent = band && band.half_width !== null ? `${fmt(band.low)} – ${fmt(band.high)}` : "—";
   const standing = isLive() ? "" : current && current.ended ? " · Ended" : " · Last";
-  el("held").textContent = current ? `${current.minutes_held} / ${minutes} Min${standing}` : `— / ${minutes} Min`;
+  el("held").textContent = current ? `${fmt(current.minutes_held)} / ${minutes} Min${standing}`
+                                   : `— / ${minutes} Min`;
   renderChart(current, windows() ? windows().finished[state.channel] : [], minutes);
 }
 
@@ -332,9 +356,11 @@ function renderChart(current, finished, minutes) {
   const chart = el("chart");
   const anchorEnd = current ? current.ends_at : finished[0] ? finished[0].ends_at
                   : state.bars.length ? state.bars[state.bars.length - 1].at : null;
-  const barsNote = !state.bars.length && state.barsReply && state.barsReply !== 200
-                 ? ` · Price Line Unavailable (${state.barsReply})` : "";
-  note("chart-note", (anchorEnd && current ? "" : emptyReason()) + barsNote);
+  const notes = anchorEnd && current ? [] : [emptyReason()];
+  if (!state.bars.length && state.barsReply && state.barsReply !== 200) {
+    notes.push(`Price Line Unavailable (${fmt(state.barsReply)})`);
+  }
+  note("chart-note", notes.join(" · "));
   chart.innerHTML = "";
   chart.hidden = !anchorEnd;
   if (!anchorEnd) return;
@@ -516,7 +542,7 @@ function renderReadsList() {
   });
   const shown = state.showAll ? rows : rows.slice(0, LIST_ROWS_SHOWN);
   const more = rows.length > shown.length
-             ? `<button class="show-all" data-show-all>Show All ${rows.length}</button>` : "";
+             ? `<button class="show-all" data-show-all>Show All ${fmt(rows.length)}</button>` : "";
   el("reads-list").innerHTML = shown.join("") + more || `<p class="block-note">${esc(emptyReason())}</p>`;
 }
 
@@ -556,7 +582,8 @@ function renderScores() {
     const graded = counts ? counts.graded : 0;
     const good = graded && targets[word] !== null ? counts.yes / graded >= targets[word] : null;
     const colour = good === null ? "faint" : good ? "inside" : "outside";
-    return `<div class="score"><b class="${colour}">${graded ? counts.yes : "—"}<small>/${graded}</small></b>`
+    const yes = graded ? fmt(counts.yes) : "—";
+    return `<div class="score"><b class="${colour}">${yes}<small>/${fmt(graded)}</small></b>`
          + `<span>${labels[word]}</span></div>`;
   }).join("");
 }
@@ -629,7 +656,7 @@ function renderRangeBar(read) {
     el("range-bar").innerHTML = "";
     return;
   }
-  const scale = BAR.reach / bandHalf, averageHalf = half(read.bands, "average_80"), rung = read.rung_points;
+  const scale = BAR.reach / bandHalf, averageHalf = half(read.bands, "average_80"), rung = Number(read.rung_points);
   const bold = `font-size="10" font-weight="700" text-anchor="middle"`;
   const parts = [svgRect(BAR.centre - bandHalf * scale, 8, 2 * bandHalf * scale, 20, 6, C.blue, 0.14)];
   if (averageHalf !== null) {
@@ -640,13 +667,16 @@ function renderRangeBar(read) {
   const rungLeft = BAR.centre - rung * scale, rungRight = clamp(BAR.centre + rung * scale, 0, BAR.width);
   const dashed = `stroke-dasharray="2 2"`;
   const labelFits = rungRight + 24 < BAR.centre + bandHalf * scale;
-  parts.push(svgLine(rungLeft, 4, rungLeft, 32, C.ink, 1, dashed),
-             svgLine(rungRight, 4, rungRight, 32, C.ink, 1, dashed),
-             svgLine(BAR.centre, 3, BAR.centre, 33, C.ink, 2.5),
+  const labelX = !Number.isFinite(rung) ? BAR.width - 20 : labelFits ? rungRight + 3 : rungRight - 3;
+  if (Number.isFinite(rung)) {
+    parts.push(svgLine(rungLeft, 4, rungLeft, 32, C.ink, 1, dashed),
+               svgLine(rungRight, 4, rungRight, 32, C.ink, 1, dashed));
+  }
+  parts.push(svgLine(BAR.centre, 3, BAR.centre, 33, C.ink, 2.5),
              svgText(BAR.centre - bandHalf * scale, 45, fmt(read.bands["80"].low), `${bold} fill="${C.blue}"`),
              svgText(BAR.centre, 45, `Read ${fmt(read.price)}`, `${bold} fill="${C.ink}"`),
              svgText(BAR.centre + bandHalf * scale, 45, fmt(read.bands["80"].high), `${bold} fill="${C.blue}"`),
-             svgText(labelFits ? rungRight + 3 : rungRight - 3, 22, `±${rung}`,
+             svgText(labelX, 22, `±${fmt(rung)}`,
                      `font-size="9.5" text-anchor="${labelFits ? "start" : "end"}" fill="${C.ink}"`));
   el("range-bar").innerHTML = parts.join("");
 }
@@ -660,8 +690,7 @@ function optionsWord(read) {
 function newsCheck(read) {
   const block = range();
   const next = block && block.releases && block.releases.length ? block.releases[0] : null;
-  const dials = channel() && channel().dials ? channel().dials : null;
-  const dial = dials ? dials.release_window : null;
+  const dial = read.dials ? read.dials.release_window : null;
   const quiet = !next && (!dial || dial.raw === 1);
   const name = next ? `${esc(titleCase(next.name))} At ${clock(next.at)}`
              : quiet ? "No News Left Today" : "News In The Window";
@@ -688,7 +717,7 @@ function renderSightChecks(read) {
     checkRow(markIcon(options.good, options.mark), `Options ${options.word}`,
              `${plusMinus(read.options_swing)} vs ${plusMinus(read.swing)}`, options.good ? "inside" : "")
     + checkRow(markIcon(news.good, news.good ? "✓" : "!"), news.name, news.value, news.good ? "inside" : "")
-    + checkRow(`<i class="dot-sand"></i>`, `Never Leaves ±${read.rung_points}`,
+    + checkRow(`<i class="dot-sand"></i>`, `Never Leaves ±${fmt(read.rung_points)}`,
                share === null ? "—" : `${fmt(share * 100)}% At Today's Speed`, "");
 }
 
@@ -824,8 +853,9 @@ function renderStepBars(read, minutes) {
   const neverSub = share === null ? "—"
     : windowsCount ? `${fmt(Math.round(share * windowsCount))} Of ${fmt(windowsCount)} Past Windows At Today's Speed`
     : `${fmt(share * 100)}% Of Past Windows At Today's Speed`;
-  const dashedBox = svgRect(edge(read.rung_points), 8, (2 * read.rung_points * scale).toFixed(1), 14, 5, "none", 1,
-                            `stroke="${C.ink}" stroke-width="1.3" stroke-dasharray="3 2"`);
+  const rung = Number(read.rung_points);
+  const dashedBox = Number.isFinite(rung) ? svgRect(edge(rung), 8, (2 * rung * scale).toFixed(1), 14, 5, "none", 1,
+                                                    `stroke="${C.ink}" stroke-width="1.3" stroke-dasharray="3 2"`) : "";
   el("steps-bars").innerHTML =
     stepBar(1, "Speed", "today", fmt(speed, 2), "One Minute's Typical Move · 15-Min Memory",
             bar(rect(speed, 0.55) + centreLine))
@@ -840,7 +870,7 @@ function renderStepBars(read, minutes) {
     + stepBar("4b", "Average Band", "history", plusMinus(averageHalf),
               `Where The Average Lands · ${fmt(swing, 1)} × ${fmt(read.average_stretch, 2)}`,
               bar((averageHalf === null ? "" : rect(averageHalf, 0.3)) + centreLine))
-    + stepBar(5, `Never Leaves ±${read.rung_points}`, "history", share === null ? "—" : `${fmt(share * 100)}%`,
+    + stepBar(5, `Never Leaves ±${fmt(rung)}`, "history", share === null ? "—" : `${fmt(share * 100)}%`,
               neverSub, bar(dashedBox + centreLine));
 }
 
@@ -857,8 +887,7 @@ function stepCheck(number, name, kind, sub, svg, value) {
 }
 
 function dialsLine(read) {
-  const ch = channel();
-  const dials = ch && ch.dials && !newestReadDiffers(read) ? ch.dials : {};
+  const dials = read.dials || {};
   const names = Object.keys(dials);
   const earned = names.filter((name) => dials[name].weight);
   const moving = names.filter((name) => dials[name].raw !== 1 && dials[name].raw !== null);
@@ -880,7 +909,7 @@ function renderStepChecks(read, minutes) {
   const trust = read.trust_applied === null ? "—" : fmt(read.trust_applied, read.trust_applied ? 2 : 0);
   const applied = dialsApplied(read);
   el("steps-checks").innerHTML =
-    stepCheck(6, "Options", "check", `${fmt(read.straddle, 1)} × √(${used} ÷ ${fmt(read.minutes_left)})`,
+    stepCheck(6, "Options", "check", `${fmt(read.straddle, 1)} × √(${fmt(used)} ÷ ${fmt(read.minutes_left)})`,
               `<svg viewBox="0 0 56 34" role="img" aria-label="Options swing next to tape swing">`
               + svgRect(3, 7, (50 * (read.options_swing || 0) / most).toFixed(1), 8, 3, C.greenDeep, 0.55)
               + svgRect(3, 19, (50 * (read.swing || 0) / most).toFixed(1), 8, 3, C.blue, 0.45) + `</svg>`,
@@ -908,7 +937,6 @@ function renderAnswer() {
 // ---- tabs, switches, timers ---------------------------------------------------------------------------------------
 
 function showTab(name) {
-  state.tab = name;
   remember("tab", name);
   document.querySelectorAll(".view").forEach((view) => { view.hidden = view.id !== `view-${name}`; });
   document.querySelectorAll(".tabs button").forEach((button) => {

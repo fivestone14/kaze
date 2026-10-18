@@ -156,15 +156,17 @@ def live_window(conn, day, cut_at, channel, minutes, series, live):
 
 def read_chain(conn, read, decision, channel, rung):
     """How the live window's own read worked its band out, read back from that read's stored values so Sight and
-    Steps explain the same read the Read page shows: speeds, swing, stretches, fit, rung share, dials product, the
-    options check and the direction call."""
+    Steps explain the same read the Read page shows: speeds, swing, stretches, fit, rung share, each dial and their
+    product, the options check and the direction call."""
     rows = store.decision_values(conn, decision["decision_rowid"])
     values = store.values_by_key(rows)
     seen = store.values_by_key(store.snapshot_observations(conn, read["snapshot_rowid"]))
     horizon = registry.subject_key(horizon=channel)
-    dials_product = {row["value_role"]: row["value_number"] for row in rows
-                     if row["measure_name"] == "width_multiplier"
-                     and row["subject_key"] == registry.subject_key(adjustment=registry.ALL_DIALS)}
+    dials = {dial: {} for dial in registry.WIDTH_DIALS + (registry.ALL_DIALS,)}
+    for row in rows:
+        if row["measure_name"] == "width_multiplier":
+            dials[registry.subject_parts(row["subject_key"])["adjustment"]][row["value_role"]] = row["value_number"]
+    dials_product = dials.pop(registry.ALL_DIALS)
     direction = next((row for row in rows if row["measure_name"] == "chance_up_if_moves_probability"), None)
     end_band = registry.subject_key(band=registry.BAND, horizon=channel)
     average_band = registry.subject_key(band=registry.AVERAGE_BAND, horizon=channel)
@@ -179,6 +181,8 @@ def read_chain(conn, read, decision, channel, rung):
         "fit_windows": values.get(f"fit_windows_count|{horizon}"),
         "stays_inside_share": values.get(
             f"chance_stays_inside_rung_probability|{registry.subject_key(horizon=channel, rung_points=rung)}"),
+        "dials": {dial: {registry.RAW_ROLE: setting.get(registry.RAW_ROLE),
+                         registry.APPLIED_ROLE: setting.get(registry.APPLIED_ROLE)} for dial, setting in dials.items()},
         "dials_product": {registry.RAW_ROLE: dials_product.get(registry.RAW_ROLE),
                           registry.APPLIED_ROLE: dials_product.get(registry.APPLIED_ROLE)},
         "straddle": seen.get("same_day_straddle_mid_points"),

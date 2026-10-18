@@ -10,7 +10,7 @@ screen is a web page served from `app/web/`, so **changing a screen is a file ed
 
 | Piece | Where | What it does |
 |---|---|---|
-| `app/server/app_server.py` | the Mac (`com.kaze.app`) | the web server: `app/web/`, `/latest.json`, `/bars.json`, one token |
+| `app/server/app_server.py` | the Mac (`com.kaze.app`) | the web server: the screens, the feed, the bars, one token |
 | `app/web/` | the Mac, read by the server | the three screens: `index.html`, `app.css`, `app.js`, `fonts/` |
 | `app/android/` | built on the Mac, on the phone | the shell: one Activity, a WebView, pull-to-refresh, back |
 
@@ -23,15 +23,17 @@ keeps it alive (`KeepAlive`, a minute between restarts). The shell holds `KAZE_U
 
 | Route | What comes back | Cache |
 |---|---|---|
-| `/` and the files under `app/web/` | the page, stylesheet, script, font; nothing outside `app/web`, no listings | `no-cache` |
-| `/latest.json` | `$KAZE_DATA/live/latest.json`, read fresh each request (`docs/data_map.md` has the contract) | `no-store` |
+| `/` and the files under `app/web/` | the page, stylesheet, script, font; nothing outside `app/web` | `no-cache` |
+| `/latest.json` | `$KAZE_DATA/live/latest.json`, read fresh each request (`docs/data_map.md`) | `no-store` |
 | `/bars.json` | `{trade_date, bars: [{at, close}]}`, the session's 1-minute SPX closes from the store | `no-store` |
 
 `/bars.json` reads the store over a read-only connection (a plain, query-only open when the WAL sidecars are absent,
 as after a restore from backup), rebuilt at most every 20 s; the session is the one `latest.json` describes (the
-date of its `cut_at`), today's New York date when there is no feed. The page is sent with
-`Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'`, so nothing but the Mac's own files
-can run in it. A crash inside a request is a 503 and one log line, never a traceback.
+date of its `cut_at`), today's New York date when there is no feed; a missing store is a 503 that says so, and the
+server never creates one. The page is sent with `Content-Security-Policy: default-src 'self'` (no inline styles or
+scripts anywhere), so nothing but the Mac's own files can run in it. Any method but GET and HEAD is a 401 without
+the token and a 405 with it. A crash inside a request is a 503 and one log line; a client that drops the connection
+mid-reply is one log line; nothing prints a traceback (the server's error hook is one log line too).
 
 The server logs one line per request to `$KAZE_DATA/logs/app_log.txt` (route cut to 120 characters, status,
 milliseconds), never the token or a body. The one hop in front of it, the https address the phone reaches, is
@@ -101,4 +103,5 @@ block draws inside its own guard, so one bad field empties that block with its r
 says `Live` within six minutes of the read, `Late` after that while the session is open, `Closed · Last Read 15:55`
 once it is over (from the feed's `session` block), and the strip, the list and the pill say `Last` or `Ended` instead
 of `Live` whenever the read is not live. A 401, a 404 (no feed yet), a 503 and an unreachable Mac each get their own
-words. Times are rendered in the phone's own zone.
+words; an unreachable Mac or an unreadable feed keeps the last good numbers on screen under `Last` wording.
+Times are rendered in the phone's own zone.
