@@ -1,0 +1,8 @@
+#!/bin/sh
+# Blocks a push if any commit in history holds a secret or personal detail.
+set -e
+gitleaks git --redact --no-banner
+if git grep -nIE '/Users/|@gmail\.com|Bearer [A-Za-z0-9]|api[_-]?key *=' -- ':!checks/pre-push' ; then
+  echo "pre-push: personal path, email or key-like text found above" >&2
+  exit 1
+fi

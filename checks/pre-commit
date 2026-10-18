@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks any commit whose staged changes look like a key or token.
+exec gitleaks git --pre-commit --staged --redact --no-banner

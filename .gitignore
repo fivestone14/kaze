@@ -1,0 +1,50 @@
+# Kaze is a public repo. Nothing private belongs here.
+
+# Secrets and logins
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.keychain
+secrets/
+credentials*.json
+*token*.json
+config/local*
+
+# Android signing and local settings
+*.jks
+*.keystore
+*.mobileprovision
+keystore.properties
+local.properties
+google-services.json
+GoogleService-Info.plist
+
+# Personal and market data (lives in ~/kaze_data, never here)
+data/
+state/
+logs/
+*.log
+*.db
+*.sqlite*
+*.parquet
+*.csv
+*.pdf
+*.png
+!app/**/res/**/*.png
+
+# Build output and tool clutter
+build/
+.gradle/
+*.apk
+*.aab
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.DS_Store
+.claude/
+scratch/
