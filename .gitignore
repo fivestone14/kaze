@@ -48,3 +48,12 @@ node_modules/
 .DS_Store
 .claude/
 scratch/
+
+# Editor and tool caches
+.idea/
+.vscode/
+.mypy_cache/
+.ruff_cache/
+*.iml
+.cxx/
+captures/
