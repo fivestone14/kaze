@@ -18,7 +18,7 @@ const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e
                  faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
                  white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
 const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, liveShare: 0.25 };
-const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6 };
+const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6, labelRoom: 70 };
 const RANGE_BAR = { width: 312, centre: 156, reach: 136.7 };
 const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2 };
 const METER = { width: 86, small: 50 };
@@ -522,7 +522,10 @@ function renderStrip() {
   verdict.textContent = inside === null ? "—" : inside ? "Inside ✓" : "Outside ✗";
   verdict.className = inside === null ? "faint" : inside ? "inside" : "outside";
   const liveX = at(move || 0), averageX = averageMove === null ? null : at(averageMove);
-  const liveLeft = averageX === null || liveX <= averageX;
+  // the live label sits on the side away from the average, unless the marker is pinned at an edge of the strip:
+  // then it sits on the inside, so the words never run past the strip's reach
+  const liveLeft = liveX <= STRIP.labelRoom ? false : liveX >= STRIP.width - STRIP.labelRoom ? true
+                 : averageX === null || liveX <= averageX;
   const small = `font-size="10" text-anchor="middle"`;
   const bold = `font-size="10" font-weight="700"`;
   const dashed = `stroke-dasharray="3 2"`;
@@ -631,10 +634,15 @@ function readLine(read, minutes, short = false) {
   return `Read At ${clock(read.read_at)}${window}${ends}${capped}${newer}${thin}`;
 }
 
+/** A read Sight and Steps can draw: not blind, with an end band. */
+function usableRead(read) {
+  return Boolean(read) && read.status !== "blind" && halfWidth(read.bands, "80") !== null;
+}
+
 function renderSight() {
   const read = explainedRead();
   const minutes = CHANNELS[state.channel];
-  const usable = read && read.status !== "blind" && halfWidth(read.bands, "80") !== null;
+  const usable = usableRead(read);
   note("sight-note", usable ? "" : emptyReason());
   el("sight-read-line").textContent = readLine(read, minutes, true);
   renderSpeedBars(usable ? read : null);
@@ -844,7 +852,7 @@ function renderFeeds() {
 function renderSteps() {
   const read = explainedRead();
   const minutes = CHANNELS[state.channel];
-  const usable = read && read.status !== "blind" && halfWidth(read.bands, "80") !== null;
+  const usable = usableRead(read);
   el("steps-sub").textContent = readLine(read, minutes);
   note("steps-note", usable ? "" : emptyReason());
   renderStepBars(usable ? read : null, minutes);

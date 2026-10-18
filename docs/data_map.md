@@ -205,8 +205,8 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `interval_score_gain_points`, `band_coverage_portion`
 
 Every measure's lane and fact group are checked when the registry loads: one fact may reach the pull lane (how far)
-or the push lane (which way), never both. The 12:35:59 read of 2026-10-16 wrote 147 observations and 120 decision
-values.
+or the push lane (which way), never both. The 12:35:59 read of 2026-10-16 wrote 145 observations as a rebuilt read
+(147 live, with the two Schwab-login feed rows) and 123 decision values.
 
 ## 5. The range recipe
 
@@ -521,7 +521,7 @@ header's words from `session` and its own clock (`Live` within six minutes of `c
 | Job | When | What it writes |
 |---|---|---|
 | `com.kaze.read` | every 5 minutes, all day | a live read at the 09:35-15:55 slots of a trading day, else a log line |
-| `com.kaze.nightly` | hourly at :15 | the nightly, once per session, from 17:00 New York on |
+| `com.kaze.nightly` | hourly at :15 (`--nightly-if-due`) | the nightly, once per session, from 17:00 New York on |
 | `com.kaze.app` | at login, kept alive | the phone's web server on 127.0.0.1 |
 
 All three run `engine/jobs/run_job.sh` from `/bin/bash -lc` with `TZ=America/New_York`, so the box's own time zone
@@ -574,7 +574,7 @@ the restored file):
     launchctl bootout gui/$(id -u)/com.kaze.app
     cd "$KAZE_DATA" && rm -f kaze.sqlite kaze.sqlite-wal kaze.sqlite-shm
     gunzip -c "$KAZE_BACKUP_DIR/kaze-<session>.sqlite.gz" > kaze.sqlite
-    cd ~/kaze && python3 -m engine.jobs.read_job --trust     # opens the store, upgrades it if the code moved on
+    cd ~/kaze && /usr/bin/python3 -m engine.jobs.read_job --trust   # opens the store, upgrades it if needed
     engine/jobs/install_jobs.sh
 
 Then `rm nightly_done.txt` if the restored session is older than the file says, so the next nightly catches up.
@@ -592,7 +592,8 @@ Then `rm nightly_done.txt` if the restored session is older than the file says, 
 - The calendar runs out (2026-12-31): events, releases and half days unknown; the release and Fed dials never fire.
   Seen as the nightly's `WARNING:` from 14 days before, the Feeds card's note, then the calendar feed `blind`.
 - The holiday list runs out (2027-12-31): the clock refuses the day; reads fail. Seen as the `WARNING:` from 30 days
-  before; past it `read_log.txt` FAILED lines and a `failed` feed.
+  before; past it `read_log.txt` FAILED lines and a `failed` feed whose `session` clock is null (the phone says
+  `Read Failed`, never a calm `Closed`).
 - The Mac asleep at 17:00: the nightly catches up at the next :15 at or after 17:00. Seen in `nightly_log.txt`; the
   Feeds card says `Nightly Not Done For <session>` until then.
 - A full disk: the read fails; even the failed feed may not write. Seen in `read_log.txt`; the phone says `Late`.
@@ -633,5 +634,8 @@ Then `rm nightly_done.txt` if the restored session is older than the file says, 
    `cat $KAZE_DATA/nightly_done.txt` is the day; the Feeds card's nightly line turns to `Nightly Done For` on the
    next read. Up to 20 `mismatch` lines above it are expected on the first day (a non-tape, non-scan mismatch is a
    collector bug to chase).
-9. The Schwab login lapses weekly; the phone's Feeds card shows `Schwab Login Renew Soon` from two days before and
-   the first read after a renewal shows `Good Until`.
+9. Renew the Schwab login on Monday after the close: it expires Tue 10-20 at about 14:43 ET, so the phone's Feeds
+   card says `Schwab Login Renew Soon` all Monday (correct, not a fault) and Tuesday's first read shows
+   `Good Until Mon 10-26`. The login lapses weekly from then on.
+10. Wed 10-28 is an FOMC day (14:00): reads whose window ends after the decision carry an `owner_rule` variant and
+    the phone's Steps show the x2.6 Fed dial; the first real test of the Fed path.

@@ -65,7 +65,7 @@ tilt, not a calibrated probability, and carries no weight until the ledger write
   store; the rebuilt tables left the file at 381 MB and a 0.9 s VACUUM brought it to 295 MB.
 - One copy of a session is about 4.7 MB (observations 1.92, decision values 1.39, outcome values 0.56, outcomes
   0.47, decisions 0.18, bars 0.14, snapshots 0.05; bytes per row from `dbstat` times one session's rows). A live day
-  (live plus the nightly's rebuilt copy) is about 9.4 MB, 100 sessions about 0.94 GB. A read writes about 147
-  observations and 120 decision values; the ledger writes 138 rows a night (0.11 MB).
+  (live plus the nightly's rebuilt copy) is about 9.4 MB, 100 sessions about 0.94 GB. A read writes 147
+  observations live (145 rebuilt) and 123 decision values; the ledger writes 138 rows a night (0.11 MB).
 - The nightly's gzipped backup is about 12% of the file (35 MB). There is no retention rule yet; one is due at about
   100 sessions.

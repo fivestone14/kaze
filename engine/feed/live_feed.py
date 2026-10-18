@@ -57,14 +57,16 @@ def write_document(document):
 
 def session_block(day, half_days):
     """The session's clock for the phone: when this session closes and the next one opens, so closed reads as closed."""
-    # Past the holiday list's horizon the next open is unknown and left null rather than crashing the feed.
-    trading = session_clock.is_trading_day(day)
+    # Past the holiday list's horizon the clock cannot answer for the day or the next; both are left null rather
+    # than crashing the feed, so a failed read past the horizon still reaches the phone as a failed document.
+    closes_at, next_open = None, None
     try:
+        if session_clock.is_trading_day(day):
+            closes_at = session_clock.session_close(day, half_days)
         next_open = session_clock.session_open(session_clock.next_trading_day(day))
     except ValueError:
-        next_open = None
-    return for_phone({"closes_at": session_clock.session_close(day, half_days) if trading else None,
-                      "next_session_opens_at": next_open})
+        pass
+    return for_phone({"closes_at": closes_at, "next_session_opens_at": next_open})
 
 
 def nightly_block(done_for, day):

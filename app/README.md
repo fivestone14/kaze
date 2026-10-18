@@ -108,7 +108,7 @@ block draws inside its own guard, so one bad field empties that block with its r
 
 The header's words come from the feed's `session` block and the phone's clock, rendered in the phone's own zone:
 `Live · 12:35` within six minutes of the read, `Late · Last Read 12:35 · 9m Ago` after that while the session is
-open, `Closed · Last Read 15:55` once the session is over, and `No Read Yet Today · Last Read Fri 15:55` (rust)
+open, `Closed · Last Read 15:55` once the session is over, and `No Read Yet Today · Last Read Fri 10-16 15:55` (rust)
 once the next session has opened and eleven minutes have passed with no newer read (the Mac asleep, the jobs not
 installed, `.env` broken). The strip, the list and the pill say `Last` or `Ended` instead of `Live` whenever the
 read is not live. A 401, a 404 (no feed yet), a 503 and an unreachable Mac each get their own words; an unreachable
