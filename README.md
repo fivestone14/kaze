@@ -9,53 +9,68 @@ and direction stays 50/50 until a reading earns a say.
 
 ## Layout
 
-| Folder | What it holds |
-|---|---|
-| `engine/` | `paths.py` (every path Kaze touches, from `.env`) and `session_clock.py` (the market clock), shared by every group below |
-| `engine/collect/` | The collector: how to read each of Mirai's files as it stood at a moment (`mirai_files.py`) and one read built from them (`collect.py`) |
-| `engine/store/` | The SQLite store (`store.py`), its tables (`store_schema.py`), the registry of every measure and component (`registry.py`) and the nightly backup (`backup.py`) |
-| `engine/range/` | The range engine: `range_fit.py` fits the history, `range_read.py` works one read out, `width_dials.py` holds the dials, `push_read.py` the push readings (which way, each with a lean) |
-| `engine/grade/` | The grader (`grade.py`: outcomes, grades, the scoreboard) and the trust ledger (`trust.py`: what has earned weight, from live graded windows only) |
-| `engine/feed/` | The live feed the phone reads after every read (`live_feed.py`) |
-| `engine/jobs/` | The read job (`read_job.py`: the 5-minute read, the nightly and the hand commands), the job log, the three launchd jobs (the read, the nightly, the phone server), their runner and installer |
-| `app/server/` | The phone's web server: the screens, the live feed and today's closes behind one token, on 127.0.0.1 |
-| `app/web/` | The three screens (Read, Sight, Steps): one page, one stylesheet, one script, the font |
-| `app/android/` | The Android shell: a full-screen browser window that opens the server with the token |
-| `docs/` | The data map |
-| `checks/` | Git hooks that block secrets from ever reaching this repo |
+- `engine/`: `paths.py` (every path Kaze touches, from `.env`) and `session_clock.py` (the market clock), shared
+  by every group below.
+- `engine/collect/`: the collector. `mirai_files.py` reads each of Mirai's files as it stood at a moment;
+  `collect.py` builds one read from them.
+- `engine/store/`: the SQLite store. `store.py` shapes and writes rows, `store_queries.py` reads them,
+  `store_schema.py` holds the tables and the numbered schema steps, `registry.py` lists every measure and word,
+  `components.py` holds the recipe's numbers (dials, readings, trust tests, rules), `backup.py` the nightly copy.
+- `engine/range/`: the range engine. `range_fit.py` fits the history, `range_read.py` works one read out,
+  `width_dials.py` holds the dials, `push_read.py` the push readings (which way, each with a lean).
+- `engine/grade/`: the grader (`grade.py`: outcomes, grades, the scoreboard), the parity check (`parity.py`) and the
+  trust ledger (`trust.py`: what has earned weight, from live graded windows only).
+- `engine/feed/`: the live feed the phone reads after every read (`live_feed.py`).
+- `engine/jobs/`: the read job (`read_job.py`: the 5-minute read, the nightly and the hand commands), the job log,
+  the three launchd jobs (the read, the nightly, the phone server), their runner and installer.
+- `app/server/`: the phone's web server: the screens, the live feed and today's closes behind one token, on
+  127.0.0.1.
+- `app/web/`: the three screens (Read, Sight, Steps): one page, one stylesheet, one script, the font.
+- `app/android/`: the Android shell: a full-screen browser window that opens the server with the token.
+- `docs/`: `data_map.md` (what Kaze keeps, how a read is worked out, the phone's contract, operations) and
+  `evidence.md` (dated measurements).
+- `checks/`: git hooks that block secrets from ever reaching this repo.
 
-Every window is graded from the read (the band sits on the read price; did the end land inside, did the running
-average, did price ever leave +/-X) and the scoreboard keeps live and replayed grades apart. Seven push readings
-(price trend, straightness, breadth, big tech vs the rest, options buyers, the 10-year yield, Mirai's Claude lean) and
-five width dials (Fed window, scheduled release, closing window, acceleration, options vs tape) are on the board at
-weight 0; the nightly trust ledger scores each per channel on live graded windows with a test fixed in advance, and a
-weight moves from 0 only after 20 live sessions, the whole interval on the right side, the score above a fake
-baseline, three nightly runs in a row. The phone app is `app/` (its own README says what runs where); the print pack
-arrives with its own phase.
+Every window is graded from the read: did the end land inside the band, did the running average, did price ever
+leave plus or minus X. Seven push readings and five width dials sit on the board at weight 0, and the nightly trust
+ledger moves a weight only after 20 live sessions pass a test fixed in advance. `docs/data_map.md` has the recipe,
+the grades, the ledger's rules and the phone's data contract; `app/README.md` says what runs where for the phone.
 
 ## Setup
 
-    cp .env.example .env            # then fill in the two paths (and, best, KAZE_BACKUP_DIR on another disk)
+    cp .env.example .env                              # then fill in all five keys (see below)
+    brew install gitleaks                             # the commit and push hooks call it
     git config core.hooksPath checks
-    python3 -m pip install numpy    # the one package beyond the standard library (Python 3.9)
+    /usr/bin/python3 -m pip install --user numpy      # the one package beyond the standard library (Python 3.9)
 
-Private data lives outside this repo, in the folder `KAZE_DATA` points to.
+`.env` holds five keys: `KAZE_MIRAI_HOME` and `KAZE_DATA` (folders that must exist), `KAZE_BACKUP_DIR` (optional,
+best on another disk or a cloud folder), `KAZE_APP_PORT` and `KAZE_APP_TOKEN` (the phone server refuses to start
+without the token, and launchd restarts it every minute until it has one, so set it even before the phone is
+built). The jobs run `/usr/bin/python3`, so numpy goes there, not into another `python3` on the PATH. Run every
+`python3 -m ...` command below from the repo root. Private data lives outside this repo, in the folder `KAZE_DATA`
+points to.
 
 ## Run
 
-    python3 -m engine.jobs.read_job                                  # one live read with its range bands (quiet when closed)
-    python3 -m engine.jobs.read_job --at "2026-10-16 12:35:59"       # rebuild one past moment (New York time)
-    python3 -m engine.jobs.read_job --rebuild-day 2026-10-16         # rebuild every 5-minute read of a session
-    python3 -m engine.jobs.read_job --backfill-bars                  # load every session's SPX bars Mirai holds (one-off)
-    python3 -m engine.jobs.read_job --nightly                        # rebuilds, fits, grades, ledger, parity, backup
-    python3 -m engine.jobs.read_job --scoreboard [2026-10-16]        # grades per session and channel, last 20 pooled
-    python3 -m engine.jobs.read_job --pass-test                      # print the band's walk-forward coverage test
-    python3 -m engine.jobs.read_job --trust                          # the trust ledger: readings and dials, verdict, weight
-    python3 -m app.server.app_server                            # the phone's server by hand (launchd: com.kaze.app)
-    engine/jobs/install_jobs.sh                                 # install the three launchd jobs
+    python3 -m engine.jobs.read_job                              # one live read (quiet when closed)
+    python3 -m engine.jobs.read_job --at "2026-10-16 12:35:59"   # rebuild one past moment (New York time)
+    python3 -m engine.jobs.read_job --rebuild-day 2026-10-16     # rebuild every 5-minute read of a session
+    python3 -m engine.jobs.read_job --backfill-bars              # load every session's SPX bars Mirai holds
+    python3 -m engine.jobs.read_job --nightly                    # rebuilds, fits, grades, ledger, parity, backup
+    python3 -m engine.jobs.read_job --scoreboard [2026-10-16]    # grades per session and channel, last 20 pooled
+    python3 -m engine.jobs.read_job --pass-test                  # the band's walk-forward coverage test
+    python3 -m engine.jobs.read_job --trust                      # the trust ledger: verdicts and weights
+    python3 -m app.server.app_server                             # the phone's server by hand (launchd: com.kaze.app)
+    engine/jobs/install_jobs.sh                                  # install the three launchd jobs
 
 On a fresh store run `--backfill-bars`, then `--nightly` (it writes the history fits every read's band needs), then
-`--rebuild-day` for each past session you want graded. `live/latest.json` carries `status: failed` with the reason
-when a live read crashes. The nightly keeps the last five dated, gzipped copies of the store in `KAZE_BACKUP_DIR`.
+`--rebuild-day` for each past session you want graded.
 
-`docs/data_map.md` says what the store holds and who writes it.
+## Operations
+
+`engine/jobs/install_jobs.sh` installs the three launchd jobs after checking the box can run them. Each job writes
+one line per run to `$KAZE_DATA/logs/` (`read_log.txt`, `nightly_log.txt`, `app_log.txt`, `by_hand_log.txt`); only
+what Python could not catch lands in `/tmp/com.kaze.*.launchd.log`. The phone says in words when something failed
+(`Read Failed`, `Late`, `No Read Yet Today`, `Can't Reach The Mac`). The nightly keeps the last five dated, gzipped
+copies of the store in `KAZE_BACKUP_DIR`; the restore recipe, the Monday checklist and the yearly maintenance are
+in `docs/data_map.md` under Operations.
