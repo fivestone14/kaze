@@ -234,15 +234,15 @@ main {
 .step-checks { display: flex; flex-direction: column; margin-top: 2px; }
 .step-check {
   display: grid;
-  grid-template-columns: 1fr 56px 64px;
+  grid-template-columns: minmax(0, 1fr) 56px 64px;
   align-items: center;
   gap: 8px;
   height: 38px;
   border-top: 1px solid var(--rule);
 }
-.step-check .text { display: flex; flex-direction: column; gap: 1px; }
+.step-check .text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .step-check .name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; }
-.step-check .sub { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.step-check .sub { font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .step-check svg { width: 56px; height: 34px; display: block; }
 .step-check .value { font-size: 13px; font-weight: 700; text-align: right; }
 .answer {
