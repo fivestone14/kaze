@@ -121,10 +121,10 @@ def channel_forecast(forecast, name, minutes, fits, ratios, history, weights):
                           registry.APPLIED_ROLE: width_dials.half_width(1.0, others, fed, ratio["cap"])},
         "owner_rule": None,
     }
-    channel["bands"] = band_edges(price, swing, fit, channel["dials_product"][registry.APPLIED_ROLE])
+    channel["bands"] = band_edges(price, swing, fit, others, fed, ratio["cap"])
     if channel["in_fed_window"]:
-        product = width_dials.half_width(1.0, owner_others, owner_fed, ratio["cap"])
-        channel["owner_rule"] = {"product": product, "bands": band_edges(price, swing, fit, product)}
+        channel["owner_rule"] = {"product": width_dials.half_width(1.0, owner_others, owner_fed, ratio["cap"]),
+                                 "bands": band_edges(price, swing, fit, owner_others, owner_fed, ratio["cap"])}
     if swing is None:
         channel["status"], channel["reason"] = registry.DECISION_BLIND, "speed_not_formed"
     elif channel["stretch"] is None:
@@ -138,12 +138,12 @@ def channel_forecast(forecast, name, minutes, fits, ratios, history, weights):
     return channel
 
 
-def band_edges(price, swing, fit, width_multiplier):
-    """Per band, half-width, low and high at a width multiplier; None where an input is missing."""
+def band_edges(price, swing, fit, others, fed, cap):
+    """Per band, half-width, low and high through the one half-width formula; None where an input is missing."""
     bands = {}
     for band in registry.BAND_PRICE_MEASURE:
         formed = swing is not None and fit[band] is not None and price is not None
-        half = swing * fit[band] * width_multiplier if formed else None
+        half = width_dials.half_width(swing * fit[band], others, fed, cap) if formed else None
         bands[band] = dict(zip(BAND_EDGES, (half, price - half, price + half) if formed else (None, None, None)))
     return bands
 

@@ -37,7 +37,8 @@ def open_store():
 
 
 def seed_registry(conn):
-    """Write every registry row, replacing earlier copies; a dropped name is removed unless rows still use it."""
+    """Write every registry row: measures replace earlier copies (a dropped name is removed unless rows still use
+    it); a component whose parameters changed gets the next revision, earlier revisions and retired names stay."""
     names = list(registry.MEASURES_BY_NAME)
     with conn:
         stored = {row["measure_name"] for row in conn.execute("SELECT measure_name FROM registry_measures")}
@@ -51,11 +52,20 @@ def seed_registry(conn):
         insert_rows(conn, "registry_measures", registry.MEASURES, on_conflict="replace")
         holes = ", ".join("?" for _ in names)
         conn.execute(f"DELETE FROM registry_measures WHERE measure_name NOT IN ({holes})", names)
-        components = registry.component_rows()
-        insert_rows(conn, "registry_components", components, on_conflict="replace")
-        component_names = [row["component_name"] for row in components]
-        conn.execute("DELETE FROM registry_components WHERE component_name NOT IN "
-                     f"({', '.join('?' for _ in component_names)})", component_names)
+        newest = {(row["component_kind"], row["component_name"], row["component_version"]):
+                  (row["revision_number"], row["parameters_sha256"], row["plain_meaning_text"])
+                  for row in conn.execute(
+                      "SELECT component_kind, component_name, component_version, revision_number, "
+                      "parameters_sha256, plain_meaning_text FROM registry_components c WHERE revision_number = ("
+                      "SELECT MAX(revision_number) FROM registry_components n WHERE n.component_kind = "
+                      "c.component_kind AND n.component_name = c.component_name AND n.component_version = "
+                      "c.component_version)")}
+        revised = []
+        for row in registry.component_rows():
+            stored = newest.get((row["component_kind"], row["component_name"], row["component_version"]))
+            if stored is None or stored[1:] != (row["parameters_sha256"], row["plain_meaning_text"]):
+                revised.append(dict(row, revision_number=stored[0] + 1 if stored else 1))
+        insert_rows(conn, "registry_components", revised)
 
 
 def table_columns(conn, table):
@@ -513,6 +523,7 @@ def snapshot_exists(conn, snapshot_id):
     return conn.execute("SELECT 1 FROM collect_snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone() is not None
 
 
+# Every live-read query reads this one statement of "the live truth": the first built live read at each cut.
 FIRST_BUILT_LIVE_READS_SQL = """
     SELECT s.* FROM collect_snapshots s
     WHERE s.snapshot_kind = 'read' AND s.row_origin IN ('live_frozen', 'live_rebuilt') AND s.snapshot_status != 'missed'
@@ -521,6 +532,9 @@ FIRST_BUILT_LIVE_READS_SQL = """
                                       AND t.row_origin IN ('live_frozen', 'live_rebuilt')
                                       AND t.snapshot_status != 'missed')
 """
+
+
+FIRST_BUILT_LIVE_SNAPSHOT_IDS_SQL = f"SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL})"
 
 
 def live_snapshot_at(conn, cut_at_iso):
@@ -723,9 +737,8 @@ def lane_windows_with_grades(conn, trade_date, horizon_name, read_lane, grade_ru
 
 def graded_sessions(conn, grade_rule):
     """Every session with a grade under the rule, oldest first."""
-    rows = conn.execute("SELECT DISTINCT trade_date FROM results_outcomes WHERE outcome_kind = ? "
-                        "AND outcome_rule_name = ? AND outcome_rule_version = ? ORDER BY trade_date",
-                        (registry.FORECAST_GRADE_KIND, *grade_rule)).fetchall()
+    rows = conn.execute(f"SELECT DISTINCT trade_date FROM results_outcomes o WHERE {grade_under_rule_sql('o')} "
+                        "ORDER BY trade_date", grade_rule_parameters(grade_rule)).fetchall()
     return [row["trade_date"] for row in rows]
 
 
@@ -747,7 +760,7 @@ def grade_counts(conn, first_day, last_day, grade_rule, by_session=True):
         "JOIN results_outcome_values v ON v.outcome_rowid = o.outcome_rowid "
         f"WHERE {grade_under_rule_sql('o')} AND o.trade_date BETWEEN ? AND ? "
         " AND (d.row_origin = 'history_rebuilt' OR d.snapshot_id IN "
-        f" (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL}))) GROUP BY 1, 2, 3, 4, 5", parameters).fetchall()
+        f" ({FIRST_BUILT_LIVE_SNAPSHOT_IDS_SQL})) GROUP BY 1, 2, 3, 4, 5", parameters).fetchall()
 
 
 # ---- Parity between live and rebuilt reads ------------------------------------------------------------------------
@@ -800,7 +813,7 @@ def parity_side_value(pair, side):
 # ---- Queries: the trust ledger ---------------------------------------------------------------------------------------
 
 LIVE_COUNTING_DECISIONS_SQL = f"""
-    SELECT d.decision_rowid, d.trade_date, d.row_origin, d.cut_at, m.value_number AS end_move
+    SELECT d.decision_rowid, d.trade_date, d.row_origin, d.cut_at, d.decision_status, m.value_number AS end_move
     FROM reads_decisions d
     JOIN results_outcomes g ON g.judged_decision_id = d.decision_id AND g.does_count_toward_skill = 1
      AND {grade_under_rule_sql('g')}
@@ -809,7 +822,7 @@ LIVE_COUNTING_DECISIONS_SQL = f"""
      AND m.measure_name = '{registry.WINDOW_MOVE_MEASURE["end"]}'
     WHERE d.decision_kind = '{registry.RANGE_DECISION_KIND}' AND d.horizon_name = ? AND d.trade_date <= ?
      AND d.run_kind = '{registry.RUN_KIND_FOR_ORIGIN["live_frozen"]}' AND d.variant_name IS NULL
-     AND d.snapshot_id IN (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL}))
+     AND d.snapshot_id IN ({FIRST_BUILT_LIVE_SNAPSHOT_IDS_SQL})
 """
 
 
@@ -845,15 +858,15 @@ def trust_weights_known(conn, trade_date, cut_at_iso):
 
 
 def prior_verdicts(conn, judged, horizon_name, through_day, runs):
-    """The verdicts of a component's last ledger runs before a data-through day, newest first."""
+    """A component's last ledger runs before a data-through day, newest first, as (verdict, weight)."""
     evaluated_kind, evaluated_name, evaluated_version = judged
     rows = conn.execute(
-        f"SELECT {registry.VERDICT_COLUMN} FROM results_evaluations WHERE evaluation_kind = ? AND evaluated_kind = ? "
-        "AND evaluated_name = ? AND evaluated_version = ? AND horizon_name = ? AND data_through_trade_date < ? "
-        "ORDER BY data_through_trade_date DESC, known_at DESC LIMIT ?",
+        f"SELECT {registry.VERDICT_COLUMN}, metric_value FROM results_evaluations WHERE evaluation_kind = ? "
+        "AND evaluated_kind = ? AND evaluated_name = ? AND evaluated_version = ? AND horizon_name = ? "
+        "AND data_through_trade_date < ? ORDER BY data_through_trade_date DESC, known_at DESC LIMIT ?",
         (registry.TRUST_WEIGHT_KIND, evaluated_kind, evaluated_name, evaluated_version, horizon_name, through_day,
          runs)).fetchall()
-    return [row[0] for row in rows]
+    return [(row[0], row[1] or 0.0) for row in rows]
 
 
 def newest_evaluations(conn):

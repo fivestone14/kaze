@@ -1,6 +1,6 @@
 # The trust ledger: every push reading and width dial scored per channel, nightly, on live graded windows only
 # (replayed history never counts) with a test fixed in advance in the registry, each on top of what has already earned
-# weight, against a fake baseline, held for three passing runs; written as results_evaluations rows the read applies.
+# weight, against a fake baseline, held three runs on the way up and down; written as results_evaluations rows.
 import itertools
 from collections import defaultdict
 
@@ -35,6 +35,7 @@ def counting_live_windows(conn, horizon_name, through_day):
             continue
         windows.append({
             "day": decision["trade_date"], "origin": decision["row_origin"], "move": decision["end_move"],
+            "clipped": decision["decision_status"] == registry.DECISION_CLIPPED,
             "undialed_half_width": swing * stretch,
             "cap": stored.get(("width_cap_multiplier", horizon, registry.VALUE_ROLE)),
             "raw": {dial: stored.get(("width_multiplier", registry.subject_key(adjustment=dial), registry.RAW_ROLE))
@@ -64,14 +65,32 @@ def sample_counts(windows, horizon_name):
 
 
 def day_permutations(days, column):
-    """The fake baselines' inputs: each day's column handed to another day's windows (cycled to its length), for
-    every permutation of the days, drawn with the registry's fixed seed."""
+    """The lean fake baseline's inputs: each day's column handed to another day's windows (cycled to its length),
+    for every permutation of the days, drawn with the registry's fixed seed."""
     draw = np.random.default_rng(registry.FAKE_SEED)
     columns = [[window[column] for window in day] for day in days]
     for _ in range(registry.FAKE_PERMUTATIONS):
         order = draw.permutation(len(days))
         yield [[columns[source][index % len(columns[source])] for index in range(len(day))]
                for day, source in zip(days, order)]
+
+
+def membership_permutations(touched_days, all_days):
+    """The dial fake baseline's inputs: each day's touched windows handed whole to another day, as a same-size random
+    set of that day's windows matched on the clipped flag, carrying the first day's raws; drawn with the fixed seed."""
+    draw = np.random.default_rng(registry.FAKE_SEED)
+    pool = {day[0]["day"]: day for day in all_days}
+    for _ in range(registry.FAKE_PERMUTATIONS):
+        fake_days = []
+        for day in touched_days:
+            others = [name for name in pool if name != day[0]["day"]]
+            target = pool[draw.choice(others)]
+            fake_day = []
+            for window in day:
+                matched = [other for other in target if other["clipped"] == window["clipped"]] or target
+                fake_day.append(dict(matched[draw.integers(len(matched))], fake=window["dial_raw"]))
+            fake_days.append(fake_day)
+        yield fake_days
 
 
 # ---- The two tests -------------------------------------------------------------------------------------------------
@@ -104,9 +123,11 @@ def lean_test(conn, windows, reading, earned, horizon_name, through_day):
     fakes = [float(np.mean(lean_skill([[dict(window, fake=lean) for window, lean in zip(day, leans)]
                                        for day, leans in zip(days, permuted)], reading, earned, "fake")))
              for permuted in day_permutations(days, "lean")] if days else []
-    return test_result(conn, (registry.PUSH_READING_KIND, reading, registry.COMPONENT_VERSION), horizon_name,
-                       through_day, scored, lean_skill(days, reading, earned), fakes,
-                       len(days) >= registry.TRUST_MINIMUM_SESSIONS, lambda low: max(0.0, low) * room)
+    return test_result(conn, judged=(registry.PUSH_READING_KIND, reading, registry.COMPONENT_VERSION),
+                       horizon_name=horizon_name, through_day=through_day, scored=scored,
+                       day_means=lean_skill(days, reading, earned), fakes=fakes,
+                       enough=len(days) >= registry.TRUST_MINIMUM_SESSIONS,
+                       weight_rule=lambda low: max(0.0, low) * room)
 
 
 def band_scores(days, dial, earned, column="dial_raw"):
@@ -140,13 +161,14 @@ def dial_test(conn, windows, dial, earned, horizon_name, through_day):
               if window["raw"][dial] not in (None, width_dials.NO_EFFECT)]
     days = by_day(scored)
     gains, coverage = band_scores(days, dial, earned)
-    fakes = [float(np.mean(band_scores([[dict(window, fake=raw) for window, raw in zip(day, raws)]
-                                        for day, raws in zip(days, permuted)], dial, earned, "fake")[0]))
-             for permuted in day_permutations(days, "dial_raw")] if days else []
+    fakes = [float(np.mean(band_scores(fake_days, dial, earned, "fake")[0]))
+             for fake_days in membership_permutations(days, by_day(windows))] if days and len(by_day(windows)) > 1 \
+        else []
     enough = len(days) >= registry.TRUST_MINIMUM_SESSIONS if dial != registry.FED_DIAL else (
         len(scored) >= registry.FED_TEST_MINIMUM["windows"] and len(days) >= registry.FED_TEST_MINIMUM["sessions"])
-    result = test_result(conn, (registry.WIDTH_DIAL_KIND, dial, registry.COMPONENT_VERSION), horizon_name,
-                         through_day, scored, gains, fakes, enough, lambda low: 1.0)
+    result = test_result(conn, judged=(registry.WIDTH_DIAL_KIND, dial, registry.COMPONENT_VERSION),
+                         horizon_name=horizon_name, through_day=through_day, scored=scored, day_means=gains,
+                         fakes=fakes, enough=enough, weight_rule=lambda low: 1.0)
     result["coverage"] = coverage
     result["baseline_value"] = float(np.mean([interval_score(
         width_dials.half_width(window["undialed_half_width"], 1.0, 1.0, window["cap"]), window["move"])
@@ -159,11 +181,11 @@ def interval_score(half_width, move):
     return 2 * half_width + 2 / registry.INTERVAL_SCORE_ALPHA * max(0.0, abs(move) - half_width)
 
 
-def test_result(conn, judged, horizon_name, through_day, scored, day_means, fakes, enough, weight_rule):
+def test_result(conn, *, judged, horizon_name, through_day, scored, day_means, fakes, enough, weight_rule):
     """A test's result: the sample counts, then, with enough sessions, the mean score, its day-resampled interval,
-    the fake baseline's 95th percentile, and the verdict: passed (the interval above 0, the mean above the fake,
-    and the same on the two runs before) with the rule's weight, held (passing but not yet three runs), failed, or
-    too few sessions."""
+    the fake baseline's 95th percentile, and the verdict against the runs before: a pass (the interval above 0, the
+    mean above the fake) is held for three runs before the weight moves from 0, then passed; an earned weight that
+    fails is held_down (kept) for three runs before it returns to 0, failed at once when the interval sits below 0."""
     result = {"judged": judged, "counts": sample_counts(scored, horizon_name), "score": None, "interval": None,
               "fake": None, "weight": None, "verdict": registry.TOO_FEW_SESSIONS,
               "detail": f"{registry.TOO_FEW_SESSIONS}: {len({window['day'] for window in scored})} of "
@@ -171,17 +193,24 @@ def test_result(conn, judged, horizon_name, through_day, scored, day_means, fake
     if not enough:
         return result
     mean, low, high = range_fit.bootstrap_interval(day_means)
-    fake = float(np.percentile(fakes, registry.FAKE_PERCENTILE))
+    fake = float(np.percentile(fakes, registry.FAKE_PERCENTILE)) if fakes else None
+    earlier = store.prior_verdicts(conn, judged, horizon_name, through_day, registry.HOLD_RUNS - 1)
+    earned = bool(earlier) and earlier[0][0] in registry.EARNED_VERDICTS
     result.update({"score": mean, "interval": (low, high), "fake": fake, "weight": 0.0,
-                   "verdict": registry.VERDICT_FAILED, "detail": f"interval low {low:+.4f}, fake 95th {fake:+.4f}"})
-    if low > 0 and mean > fake:
-        earlier = store.prior_verdicts(conn, judged, horizon_name, through_day, registry.HOLD_RUNS - 1)
+                   "verdict": registry.VERDICT_FAILED, "detail": f"interval low {low:+.4f}, fake 95th "
+                   f"{fake if fake is None else round(fake, 4)}"})
+    if low > 0 and fake is not None and mean > fake:
         passes = 1 + sum(1 for _ in itertools.takewhile(
-            lambda verdict: verdict in (registry.VERDICT_PASSED, registry.VERDICT_HELD), earlier))
-        held = passes < registry.HOLD_RUNS
+            lambda run: run[0] in (registry.VERDICT_PASSED, registry.VERDICT_HELD), earlier))
+        held = passes < registry.HOLD_RUNS and not earned
         result.update({"verdict": registry.VERDICT_HELD if held else registry.VERDICT_PASSED,
                        "weight": 0.0 if held else weight_rule(low),
                        "detail": f"pass {passes} of {registry.HOLD_RUNS} runs"})
+    elif earned and high >= 0:
+        fails = 1 + sum(1 for _ in itertools.takewhile(lambda run: run[0] == registry.VERDICT_HELD_DOWN, earlier))
+        if fails < registry.HOLD_RUNS:
+            result.update({"verdict": registry.VERDICT_HELD_DOWN, "weight": earlier[0][1],
+                           "detail": f"fail {fails} of {registry.HOLD_RUNS} runs, weight kept"})
     return result
 
 

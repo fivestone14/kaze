@@ -168,7 +168,7 @@ CAP_PORTION = 0.95
 NO_EFFECT = 1.0
 WIDTH_DIAL_MEANING = {
     FED_DIAL: "wider from a Fed decision to the close, Will's owner rule",
-    RELEASE_DIAL: "wider when a timed economic release lands inside the window",
+    RELEASE_DIAL: "a fitted ratio, either way, when a timed economic release lands inside the window",
     CLOSING_DIAL: "wider for unclipped windows ending in the last 15 minutes",
     ACCELERATION_DIAL: "fast speed over slow speed, the pace picking up or fading",
     OPTIONS_VS_TAPE_DIAL: "the options-implied swing against the tape swing",
@@ -233,15 +233,16 @@ EVALUATED_KINDS = (PUSH_READING_KIND, WIDTH_DIAL_KIND)
 # group are read off that measure's registry row.
 WEIGHTED_MEASURE = {PUSH_READING_KIND: "push_lean_probability", WIDTH_DIAL_KIND: "width_multiplier"}
 VERDICT_COLUMN = "metric_text"
-VERDICT_PASSED, VERDICT_HELD, VERDICT_FAILED = "passed", "held", "failed"
-VERDICTS = (VERDICT_PASSED, VERDICT_HELD, VERDICT_FAILED, TOO_FEW_SESSIONS)
+VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED = "passed", "held", "held_down", "failed"
+VERDICTS = (VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED, TOO_FEW_SESSIONS)
+EARNED_VERDICTS = (VERDICT_PASSED, VERDICT_HELD_DOWN)
 BOOTSTRAP_BY_DAY = "bootstrap_by_day"
 INTERVAL_METHODS = (BOOTSTRAP_BY_DAY,)
 EARNED_LEANS, UNDIALED_BAND = "earned_leans", "undialed_band"
 BASELINES = (EARNED_LEANS, UNDIALED_BAND)
 DIAL_ON, DIAL_OFF, FAKE_BASELINE = "dial_on", "dial_off", "fake_baseline"
 LEAN_TEST = ("lean_brier_test", COMPONENT_VERSION)
-DIAL_TEST = ("dial_band_test", COMPONENT_VERSION)
+DIAL_TEST = ("dial_band_test", "2")
 TRUST_MINIMUM_SESSIONS = 20
 FED_TEST_MINIMUM = {"windows": 20, "sessions": 5}
 HOLD_RUNS = 3
@@ -253,16 +254,19 @@ INTERVAL_SCORE_ALPHA = 1 - BAND_PORTION
 TRUST_TEST_SHARED = {
     "sample": "live first-built base decisions whose grade counts", "replay_counts": False,
     "minimum_sessions": TRUST_MINIMUM_SESSIONS, "interval": BOOTSTRAP_BY_DAY, "interval_percent": 95,
-    "hold_runs": HOLD_RUNS, "fake_permutations": FAKE_PERMUTATIONS, "fake_percentile": FAKE_PERCENTILE,
-    "fake_seed": FAKE_SEED,
+    "hold_runs": HOLD_RUNS, "hold_down_runs": HOLD_RUNS, "hold_down_unless": "the interval sits below 0",
+    "fake_permutations": FAKE_PERMUTATIONS, "fake_percentile": FAKE_PERCENTILE, "fake_seed": FAKE_SEED,
 }
 LEAN_TEST_PARAMETERS = {
     **TRUST_TEST_SHARED, "order": PUSH_READINGS, "moved_rung_share": LEAN_MOVED_RUNG_SHARE,
     "baseline": EARNED_LEANS, "weight": "interval low x the room left under 1",
+    "fake": "each day's leans handed to another day's windows",
 }
 DIAL_TEST_PARAMETERS = {
     **TRUST_TEST_SHARED, "order": WIDTH_DIALS, "baseline": UNDIALED_BAND, "alpha": INTERVAL_SCORE_ALPHA,
     "weight": 1, f"{FED_DIAL}_minimum": FED_TEST_MINIMUM,
+    "fake": "each day's touched windows and raws handed whole to a same-size set of another day's windows, matched "
+            "on the clipped flag",
 }
 # Phase 3: the rules every outcome and grade is stored under; a changed rule is a new version, never an edit.
 WINDOW_RULE = ("window_from_bars", "1")

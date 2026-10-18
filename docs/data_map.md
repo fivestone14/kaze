@@ -10,7 +10,7 @@ blank, or either path is not a folder.
 
 The target is the four-pillar store of 2026-10-16: fifteen tables defined by two registries, every value stored long as
 measure x subject x value x blank reason x known_at. `engine/store.py` creates only the tables and columns the phases
-so far write (schema version 8, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
+so far write (schema version 9, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
 word lists); each phase adds its tables through the next numbered schema step, applied in one transaction when a store
 is opened, and a step that changes a word list rebuilds the table in place (rows kept, children still pointing at it).
 At every open the store refuses to run if any table's text differs from the code's, so a fresh store and a migrated
@@ -19,7 +19,7 @@ one are identical. The full design, for reference, is:
 | Pillar | Table | What one row is | Built |
 |---|---|---|---|
 | Registry | `registry_measures` | one measure Kaze may store: name, plain meaning, unit, lane, the fact it carries, subjects, source feed, blank rule | Phase 1; seeded from `engine/registry.py` on every open (a name dropped from the code is dropped from the table, refused while rows still use it) |
-| Registry | `registry_components` | one versioned thing: a feed, the Schwab login, the collector, the range engine, a read lane | Phase 1 |
+| Registry | `registry_components` | one versioned thing: a feed, the Schwab login, the collector, the range engine, a read lane, a reading, a dial, a trust test | Phase 1; since Phase 4 a component whose parameters or meaning changed under the same version gets the next `revision_number` and earlier revisions and retired names stay, so the ledger's rows can be read against the parameters of their night |
 | Collect | `collect_snapshots` | one cut: a read at a moment, a nightly check, or a nightly history fit, with its slot, lane, origin, attempt, builder commit, source-file byte lengths, health counts, content hash | Phase 1; steps 2 and 3 rebuilt it for the `nightly_history_fit` kind and the `thin` status |
 | Collect | `collect_observations` | one measure x subject at one cut, with its feed's status and age at the cut | Phase 1 |
 | Collect | `collect_market_prices` | one price record; for now one SPX 1-minute bar with the moment it was known | Phase 1 (bar columns only) |
@@ -28,7 +28,7 @@ one are identical. The full design, for reference, is:
 | Reads | `reads_decisions`, `reads_decision_values` | one decision header (for now a `range_forecast` per channel) and every number, word or id inside it | Phase 2 (the columns the range engine fills) |
 | Reads | `reads_trade_legs` | the legs of a trade-shaped decision | later |
 | Results | `results_outcomes`, `results_outcome_values` | one outcome header (a `market_window`: what happened after a read over one horizon; a `forecast_grade`: how one decision graded against it) and every fact or grade inside it | Phase 3 (the columns the window and grade rules fill) |
-| Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | Phase 4 (the trust ledger; schema step 7, which also renamed the stored `fast_over_slow` dial `acceleration`; step 8 rebuilt it for the `held` verdict) |
+| Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | Phase 4 (the trust ledger; schema step 7, which also renamed the stored `fast_over_slow` dial `acceleration`; steps 8 and 9 rebuilt it for the `held` and `held_down` verdicts) |
 
 The table text lives in `engine/store_schema.py`; `engine/store.py` shapes, checks, writes and reads rows. Since
 schema step 5 the three header tables (`collect_snapshots`, `reads_decisions`, `results_outcomes`) carry an integer
@@ -322,7 +322,7 @@ read per channel with a raw and an applied value (`width_multiplier`, subject `a
 | Dial | Raw value | Evidence so far |
 |---|---|---|
 | `fed_window` | 2.6 when the window ends after an FOMC decision known at the cut; applied and tested outside the cap | Will's owner rule, graded with and without on every Fed read |
-| `release_window` | on the 5-minute channel 1.4, on the 30- and 60-minute channels the fitted release ratio (below), when a timed economic release has its own five minutes overlapping the window; a release is a calendar event in a `data` tier that is not a Fed kind (`FOMC*`, `FED_*`: decisions, minutes, pressers, testimony and speeches never count); 08:30 releases fall before the first window and never fire | x1.4 in the release's 5-minute window |
+| `release_window` | on the 5-minute channel 1.4, on the 30- and 60-minute channels the fitted release ratio (below), a ratio either way (the 60-minute fit stands at 0.947, narrower; the fit is data, there is no floor), when a timed economic release has its own five minutes overlapping the window; a release is a calendar event in a `data` tier that is not a Fed kind (`FOMC*`, `FED_*`: decisions, minutes, pressers, testimony and speeches never count); 08:30 releases fall before the first window and never fire | x1.4 in the release's 5-minute window |
 | `closing_window` | the fitted closing ratio for an unclipped window ending inside the last 15 minutes before the close (the family the ratio is fitted on: 5-minute reads 15:40-15:50, 30-minute reads 15:15-15:25, 60-minute reads 14:45-14:55); clipped windows never, they are their own graded slice | the 10-17 history re-test on replayed bars (not the ledger): the 5-minute band held 57.9% in the last 15 minutes, a time-of-day widening brought it to 77.4% |
 | `acceleration` | fast speed (5-minute half-life) over slow speed (30-minute) | none yet |
 | `options_vs_tape` | (options-implied swing over tape swing) ^ 0.4 | none yet |
@@ -344,15 +344,16 @@ are settled, for the next session. One row per judged thing x channel x metric x
 columns: `evaluation_id` is the run (`trust_ledger|<data-through day>|<judge>@<version>`), `evaluation_row_id` the run
 plus the judged component, channel, slice and metric; `evaluation_kind` is `trust_weight` (the weight row) or
 `skill_metric`; `evaluated_kind`, `evaluated_name`, `evaluated_version` name the reading or dial (`push_reading` /
-`width_dial`, version 1); `judge_name` and `judge_version` the test (`lean_brier_test@1`, `dial_band_test@1`);
+`width_dial`, version 1); `judge_name` and `judge_version` the test (`lean_brier_test@1`, `dial_band_test@2`);
 `signal_lane` and `overlap_group_name` are read off the measure the weight moves (`push_lean_probability`:
 `push` / `direction_all_sources`; `width_multiplier`: `pull` / `width_all_adjustments`); `horizon_name` the channel
 and `graded_price_measure` `end_price` (trust is kept apart per channel and price measure); `slice_key` is `whole`,
 `dial_on` / `dial_off` on the coverage rows, `fake_baseline` on the control row; `metric_name` a `trust_ledger`
 measure and `metric_value` its value, with `blank_reason` `too_few_sessions` when there is none; `metric_text` (the
-design's column) holds the **verdict**: `passed`, `held`, `failed` or `too_few_sessions`; `metric_interval_low` /
-`metric_interval_high` with `interval_method = bootstrap_by_day`; `baseline_name` (`earned_leans` or `undialed_band`)
-and `baseline_metric_value` (the baseline's own score: for a dial the undialed band's mean interval score);
+design's column) holds the **verdict**: `passed`, `held`, `held_down`, `failed` or `too_few_sessions`;
+`metric_interval_low` / `metric_interval_high` with `interval_method = bootstrap_by_day`; `baseline_name`
+(`earned_leans` or `undialed_band`) and `baseline_metric_value` (the baseline's own score: for a dial the undialed
+band's mean interval score);
 `sessions_count`, `independent_windows_count` (rows x 5 / horizon minutes), `rows_count` and
 `live_frozen_rows_count` describe the sample and `data_from_trade_date` / `data_through_trade_date` its span;
 `trade_date` is the session the row is in force for and `applies_from_at` its open; `was_pre_registered` is 1 (every
@@ -372,7 +373,7 @@ sessions short); `known_at` = `written_at` the write, `row_origin` `live_frozen`
   under 1; each day scores 1 - (Brier with the lean added / Brier of the baseline) (`brier_skill_portion`, mean of
   the day means); the weight is the interval's low end floored at 0 times the room left, so leans never stack past
   the cap of 1.
-- **Dials** (`dial_band_test@1`), in the registry's order, each on top of the dials earned before it: over the
+- **Dials** (`dial_band_test@2`), in the registry's order, each on top of the dials earned before it: over the
   windows the dial touches (raw not 1.00), the end band's half-width is rebuilt from swing x stretch with the earned
   dials, capped (the Fed outside the cap), with and without this dial's raw; each window scores the band's interval
   score (2h + 10 x the points the move landed outside; a proper score for an 80% band) and the gain is without less
@@ -382,10 +383,16 @@ sessions short); `known_at` = `written_at` the write, `row_origin` `live_frozen`
 - **What a pass needs:** 20 live sessions in the test's sample (the Fed dial, a pre-registered exception, 20 Fed
   windows over at least 5 FOMC sessions, since 20 FOMC sessions is years; the Fed and release dials are the
   slow-learning event family, the release dial needing 20 sessions with an in-session release); the interval's low
-  end above 0; the score above the 95th percentile of 200 fake baselines, each the same test with the dial's raw
-  values (or the reading's leans) handed from one day to another day's windows (`FAKE_SEED` 1), written on the
-  `fake_baseline` row; and the same verdict on the two nightly runs before (the hold rule: the first and second
+  end above 0; the score above the 95th percentile of 200 fake baselines (`FAKE_SEED` 1, written on the
+  `fake_baseline` row): for a lean, the same test with each day's leans handed to another day's windows; for a dial,
+  the same test with each day's touched windows handed whole to another day, as a same-size random set of that day's
+  windows matched on the clipped flag and carrying the first day's raws (version 2: a dial whose raw is a constant,
+  the Fed's 2.6 or the 5-minute release's 1.4, or a slowly drifting ratio, would otherwise reproduce the test
+  itself, as version 1 did); and the same verdict on the two nightly runs before (the hold rule: the first and second
   passing runs are `held` with weight 0, the third `passed` with the weight).
+- **On the way down:** an earned weight that fails the test is `held_down`, the weight kept, for two runs and
+  returns to 0 (`failed`) on the third failing run in a row; when the whole interval sits below 0 (the dial or lean
+  hurts) it returns to 0 at once. A pass while earned is `passed` again with the fresh weight.
 - **Not enough live sessions.** Short of the minimum every row of that test is blank `too_few_sessions`, the
   verdict is `too_few_sessions` and `detail_text` says how many of 20; no weight moves from 0. Today, with no live
   session yet, that is every row.
