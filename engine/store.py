@@ -275,10 +275,11 @@ def values_by_key(rows):
 
 
 def bars_known_by(snapshot, cut_at):
-    """The moment a read's bars must have been known by: its bar deadline when live, no limit when rebuilt later."""
+    """The moment a live read's bars must have been known by: its own write (which follows its bar wait) or its cut
+    bar's arrival stamp, whichever is later, so it sees every bar it stored itself; no limit for a rebuild."""
     if snapshot["row_origin"] == "history_rebuilt":
         return None
-    return session_clock.iso_utc(session_clock.bar_deadline(cut_at))
+    return max(snapshot["written_at"], session_clock.iso_utc(session_clock.bar_deadline(cut_at)))
 
 
 # ---- Checks ---------------------------------------------------------------------------------------------------------

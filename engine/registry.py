@@ -3,6 +3,7 @@
 # fixed word lists. The store writer refuses anything not listed here.
 import hashlib
 import json
+import re
 from collections import defaultdict
 
 from engine import mirai_files, session_clock
@@ -207,7 +208,7 @@ FIT_BLANK_MEANING = f"{NO_FIT_REASON} when no fit was known at the cut"
 NO_SPEED = f"{NOT_FORMED_REASON} before the session's second bar"
 POINTS_RANGE = dict(low=1000, high=20000)
 SCAN_MISSING = "feed_missing when no native scan has landed today"
-BARS_MISSING = "feed_missing when no bar has landed today"
+BARS_MISSING_MEANING = "feed_missing when no bar has landed today"
 SYMBOL_MISSING = "provider_refused_symbol when the quote is missing"
 NO_LOGIN_LINE = "not_known_at_read on rebuilt rows or when the auth watch printed ?"
 TAPE_BLANK = "feed_missing when the tape is absent; feed_stale when its newest trade is older than the stale limit"
@@ -221,20 +222,20 @@ MEASURES = [
                 "pull", "session_clock", low=0, high=390),
     # price
     measure_row("spx_price_points", "SPX close of the last finished 1-minute bar", "points", "number", "id",
-                "spx_level", feed="spx_bars", blank=BARS_MISSING, **POINTS_RANGE),
+                "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("prior_close_points", "SPX official close of the prior session, from the quotes feed", "points",
                 "number", "id", "spx_level", feed="watchlist_quotes",
                 blank="feed_missing when no quotes row has landed today", **POINTS_RANGE),
     measure_row("today_open_points", "the first 1-minute bar's open (may be a stale first print)", "points", "number",
-                "id", "spx_level", feed="spx_bars", blank=BARS_MISSING, **POINTS_RANGE),
+                "id", "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("session_high_points", "highest bar high so far, the first bar's stale print ignored", "points",
-                "number", "id", "spx_level", feed="spx_bars", blank=BARS_MISSING, **POINTS_RANGE),
+                "number", "id", "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("session_low_points", "lowest bar low so far, the first bar's stale print ignored", "points", "number",
-                "id", "spx_level", feed="spx_bars", blank=BARS_MISSING, **POINTS_RANGE),
+                "id", "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("vwap_points", "volume-weighted average price from the options scan", "points", "number", "id",
                 "spx_level", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
     measure_row("range_so_far_points", "session high minus session low", "points", "number", "pull", "spx_move_size",
-                feed="spx_bars", blank=BARS_MISSING, low=0, high=2000),
+                feed="spx_bars", blank=BARS_MISSING_MEANING, low=0, high=2000),
     measure_row("move_points", "SPX close now minus its close at the since point (signed)", "points", "number",
                 group="spx_move_sign", subjects="since", feed="spx_bars",
                 blank="not_formed_yet before the since point exists today", low=-2000, high=2000, **PUSH_LANE_DEFAULTS),
@@ -491,8 +492,19 @@ MEASURES = [
 MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
 
 
+WORD_LISTS = (LANES, FEED_STATUSES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAPSHOT_KINDS, SNAPSHOT_STATUSES,
+              SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS, DECISION_STATUSES,
+              VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS, SUBJECT_KINDS,
+              GRADE_START_RULE_NAMES, WIDTH_DIALS)
+WORD_SHAPE = re.compile(r"^[a-z0-9_$/]+$")
+
+
 def check_registry():
-    """Refuse a registry that breaks the rules: duplicates, unknown lanes, subjects or feeds, one fact in two lanes."""
+    """Refuse a registry that breaks the rules: a word that is not one lowercase word (a constant rebound to prose),
+    duplicates, unknown lanes, subjects or feeds, one fact in two lanes."""
+    for words in WORD_LISTS:
+        if len(set(words)) != len(words) or not all(WORD_SHAPE.match(word) for word in words):
+            raise ValueError(f"registry word list {words} must be distinct lowercase single words")
     if len(MEASURES_BY_NAME) != len(MEASURES):
         raise ValueError("duplicate measure name in the registry")
     lanes_by_group = defaultdict(set)

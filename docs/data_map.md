@@ -62,8 +62,13 @@ was capped at the close, so the scoreboard can split that slice without reading 
   (`file_modified_at`). An outcome's `label_resolved_at` is the event time its label became knowable: for a rebuilt
   window the `known_at` of the last-arriving bar inside it (13:07:02 for the 12:35 read's 30-minute window), for a
   live window and for any window with no bars the moment it was written; `written_at` always says when it was written.
-  A live read and its grading use only bars known by the read's bar deadline (the cut plus 101 s, `bar_deadline`), so
-  a bar written later by a rebuild or a backfill is not seen by a live cut; a rebuild sees every bar of its day.
+  Backfilled bars (`file_modified_at`) carry the Mirai file's change time, so a rebuilt label on a backfilled day
+  (every session before 2026-10-16) resolves at that file time, weeks after its window; schema step 6 re-stamped the
+  stored rows the same way. A live read, its grading and its phone block use only bars known by the read's own write
+  or its cut bar's arrival stamp, whichever is later (`bars_known_by`), so a read sees every bar it stored itself and
+  nothing a later process stored. A rebuild run while the session is still open stamps the bars it writes with its
+  write time (`written_at`), never `bar_end_plus_62_seconds`, so a live read that follows does not take them for
+  bars it saw; a rebuild after the close stamps them by arrival. A rebuild sees every bar of its day.
 - **Origins.** `row_origin` is `live_frozen` (written during the session, first attempt), `live_rebuilt` (a second run
   at the same live cut; the first is never deleted) or `history_rebuilt` (built later from Mirai's files as they stood
   at the cut; re-running replaces it, decisions and their outcomes and grades included). The nightly compares
@@ -170,7 +175,7 @@ left out of the speed, a window starting or ending on it is skipped, and the pat
 **Where it lands.** The readings (1, 2, 6 and the path: `path_up_points`, `path_down_points`,
 `trend_straightness_ratio`) are observations on the read's own snapshot. Each read then writes one `reads_decisions`
 row per channel (`decision_kind = range_forecast`, producer `range_engine@1`, `run_kind` `live` or `history_replay`,
-`horizon_name`, `graded_price_measure = end_price`, `grade_start_rule_version = at_read`, the grade window,
+`horizon_name`, `graded_price_measure = end_price`, `grade_start_rule_name = at_read` version `1`, the grade window,
 `decision_status` ok / clipped / blind with its reason) and its `reads_decision_values`: `band_centre_points`, the
 speed and swing used, `band_multiplier`, `stretch_recipe_name`, `fit_sessions_count`, `fit_windows_count` and
 `fit_snapshot_id` (which fit it used), `band_half_width_points`, `band_low_points` and `band_high_points` (band = 80
@@ -268,12 +273,12 @@ counts the windows its finished list holds.
 step 4 the file was 1,439 MB, 94% of it the three long value tables whose text ids (a value id carried its outcome
 id, which carried the decision id, which carried the snapshot id) were 85% of each row and were stored twice more in
 the indexes. Step 5 (integer rowid keys, one unique index per value table, the header-copied columns dropped) took
-16.5 s to migrate and a 1.2 s VACUUM, and left 298 MB: observations 82 MB of table pages + 41 MB of index for
+8.5 s to migrate and a 0.9 s VACUUM, and left 298 MB: observations 82 MB of table pages + 41 MB of index for
 733,208 rows, decision values 33 + 24 MB for 376,068, outcome values 24 + 17 MB for 427,350, outcome headers 28 + 15
 MB for 34,188 (their text ids are the long ones left), decisions 12 + 5 MB, snapshots 3 + 1 MB. A rebuilt session of
 77 reads (9,908 observations, 5,082 decision values, 231 windows and 231 grades with 5,775 outcome values) costs
 4.0 MB; a live day writes that once live and once again rebuilt by the nightly, about 8 MB a day, so 100 sessions of
-live running add about 0.8 GB. The nightly's gzipped backup is about a third of the file. There is no retention rule
+live running add about 0.8 GB. The nightly's gzipped backup is about 12% of the file (35 MB). There is no retention rule
 yet; Will decides one at about 100 sessions.
 
 ## Feeds (what Kaze reads from Mirai)
@@ -302,8 +307,9 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | `logs/read_log.txt` | one line per read-job run (including the quiet "market closed" lines) and any crash's traceback | the read job |
 | `logs/nightly_log.txt` | one health line per nightly run, one line per parity mismatch, the backup warning when the copy shares the store's disk, and the hourly "not due" lines | the nightly job |
 | `logs/rebuild_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`; a `--scoreboard` or `--pass-test` crash) | hand runs |
-| `nightly_done.txt` | the New York day the nightly last finished (the once-a-day rule reads it) | the nightly job |
-| `backups/kaze-<day>.sqlite.gz` (or the same under `KAZE_BACKUP_DIR` when `.env` sets it) | the last 5 nightly copies of the store: `VACUUM INTO` a dated file, `integrity_check` on it, then gzipped; older copies go only after the new one passed | the nightly job |
+| `nightly_done.txt` | the session the nightly last finished (the once-per-session rule reads it) | the nightly job |
+| `backup_in_progress/` | where a backup copy is made, checked and gzipped before it moves, finished, to the backup folder; empty between nightlies | the nightly job |
+| `backups/kaze-<session>.sqlite.gz` (or the same under `KAZE_BACKUP_DIR` when `.env` sets it) | the last 5 nightly copies of the store: `VACUUM INTO` a dated file, `integrity_check` on it, gzipped, then moved in whole; older copies go only after the new one passed | the nightly job |
 | `logs/older/<day>/*.gz` | the logs of earlier days, kept 14 days | `engine/job_log.py` when a job first writes on a new day |
 | `/tmp/com.kaze.read.launchd.log`, `/tmp/com.kaze.nightly.launchd.log` | only what Python could not catch (a missing `.env`, an import error) | launchd |
 
@@ -315,7 +321,7 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, its range decisions, and the outcomes and grades of every window of that day ended and still open |
 | `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, the whole session's bars, then the session's outcomes and grades (the earlier rebuilt ones replaced with their reads); on a fresh store this is how a past session gets its grades |
 | `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
-| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once a day, on the first launch from 17:00 New York on when `nightly_done.txt` does not name today, so a box asleep at 17:15 catches up at 18:15) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, parity, the backup file); `nightly_done.txt` |
+| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once per session, on the first launch from 17:00 New York on when `nightly_done.txt` does not name the latest session, so a box asleep at 17:15 catches up at 18:15 and a weekend or holiday launch does nothing; a hand `--nightly` is refused with one line while the session is open and is a no-op once the session is done) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, parity, the backup file); `nightly_done.txt` |
 | `python3 -m engine.read_job --scoreboard [YYYY-MM-DD]` | by hand | nothing; prints the grades per session, run kind, channel, variant and clipped slice (one session, or every graded one) and the pooled last 20 sessions |
 | `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
 

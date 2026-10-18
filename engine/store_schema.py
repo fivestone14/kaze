@@ -4,7 +4,7 @@
 # integer rowid and keep one unique index on the design's own grain.
 from engine import registry
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -249,7 +249,24 @@ def schema_step_5(conn):
         rebuild_table(conn, table, VALUE_TABLE_PARENTS.get(table))
 
 
-SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5}
+def schema_step_6(conn):
+    """Phase 3 fix round: rebuilt outcomes with bars re-stamped with the moment their last-arriving bar was known
+    (the earliest stored copy of each minute), the rule the grader has written since; live rows keep their write."""
+    conn.execute(
+        "UPDATE results_outcomes SET label_resolved_at = ("
+        " SELECT MAX(first_known) FROM (SELECT MIN(p.known_at) AS first_known FROM collect_market_prices p"
+        "  WHERE p.trade_date = results_outcomes.trade_date AND p.price_kind = 'bar' AND p.instrument_symbol = ?"
+        "   AND p.priced_at >= results_outcomes.window_starts_at AND p.priced_at < results_outcomes.window_ends_at"
+        "  GROUP BY p.priced_at)) "
+        "WHERE row_origin = 'history_rebuilt' AND label_status IN (?, ?) AND EXISTS ("
+        " SELECT 1 FROM collect_market_prices p WHERE p.trade_date = results_outcomes.trade_date"
+        "  AND p.price_kind = 'bar' AND p.instrument_symbol = ? AND p.priced_at >= results_outcomes.window_starts_at"
+        "  AND p.priced_at < results_outcomes.window_ends_at)",
+        (registry.SPX_SYMBOL, *registry.LABELS_THAT_COUNT, registry.SPX_SYMBOL))
+
+
+SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
+                6: schema_step_6}
 
 
 def upgrade(conn):

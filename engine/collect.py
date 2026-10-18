@@ -440,15 +440,17 @@ def collect_feed_health(read, day, rows_received):
 
 
 def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
-    """Price rows for bars not yet stored under this origin: on time means known 62 s after the bar, late by arrival."""
+    """Price rows for bars not yet stored under this origin: a bar of the read's own slot, or any bar a rebuild writes
+    once the session has closed, is known 62 s after it ends; anything else is known when it is written."""
     already = store.stored_bar_times(conn, day.isoformat(), row_origin)
     own_slot_starts_at = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
+    session_closed = written_at >= session_clock.session_close(day, store.half_day_sessions(conn))
     rows = []
     for bar in bars:
         priced_at = session_clock.iso_utc(bar["at"])
         if priced_at in already:
             continue
-        if row_origin == "history_rebuilt" or bar["at"] >= own_slot_starts_at:
+        if (session_closed if row_origin == "history_rebuilt" else bar["at"] >= own_slot_starts_at):
             arrival = timedelta(seconds=session_clock.BAR_LENGTH_SECONDS + registry.BAR_ARRIVAL_SECONDS)
             known_at = session_clock.iso_utc(bar["at"] + arrival)
             rule = registry.BAR_ARRIVAL_RULE

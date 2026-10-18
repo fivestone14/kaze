@@ -236,26 +236,39 @@ def run_backfill_bars():
 
 # ---- The nightly ---------------------------------------------------------------------------------------------------
 
-def run_nightly_if_due():
-    """The nightly once a day: from 17:00 New York to midnight, the first launch on a day it has not run yet."""
-    now = session_clock.now_utc()
-    today = session_clock.to_eastern(now).date().isoformat()
+def nightly_done_for():
+    """The session the nightly last finished, from its marker file, or None."""
     marker = paths.nightly_done_file()
-    done = marker.read_text().strip() if marker.exists() else None
-    if session_clock.to_eastern(now).hour < session_clock.NIGHTLY_HOUR_EASTERN or done == today:
-        log(JOB_NIGHTLY, f"nightly not due at {session_clock.iso_eastern(now)} (last done {done}); nothing done")
+    return marker.read_text().strip() if marker.exists() else None
+
+
+def run_nightly_if_due():
+    """The nightly once per session: the first launch from 17:00 New York on whose latest session is not done yet."""
+    now = session_clock.now_utc()
+    session = session_clock.latest_trading_day(session_clock.to_eastern(now).date()).isoformat()
+    if session_clock.to_eastern(now).hour < session_clock.NIGHTLY_HOUR_EASTERN or nightly_done_for() == session:
+        log(JOB_NIGHTLY, f"nightly not due at {session_clock.iso_eastern(now)} (last done for {nightly_done_for()}); "
+                         "nothing done")
         return
     run_nightly()
 
 
 def run_nightly():
     """Missed slots (on the session's own day), bars and rebuilds for today and any live day never rebuilt, history
-    fits, every open window of every session settled, parity, the backup, the health line, the done marker."""
-    conn = store.open_store()
+    fits, every open window of every session settled, parity, the backup, the health line, the done marker. Refused
+    while the session is still open, and a no-op once the latest session is done (a weekend or a second run)."""
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
     today = session_clock.latest_trading_day(session_clock.to_eastern(written_at).date())
     own_session = today == session_clock.to_eastern(written_at).date()
+    if own_session and written_at < session_clock.session_close(today, half_days):
+        log(JOB_NIGHTLY, f"nightly refused at {session_clock.iso_eastern(written_at)}: the session is open until "
+                         f"{session_clock.iso_eastern(session_clock.session_close(today, half_days))}")
+        return
+    if nightly_done_for() == today.isoformat():
+        log(JOB_NIGHTLY, f"nightly already done for {today}; nothing done")
+        return
+    conn = store.open_store()
     missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
     sessions = sorted({today.isoformat(), *store.live_sessions_not_rebuilt(conn)})
     bars_added = {}
@@ -285,7 +298,7 @@ def run_nightly():
                      f"failed grading step, {live_bars} live bars ({bars}); rebuilt {', '.join(rebuilt)}; {fits}; "
                      f"settled {', '.join(settled) or 'nothing open'}; parity: {parity}; "
                      f"backup {packed.name} ({pruned} older removed)")
-    paths.nightly_done_file().write_text(session_clock.to_eastern(written_at).date().isoformat() + "\n")
+    paths.nightly_done_file().write_text(today.isoformat() + "\n")
 
 
 def parity_summaries(conn, half_days, written_at):

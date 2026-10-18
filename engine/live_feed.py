@@ -168,7 +168,8 @@ def finished_windows(conn, trade_date, channel, read_lane):
             **{f"{side}_move": moves[side] for side in registry.WINDOW_SIDES},
             **farthest_moves(moves if moves["high"] is not None else None),
             "grades": {word: grade_word_value(graded, word, rung) for word in registry.GRADE_WORDS},
-            "band_used": {side: graded.get(f"band_used_ratio|{registry.subject_key(band=registry.BAND, side=side)}")
+            "band_used": {side: graded.get(store.value_key({"measure_name": "band_used_ratio", "subject_key":
+                                                            registry.subject_key(band=registry.BAND, side=side)}))
                           for side in registry.BAND_SIDES},
         })
     return entries
@@ -178,7 +179,7 @@ def grade_word_value(graded, word, rung_subject):
     """A grade word as True / False from the grade's values (None when ungraded), read the registry's one way."""
     measure_name, band, yes = registry.GRADE_WORD_MEASURE[word]
     subject = registry.subject_key(band=band) if band else rung_subject
-    stored = graded.get(f"{measure_name}|{subject}")
+    stored = graded.get(store.value_key({"measure_name": measure_name, "subject_key": subject}))
     return None if stored is None else stored == yes
 
 

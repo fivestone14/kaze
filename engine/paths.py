@@ -65,6 +65,11 @@ def backup_folder():
     return BACKUP_DIR if BACKUP_DIR is not None else KAZE_DATA / "backups"
 
 
+def backup_work_folder():
+    """Where a backup is copied, checked and gzipped before the finished file moves to the backup folder."""
+    return KAZE_DATA / "backup_in_progress"
+
+
 def nightly_done_file():
-    """The one-line file that says which New York day the nightly last finished."""
+    """The one-line file that says which session the nightly last finished."""
     return KAZE_DATA / "nightly_done.txt"
