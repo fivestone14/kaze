@@ -24,3 +24,13 @@ Folders appear as each build phase lands.
     git config core.hooksPath checks
 
 Private data lives outside this repo, in the folder `KAZE_DATA` points to.
+
+## Run
+
+    python3 -m engine.read_job                                  # one live read (quiet outside market hours)
+    python3 -m engine.read_job --at "2026-10-16 12:35:59"       # rebuild one past moment (New York time)
+    python3 -m engine.read_job --rebuild-day 2026-10-16         # rebuild every 5-minute read of a session
+    python3 -m engine.read_job --nightly                        # live-versus-rebuilt parity check
+    engine/jobs/install_jobs.sh                                 # load the two launchd jobs
+
+`docs/data_map.md` says what the store holds and who writes it.
