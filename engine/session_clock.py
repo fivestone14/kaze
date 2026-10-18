@@ -44,15 +44,15 @@ def to_utc(moment):
     return moment.astimezone(UTC)
 
 
-def eastern_moment(day, clock):
-    """A New York date plus wall-clock time as an aware datetime."""
-    return datetime.combine(day, clock, tzinfo=EASTERN)
+def eastern_datetime(day, clock_time):
+    """A New York date plus a wall-clock time as an aware datetime."""
+    return datetime.combine(day, clock_time, tzinfo=EASTERN)
 
 
-def eastern_clock(day, text):
+def eastern_from_hhmm(day, text):
     """A New York date plus an 'HH:MM' string as an aware datetime."""
     hour, minute = (int(part) for part in text.split(":"))
-    return eastern_moment(day, time(hour, minute))
+    return eastern_datetime(day, time(hour, minute))
 
 
 def parse_typed_eastern(text):
@@ -81,12 +81,12 @@ def latest_trading_day(day):
 
 def session_open(day):
     """09:30 New York on this day."""
-    return eastern_moment(day, SESSION_OPEN)
+    return eastern_datetime(day, SESSION_OPEN)
 
 
 def session_close(day, half_days):
     """The close on this day: 13:00 New York on a listed half day, else 16:00."""
-    return eastern_moment(day, HALF_DAY_CLOSE if day in half_days else FULL_DAY_CLOSE)
+    return eastern_datetime(day, HALF_DAY_CLOSE if day in half_days else FULL_DAY_CLOSE)
 
 
 def session_minutes(day, half_days):
@@ -128,7 +128,7 @@ def is_read_slot(day, slot, half_days):
 
 def slot_start(day, slot):
     """The first second of the slot minute, when launchd fires the read."""
-    return eastern_clock(day, slot)
+    return eastern_from_hhmm(day, slot)
 
 
 def cut_for_slot(day, slot):

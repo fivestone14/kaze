@@ -1,6 +1,7 @@
 # Builds one read: Mirai's files as they stood at a cut become one snapshot row, one observation per measure (a blank
 # carries its reason, never 0.0), the calendar facts as known, and the session's new bars stamped by arrival.
 # Raw inputs only; speed and bands are Phase 2.
+import functools
 import json
 import subprocess
 import time
@@ -20,7 +21,7 @@ HEADLINE_WINDOW_MINUTES = 60
 BAR_LENGTH_SECONDS = 60
 STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
-GAP_MARKERS_MEANING_ZERO_COVERAGE = TAPE_WINDOW_MINUTES
+GAP_MARKERS_FOR_EMPTY_WINDOW = TAPE_WINDOW_MINUTES
 MISSING_FEED_STATE = {"status": "missing", "age": None, "market_at": None, "received_at": None}
 SOURCE_FILES = {"spx_bars": mirai_files.SPX_BARS, "watchlist_quotes": mirai_files.WATCHLIST_QUOTES,
                 "options_scan": mirai_files.OPTIONS_SCANS, "options_tape": mirai_files.OPTIONS_TAPE,
@@ -73,14 +74,11 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     """Read every Mirai file at the cut; returns the snapshot row, observations, new bar rows and feed states."""
     started = time.monotonic()
     day = session_clock.to_eastern(cut_at).date()
-    snapshot = read_snapshot_row(cut_at, row_origin, written_at, slot, slot_status)
+    snapshot = snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status)
     read = ReadBuilder(snapshot, cut_at)
-    live_twin = store.live_snapshot_at(conn, snapshot["cut_at"]) if row_origin == "history_rebuilt" else None
-    file_limits = {}
-    if live_twin and live_twin["source_files_json_text"]:
-        file_limits = json.loads(live_twin["source_files_json_text"])
+    file_limits = source_file_limits(conn, day, row_origin, snapshot["cut_at"])
     if row_origin != "history_rebuilt":
-        snapshot["source_files_json_text"] = json.dumps(source_file_bytes(day), sort_keys=True)
+        snapshot["source_files_json_text"] = json.dumps(file_limits, sort_keys=True)
 
     bars = mirai_files.read_spx_bars(day, cut_at)
     collect_prices(read, bars, bar_arrived)
@@ -106,12 +104,12 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     return snapshot, read.observations, bar_rows, read.feed_states
 
 
-def read_snapshot_row(cut_at, row_origin, written_at, slot, slot_status):
+def snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status):
     """The collect_snapshots row of a read at this cut, with its slot, lane and lateness."""
     commit, dirty = git_head()
     day = session_clock.to_eastern(cut_at).date()
     lane = session_clock.lane_for_slot(slot)
-    snapshot = store.snapshot_row("read", session_clock.iso_utc(cut_at), day.isoformat(), row_origin,
+    snapshot = store.base_snapshot_row("read", session_clock.iso_utc(cut_at), day.isoformat(), row_origin,
                                   session_clock.iso_utc(written_at), commit, dirty)
     snapshot.update({
         "read_id": f"{lane}:{session_clock.iso_eastern(cut_at)}", "read_lane": lane,
@@ -125,6 +123,7 @@ def read_snapshot_row(cut_at, row_origin, written_at, slot, slot_status):
     return snapshot
 
 
+@functools.lru_cache(maxsize=1)
 def git_head():
     """The repo's HEAD commit and whether the working tree had uncommitted changes; blanks when git is unavailable."""
     try:
@@ -137,8 +136,13 @@ def git_head():
     return head.stdout.strip(), int(bool(status.stdout.strip()))
 
 
-def source_file_bytes(day):
-    """Byte length of each source file right now, so a rebuild can read only what the live read could see."""
+def source_file_limits(conn, day, row_origin, cut_at_iso):
+    """Byte length per source file this read may parse: measured now when live, the live twin's record when rebuilt."""
+    if row_origin == "history_rebuilt":
+        live_twin = store.live_snapshot_at(conn, cut_at_iso)
+        if live_twin and live_twin["source_files_json_text"]:
+            return json.loads(live_twin["source_files_json_text"])
+        return {}
     sizes = {feed: mirai_files.file_bytes(template, day) for feed, template in SOURCE_FILES.items()}
     return {feed: size for feed, size in sizes.items() if size is not None}
 
@@ -281,14 +285,16 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes):
     read.note_feed("options_tape", window["newest_trade_at"], present=window["present"])
     counted = read.feed_ok("options_tape")
     read.add_observation("options_trades_last_30_minutes_count", window["trades"] if counted else None)
-    read.add_observation("options_call_premium_last_30_minutes_usd", round(window["calls_usd"], 2) if counted else None)
-    read.add_observation("options_put_premium_last_30_minutes_usd", round(window["puts_usd"], 2) if counted else None)
+    calls_usd = round(window["calls_usd"], store.MONEY_DECIMALS) if counted else None
+    puts_usd = round(window["puts_usd"], store.MONEY_DECIMALS) if counted else None
+    read.add_observation("options_call_premium_last_30_minutes_usd", calls_usd)
+    read.add_observation("options_put_premium_last_30_minutes_usd", puts_usd)
     sided = window["bull_usd"] + window["bear_usd"]
     bullish = round(window["bull_usd"] / sided, store.STORED_DECIMALS) if counted and sided > 0 else None
     read.add_observation("bullish_portion_of_sided_premium", bullish, blank="no_activity" if counted else None)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
-    coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_MEANING_ZERO_COVERAGE) if counted else None
+    coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_FOR_EMPTY_WINDOW) if counted else None
     read.add_observation("feed_coverage_last_30_minutes_portion", coverage, source="options_tape", feed="options_tape")
     if not bars:
         for side in ("call", "put"):
@@ -312,14 +318,16 @@ def collect_overnight(read, night):
 def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
     """Events still ahead today, taken from the store's calendar facts as they were known at the cut."""
     if calendar is not None:
-        store.write_calendar_facts(conn, calendar_fact_rows(calendar, row_origin, written_at))
+        first_copy = not store.has_calendar_facts(conn)
+        store.write_calendar_facts(conn, calendar_fact_rows(calendar, row_origin, written_at, first_copy))
     known_at = store.calendar_known_at(conn, session_clock.iso_utc(cut_at))
     known_moment = session_clock.parse_iso(known_at) if known_at else None
-    read.note_feed("event_calendar", known_moment, received_at=known_moment, present=known_moment is not None)
+    if calendar is None or known_moment is not None:
+        read.note_feed("event_calendar", known_moment, received_at=known_moment, present=known_moment is not None)
     if known_moment is None:
-        read.add_blank_observations(("events_left_today_count", "next_event_kind", "does_calendar_cover_day"),
-                                    "feed_missing")
-        read.add_observation("minutes_until_next_event", None, blank="feed_missing", impact="any")
+        reason = "feed_missing" if calendar is None else "not_known_at_read"
+        read.add_blank_observations(("events_left_today_count", "next_event_kind", "does_calendar_cover_day"), reason)
+        read.add_observation("minutes_until_next_event", None, blank=reason, impact="any")
         return
     covers = calendar is not None and mirai_files.calendar_covers(calendar, day)
     read.add_observation("does_calendar_cover_day", covers)
@@ -337,9 +345,12 @@ def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
     read.add_observation("next_event_kind", next_kind, blank="none_left_today")
 
 
-def calendar_fact_rows(calendar, row_origin, written_at):
-    """Calendar facts for the store: every timed event and every half-day close, known since the file last changed."""
+def calendar_fact_rows(calendar, row_origin, written_at, first_copy):
+    """Calendar facts for the store: events and half days, known since the built date (first copy) or the file change."""
     known_at = session_clock.iso_utc(calendar["changed_at"])
+    if first_copy:
+        built_day = date.fromisoformat(calendar["built"])
+        known_at = session_clock.iso_utc(session_clock.eastern_from_hhmm(built_day, "00:00"))
     written = session_clock.iso_utc(written_at)
     version = str(calendar.get("built"))
     facts = []
@@ -351,12 +362,12 @@ def calendar_fact_rows(calendar, row_origin, written_at):
                   "calendar_tier": str(event.get("tier")), "source_reference_text": event.get("source"),
                   "row_origin": row_origin, "written_at": written}
         if event.get("kind") == mirai_files.HALF_DAY_EVENT_KIND:
-            closes_at = session_clock.iso_utc(session_clock.eastern_clock(date.fromisoformat(event["date"]),
+            closes_at = session_clock.iso_utc(session_clock.eastern_from_hhmm(date.fromisoformat(event["date"]),
                                                                          event.get("time_et") or "13:00"))
             facts.append({"fact_kind": "session_date", "fact_id": event["date"], "fact_status": "half_day",
                           "session_closes_at": closes_at, **shared})
         if event.get("time_et"):
-            starts_at = session_clock.iso_utc(session_clock.eastern_clock(date.fromisoformat(event["date"]),
+            starts_at = session_clock.iso_utc(session_clock.eastern_from_hhmm(date.fromisoformat(event["date"]),
                                                                          event["time_et"]))
             fact_id = f"{event['date']}|{event['time_et']}|{event.get('kind')}"
             facts.append({"fact_kind": "scheduled_event", "fact_id": fact_id,
@@ -405,8 +416,8 @@ def collect_login(read, login, cut_at, row_origin):
     """The Schwab login from the auth watch's newest line; a rebuilt read cannot know it, so its rows stay blank."""
     usable = login is not None and login["days_left"] is not None
     if row_origin != "history_rebuilt":
-        read.note_feed("schwab_login", login["reported_at"] if login else None,
-                       received_at=login["reported_at"] if login else None, present=login is not None)
+        reported_at = min(login["reported_at"], cut_at) if login else None
+        read.note_feed("schwab_login", reported_at, received_at=reported_at, present=login is not None)
     if not usable:
         state = "unknown" if login else None
         read.add_observation("login_state", state, blank="not_known_at_read", login="schwab")
@@ -434,7 +445,8 @@ def collect_feed_health(read, day, rows_received):
         read.add_observation("feed_status", state["status"], source=feed, feed=feed)
         read.add_observation("feed_age_seconds", state["age"], source=feed, feed=feed)
     for feed, count in rows_received.items():
-        read.add_observation("rows_received_today_count", count, source=feed, feed=feed)
+        landed = read.feed_states[feed]["status"] != "missing"
+        read.add_observation("rows_received_today_count", count if landed else None, source=feed, feed=feed)
     for feed in registry.FEEDS_WITH_LINE_COUNTS:
         skipped = mirai_files.lines_skipped(SOURCE_FILES[feed], day)
         read.add_observation("lines_skipped_today_count", skipped, blank="feed_missing", source=feed, feed=feed)
@@ -445,13 +457,13 @@ def collect_feed_health(read, day, rows_received):
 def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
     """Price rows for bars not yet stored under this origin: on time means known 62 s after the bar, late by arrival."""
     already = store.stored_bar_times(conn, day.isoformat(), row_origin)
-    on_time_from = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
+    own_slot_starts_at = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
     rows = []
     for bar in bars:
         priced_at = session_clock.iso_utc(bar["at"])
         if priced_at in already:
             continue
-        if row_origin == "history_rebuilt" or bar["at"] >= on_time_from:
+        if row_origin == "history_rebuilt" or bar["at"] >= own_slot_starts_at:
             arrival = timedelta(seconds=BAR_LENGTH_SECONDS + registry.BAR_ARRIVAL_SECONDS)
             known_at = session_clock.iso_utc(bar["at"] + arrival)
             rule = registry.BAR_ARRIVAL_RULE

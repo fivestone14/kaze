@@ -3,6 +3,8 @@
 The one page to look Kaze's data up on. Everything Kaze keeps lives in one SQLite file, `kaze.sqlite`, in the folder
 `KAZE_DATA` points to (set in `.env`, never in the repo), beside a small live feed for the phone and the jobs' logs.
 Mirai's files under `KAZE_MIRAI_HOME` are the source of every market number; Kaze reads them and never writes there.
+Both folders must exist: the engine refuses to start (exit 1, one clear line) when `.env` is missing, a variable is
+blank, or either path is not a folder.
 
 ## The design and what Phase 1 builds of it
 
@@ -44,15 +46,18 @@ each source file at a live read, so a rebuild of that cut reads only what the li
 - **Origins.** `row_origin` is `live_frozen` (written during the session, first attempt), `live_rebuilt` (a second run
   at the same live cut; the first is never deleted) or `history_rebuilt` (built later from Mirai's files as they stood
   at the cut; re-running replaces it). The nightly compares `live_frozen` with `history_rebuilt`.
-- **Calendar as known.** Every read first copies Mirai's calendar into `collect_calendar_and_events` (a fact's
-  `known_at` is the calendar file's change time; an earlier copy keeps its first `known_at`), then reads the day's events
-  from the store with `known_at <= cut_at`. An event added to the file after a cut is not seen by that cut, live or
-  rebuilt.
+- **Calendar as known.** Every read first copies Mirai's calendar into `collect_calendar_and_events`, then reads the
+  day's events from the store with `known_at <= cut_at`, one row per fact (its newest version known at the cut, so a
+  new `built` stamp on the file never doubles a count). The very first copy stamps its facts with the calendar's own
+  `built` date (the file says they existed then); every later copy stamps new facts with the file's change time, and
+  an earlier copy of a fact keeps its first `known_at`. An event added after a cut is not seen by that cut, live or
+  rebuilt. A rebuild of a day before the calendar's `built` date finds no calendar and leaves the event measures
+  blank `not_known_at_read`.
 - **Tape and scan files land late.** Mirai writes tape lines in arrival order and a scan row at the end of its tick, so
-  a live read cannot see lines that arrive after the cut while a rebuild can. A live read records each source file's
-  byte length; a rebuild of the same cut reads only that prefix of the tape and scan files. For cuts with no live
-  twin (a hand `--at`, a day Kaze was not live) the rebuild sees the whole file, so the nightly counts tape and scan
-  differences separately as tolerated rather than as mismatches.
+  a live read cannot see lines that arrive after the cut while a rebuild can. A live read measures each source file's
+  byte length first, parses only that much itself, and records the lengths; a rebuild of the same cut reads the same
+  prefixes. For cuts with no live twin (a hand `--at`, a day Kaze was not live) the rebuild sees the whole file, so the
+  nightly counts tape and scan differences separately as tolerated rather than as mismatches.
 
 ## Reads and cuts
 
@@ -66,7 +71,8 @@ the rest are lane `range_every_5_minutes`. A `--at` rebuild uses the exact secon
 that second is a slot's own cut (HH:M5:59).
 
 `read_id` is `<lane>:<cut in New York time>`; `snapshot_id` is `read|<cut in UTC>|<origin>|kaze_collector@1|b<attempt>`.
-A scheduled slot no live read served gets a `snapshot_status = missed` row from the nightly.
+A scheduled slot no live read served gets a `snapshot_status = missed` row from the nightly, but only when the nightly
+runs on that session's own day; a hand `--nightly` on a later day never marks a past session Kaze never ran.
 
 ## What a read stores
 
@@ -134,7 +140,7 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | Job | When | Writes |
 |---|---|---|
 | `python3 -m engine.read_job` (launchd `com.kaze.read`) | every 5 minutes; builds only at the 09:35-15:55 slots on trading days, else one log line | one `live_frozen` snapshot (or `live_rebuilt` on a rerun), its observations, calendar facts, new bars, `live/latest.json` |
-| `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand | one `history_rebuilt` snapshot at that New York moment and the bars up to it |
+| `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment and the bars up to it |
 | `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows, plus the whole session's bars |
 | `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
 | `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15 and acts only in the 17:00 New York hour) | 17:15 New York | `missed` rows for unserved slots, the session's closing bars (when Kaze was live), the session rebuilt, one `nightly_check` snapshot per session with both live and rebuilt reads, and the health line |

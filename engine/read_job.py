@@ -102,7 +102,11 @@ def rebuild_read(conn, cut_at, slot, calendar, half_days):
 
 
 def run_rebuild_moment(cut_at):
-    """Rebuild the read at one past moment; it carries a slot when the moment is a slot's own cut second."""
+    """Rebuild the read at one past moment on a trading day; it carries a slot when the moment is a slot's own cut."""
+    day = session_clock.to_eastern(cut_at).date()
+    if not session_clock.is_trading_day(day):
+        log(JOB_REBUILD, f"{day} is not a trading day; nothing rebuilt")
+        return
     calendar, half_days = mirai_files.session_calendar()
     conn = store.open_store()
     snapshot, count, new_bars = rebuild_read(conn, cut_at, session_clock.slot_for_cut(cut_at), calendar, half_days)
@@ -166,12 +170,13 @@ def run_nightly_if_due():
 
 
 def run_nightly():
-    """Mark missed slots, store closing bars, rebuild the session, compare rebuilt with live, write one health line."""
+    """Mark missed slots (on the session's own day), store closing bars, rebuild, compare with live, log one line."""
     conn = store.open_store()
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
     today = session_clock.latest_trading_day(session_clock.to_eastern(written_at).date())
-    missed = write_missed_slots(conn, today, half_days, written_at)
+    own_session = today == session_clock.to_eastern(written_at).date()
+    missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
     live_reads = store.live_reads_count(conn, today.isoformat())
     closing_bars = write_session_bars(conn, today, "live_frozen", half_days, written_at) if live_reads else 0
     rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
@@ -184,7 +189,8 @@ def run_nightly():
         for mismatch in mismatches[:MISMATCH_LINES_LOGGED]:
             log(JOB_NIGHTLY, f"mismatch {day} {mismatch['cut_at']} {mismatch['measure_name']} "
                              f"{mismatch['subject_key']}: "
-                             f"live {store.pair_side(mismatch, 'live')} rebuilt {store.pair_side(mismatch, 'rebuilt')}")
+                             f"live {store.parity_side_value(mismatch, 'live')} "
+                             f"rebuilt {store.parity_side_value(mismatch, 'rebuilt')}")
     live_bars = store.bar_count(conn, today.isoformat(), "live_frozen")
     parity = "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
@@ -199,7 +205,7 @@ def write_missed_slots(conn, day, half_days, written_at):
     for slot in session_clock.day_slots(day, half_days):
         if slot in served:
             continue
-        snapshot = collect.read_snapshot_row(session_clock.cut_for_slot(day, slot), "live_frozen", written_at, slot,
+        snapshot = collect.snapshot_row_for_read(session_clock.cut_for_slot(day, slot), "live_frozen", written_at, slot,
                                              "missed")
         snapshot.update({"snapshot_status": "missed", "snapshot_status_reason": "no_live_read",
                          "slot_lateness_minutes": None})
@@ -211,7 +217,7 @@ def write_parity_check(conn, day, compared, mismatches, tolerated, half_days, wr
     """A nightly_check snapshot for the session with the parity measures as its observations."""
     commit, dirty = collect.git_head()
     cut_at = session_clock.session_close(date.fromisoformat(day), half_days)
-    snapshot = store.snapshot_row("nightly_check", session_clock.iso_utc(cut_at), day, "live_frozen",
+    snapshot = store.base_snapshot_row("nightly_check", session_clock.iso_utc(cut_at), day, "live_frozen",
                                   session_clock.iso_utc(written_at), commit, dirty)
     identical = (compared - len(mismatches)) / compared if compared else None
     observations = [

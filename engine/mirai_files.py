@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 
 from engine import paths
-from engine.session_clock import eastern_clock, parse_iso, session_open
+from engine.session_clock import eastern_from_hhmm, file_modified_at, parse_iso, session_open
 
 SPX_BARS = "market/spx_price_bars_by_minute/{day}.jsonl"
 WATCHLIST_QUOTES = "market/watchlist_quotes_by_minute/{day}.jsonl"
@@ -77,7 +77,7 @@ def lines_skipped(template, day):
     return SKIPPED_LINES.get(path) if path else None
 
 
-def rows_through(template, day, cut, time_field="ts", max_bytes=None):
+def rows_at_or_before(template, day, cut, time_field="ts", max_bytes=None):
     """A day file's rows whose time field is at or before the cut, each with a parsed 'at', oldest first as written."""
     kept = []
     for row in read_jsonl(day_file_path(template, day), max_bytes):
@@ -98,17 +98,17 @@ def newest_row_with(rows, field):
 
 def read_spx_bars(day, cut):
     """SPX 1-minute bars whose start is at or before the cut."""
-    return rows_through(SPX_BARS, day, cut)
+    return rows_at_or_before(SPX_BARS, day, cut)
 
 
 def read_quotes_rows(day, cut):
     """Watchlist rows (quotes and breadth bars) polled at or before the cut."""
-    return rows_through(WATCHLIST_QUOTES, day, cut)
+    return rows_at_or_before(WATCHLIST_QUOTES, day, cut)
 
 
 def read_native_scans(day, cut, max_bytes=None):
     """Options scans built from the native chain at or before the cut, within the first max_bytes of the file."""
-    scans = rows_through(OPTIONS_SCANS, day, cut, max_bytes=max_bytes)
+    scans = rows_at_or_before(OPTIONS_SCANS, day, cut, max_bytes=max_bytes)
     return [scan for scan in scans if str(scan.get("gex_source", "")).startswith("native")]
 
 
@@ -216,7 +216,7 @@ def atm_option_mids(day, cut, strike, max_bytes=None):
 
 def read_overnight_futures(day):
     """/ES 1-minute bars from 18:00 the evening before to the 09:30 open: high, low and newest bar start, or None."""
-    night_start = eastern_clock(day - timedelta(days=1), NIGHT_STARTS_AT)
+    night_start = eastern_from_hhmm(day - timedelta(days=1), NIGHT_STARTS_AT)
     open_at = session_open(day)
     highs, lows, newest = [], [], None
     for bar in read_jsonl(day_file_path(FUTURES_BARS, day)):
@@ -238,7 +238,7 @@ def read_event_calendar():
     if not path.exists():
         return None
     calendar = json.loads(path.read_text())
-    calendar["changed_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0)
+    calendar["changed_at"] = file_modified_at(path)
     return calendar
 
 
@@ -260,7 +260,7 @@ def calendar_covers(calendar, day):
 def read_claude_final_forecast(day, cut):
     """Mirai's newest live final forecast written at or before the cut with a usable 30-minute answer, or None."""
     newest = None
-    for row in rows_through(CLAUDE_FORECASTS, day, cut, time_field="written_at"):
+    for row in rows_at_or_before(CLAUDE_FORECASTS, day, cut, time_field="written_at"):
         if row.get("line_type") != "final_forecast" or row.get("test_variant") not in (None, "none"):
             continue
         if ((row.get("forecast") or {}).get("next_30_minutes") or {}).get("status") != "ok":
@@ -272,7 +272,7 @@ def read_claude_final_forecast(day, cut):
 
 def read_headlines(day, cut, minutes):
     """Headlines captured in the window to the cut, the newest capture time, and whether the file exists."""
-    rows = rows_through(HEADLINES, day, cut, time_field="captured_at")
+    rows = rows_at_or_before(HEADLINES, day, cut, time_field="captured_at")
     window_start = cut - timedelta(minutes=minutes)
     return {"present": day_file_path(HEADLINES, day) is not None,
             "count": sum(1 for row in rows if row["at"] >= window_start),
@@ -291,6 +291,5 @@ def read_login_state():
         match = AUTH_WATCH_LINE.search(line)
         if match:
             days_left = None if match.group(3) == "?" else float(match.group(3))
-            return {"state": match.group(1), "days_left": days_left,
-                    "reported_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0)}
+            return {"state": match.group(1), "days_left": days_left, "reported_at": file_modified_at(path)}
     return None

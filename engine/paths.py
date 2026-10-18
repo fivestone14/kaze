@@ -12,7 +12,7 @@ def read_env_file(path=ENV_FILE):
     """Read KEY=VALUE lines from the .env file into a dict, skipping blanks and comments."""
     values = {}
     if not path.exists():
-        raise FileNotFoundError(f"{path} is missing; copy .env.example to .env and fill in the two paths")
+        raise SystemExit(f"kaze: {path} is missing; copy .env.example to .env and fill in the two paths")
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -21,7 +21,10 @@ def read_env_file(path=ENV_FILE):
         values[key.strip()] = os.path.expanduser(value.strip())
     missing = [key for key in REQUIRED_KEYS if not values.get(key)]
     if missing:
-        raise KeyError(f"{path} lacks {', '.join(missing)}")
+        raise SystemExit(f"kaze: {path} lacks {', '.join(missing)}")
+    for key in REQUIRED_KEYS:
+        if not Path(values[key]).is_dir():
+            raise SystemExit(f"kaze: {key}={values[key]} in {path} is not a folder that exists")
     return values
 
 

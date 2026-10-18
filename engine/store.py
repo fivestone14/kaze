@@ -11,14 +11,15 @@ SCHEMA_VERSION = 1
 BUSY_TIMEOUT_SECONDS = 30
 VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
 STORED_DECIMALS = 6
+MONEY_DECIMALS = 2
 NUMBER_TOLERANCE = 10 ** -STORED_DECIMALS
 TOLERATED_PARITY_FEEDS = ("options_tape", "options_scan")
 INSERT_VERBS = {"fail": "INSERT", "replace": "INSERT OR REPLACE", "ignore": "INSERT OR IGNORE"}
 TABLE_COLUMNS = {}
 
 
-def words(options):
-    """A CHECK list for a word column."""
+def check_list(options):
+    """The quoted, comma-joined word list a CHECK constraint takes."""
     return ", ".join(f"'{word}'" for word in options)
 
 
@@ -28,9 +29,9 @@ SCHEMA_STEPS = {
 CREATE TABLE registry_measures (
     measure_name TEXT NOT NULL, measure_version INTEGER NOT NULL, plain_meaning_text TEXT NOT NULL,
     pillar_name TEXT NOT NULL, stored_in_table_name TEXT NOT NULL, subject_kinds_text TEXT NOT NULL,
-    value_type TEXT NOT NULL, value_column TEXT NOT NULL CHECK (value_column IN ({words(VALUE_COLUMNS)})),
+    value_type TEXT NOT NULL, value_column TEXT NOT NULL CHECK (value_column IN ({check_list(VALUE_COLUMNS)})),
     unit TEXT NOT NULL, allowed_words_text TEXT, allowed_minimum_number REAL, allowed_maximum_number REAL,
-    signal_lane TEXT NOT NULL CHECK (signal_lane IN ({words(registry.LANES)})),
+    signal_lane TEXT NOT NULL CHECK (signal_lane IN ({check_list(registry.LANES)})),
     information_group_name TEXT NOT NULL, overlap_group_name TEXT, positive_value_means TEXT NOT NULL,
     neutral_value_number REAL, is_history_derived INTEGER NOT NULL, source_feed_name TEXT,
     blank_means_text TEXT NOT NULL, max_carry_forward_seconds REAL, coverage_twin_measure_name TEXT,
@@ -47,18 +48,18 @@ CREATE TABLE registry_components (
 
 CREATE TABLE collect_snapshots (
     snapshot_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
-    snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ({words(registry.SNAPSHOT_KINDS)})),
+    snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ({check_list(registry.SNAPSHOT_KINDS)})),
     read_id TEXT, read_lane TEXT, read_lane_cadence_minutes REAL, scheduled_slot_eastern TEXT,
-    slot_status TEXT NOT NULL CHECK (slot_status IN ({words(registry.SLOT_STATUSES)})), slot_lateness_minutes REAL,
+    slot_status TEXT NOT NULL CHECK (slot_status IN ({check_list(registry.SLOT_STATUSES)})), slot_lateness_minutes REAL,
     market_moment_id TEXT NOT NULL, is_training_grid_read INTEGER NOT NULL, read_moment_set_by TEXT NOT NULL,
     cut_at TEXT NOT NULL, newest_input_market_at TEXT, known_at TEXT NOT NULL,
-    known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({words(registry.KNOWN_AT_RULES)})),
-    row_origin TEXT NOT NULL CHECK (row_origin IN ({words(registry.ROW_ORIGINS)})),
+    known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     build_attempt_number INTEGER NOT NULL, builder_name TEXT NOT NULL, builder_version TEXT NOT NULL,
     builder_code_commit TEXT, was_code_tree_dirty INTEGER, component_versions_json_text TEXT NOT NULL,
     source_files_json_text TEXT, build_started_at TEXT, build_seconds REAL, snapshot_content_sha256 TEXT,
     feeds_not_ok_count INTEGER, blank_values_count INTEGER,
-    snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ({words(registry.SNAPSHOT_STATUSES)})),
+    snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ({check_list(registry.SNAPSHOT_STATUSES)})),
     snapshot_status_reason TEXT, written_at TEXT NOT NULL,
     CHECK (newest_input_market_at IS NULL OR newest_input_market_at <= cut_at));
 CREATE INDEX ix_snapshots_day_cut ON collect_snapshots (trade_date, cut_at);
@@ -67,13 +68,13 @@ CREATE INDEX ix_snapshots_origin_cut ON collect_snapshots (row_origin, cut_at);
 CREATE TABLE collect_observations (
     observation_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES collect_snapshots (snapshot_id),
     trade_date TEXT NOT NULL, cut_at TEXT NOT NULL, known_at TEXT NOT NULL,
-    row_origin TEXT NOT NULL CHECK (row_origin IN ({words(registry.ROW_ORIGINS)})),
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     measure_name TEXT NOT NULL, measure_version INTEGER NOT NULL, subject_key TEXT NOT NULL, subject_points REAL,
     value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,
     value_origin TEXT NOT NULL CHECK (value_origin IN ('live', 'after_session_corrected')),
-    blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({words(registry.BLANK_REASONS)})),
+    blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
     source_feed_name TEXT,
-    feed_status TEXT CHECK (feed_status IS NULL OR feed_status IN ({words(registry.FEED_STATUSES)})),
+    feed_status TEXT CHECK (feed_status IS NULL OR feed_status IN ({check_list(registry.FEED_STATUSES)})),
     feed_age_seconds REAL, newest_input_market_at TEXT, newest_input_received_at TEXT,
     CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL) + (value_at IS NOT NULL)
            + (blank_reason IS NOT NULL) = 1),
@@ -84,8 +85,9 @@ CREATE INDEX ix_observations_measure_day ON collect_observations (measure_name, 
 CREATE TABLE collect_market_prices (
     price_record_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL, instrument_symbol TEXT NOT NULL,
     instrument_kind TEXT NOT NULL, price_kind TEXT NOT NULL, bar_minutes REAL, priced_at TEXT NOT NULL,
-    known_at TEXT NOT NULL, known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({words(registry.KNOWN_AT_RULES)})),
-    row_origin TEXT NOT NULL CHECK (row_origin IN ({words(registry.ROW_ORIGINS)})), value_origin TEXT NOT NULL,
+    known_at TEXT NOT NULL,
+    known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})), value_origin TEXT NOT NULL,
     source_feed_name TEXT NOT NULL, feed_status TEXT NOT NULL, quote_unit TEXT NOT NULL,
     open_in_quote_units REAL, high_in_quote_units REAL, low_in_quote_units REAL, close_in_quote_units REAL,
     volume_count INTEGER, quote_status TEXT NOT NULL, blank_reasons_text TEXT);
@@ -97,7 +99,7 @@ CREATE TABLE collect_calendar_and_events (
     fact_kind TEXT NOT NULL CHECK (fact_kind IN ('session_date', 'scheduled_event')),
     fact_id TEXT NOT NULL, fact_version TEXT NOT NULL, trade_date TEXT NOT NULL, starts_at TEXT,
     known_at TEXT NOT NULL, fact_name TEXT, calendar_tier TEXT, fact_status TEXT, session_closes_at TEXT,
-    source_reference_text TEXT, row_origin TEXT NOT NULL CHECK (row_origin IN ({words(registry.ROW_ORIGINS)})),
+    source_reference_text TEXT, row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     written_at TEXT NOT NULL);
 CREATE INDEX ix_calendar_day_known ON collect_calendar_and_events (trade_date, known_at);
 """,
@@ -167,7 +169,7 @@ def price_record_id_for(price):
             f"{price['value_origin']}|{price['row_origin']}")
 
 
-def snapshot_row(snapshot_kind, cut_at_iso, trade_date, row_origin, written_at_iso, commit, dirty):
+def base_snapshot_row(snapshot_kind, cut_at_iso, trade_date, row_origin, written_at_iso, commit, dirty):
     """A collect_snapshots row with the fields every kind shares; the caller adds slot and lane, the writer counts."""
     row = {
         "snapshot_kind": snapshot_kind, "trade_date": trade_date, "cut_at": cut_at_iso, "market_moment_id": cut_at_iso,
@@ -321,11 +323,18 @@ def write_calendar_facts(conn, facts):
 
 
 def calendar_events_known(conn, trade_date, cut_at_iso):
-    """The day's timed events the store knew by the cut, as (starts_at, kind) in time order."""
+    """The day's timed events known by the cut, one per fact (its newest known version), as (starts_at, kind)."""
     rows = conn.execute(
-        "SELECT starts_at, fact_name FROM collect_calendar_and_events WHERE fact_kind = 'scheduled_event' "
-        "AND trade_date = ? AND known_at <= ? ORDER BY starts_at", (trade_date, cut_at_iso)).fetchall()
+        "SELECT starts_at, fact_name FROM collect_calendar_and_events e WHERE fact_kind = 'scheduled_event' "
+        "AND trade_date = ? AND known_at <= ? AND known_at = (SELECT MAX(known_at) FROM collect_calendar_and_events n "
+        " WHERE n.fact_kind = e.fact_kind AND n.fact_id = e.fact_id AND n.known_at <= ?) "
+        "GROUP BY fact_id ORDER BY starts_at", (trade_date, cut_at_iso, cut_at_iso)).fetchall()
     return [(row["starts_at"], row["fact_name"]) for row in rows]
+
+
+def has_calendar_facts(conn):
+    """True once the store holds any calendar fact (the first copy stamps facts with the calendar's own built date)."""
+    return conn.execute("SELECT 1 FROM collect_calendar_and_events LIMIT 1").fetchone() is not None
 
 
 def calendar_known_at(conn, cut_at_iso):
@@ -339,23 +348,25 @@ def snapshot_exists(conn, snapshot_id):
     return conn.execute("SELECT 1 FROM collect_snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone() is not None
 
 
-LIVE_TRUTH_SQL = """
+FIRST_BUILT_LIVE_READS_SQL = """
     SELECT s.snapshot_id, s.cut_at, s.trade_date, s.source_files_json_text FROM collect_snapshots s
     WHERE s.snapshot_kind = 'read' AND s.row_origin IN ('live_frozen', 'live_rebuilt') AND s.snapshot_status != 'missed'
       AND s.build_attempt_number = (SELECT MIN(t.build_attempt_number) FROM collect_snapshots t
                                     WHERE t.cut_at = s.cut_at AND t.snapshot_kind = 'read'
-                                      AND t.row_origin IN ('live_frozen', 'live_rebuilt') AND t.snapshot_status != 'missed')
+                                      AND t.row_origin IN ('live_frozen', 'live_rebuilt')
+                                      AND t.snapshot_status != 'missed')
 """
 
 
 def live_snapshot_at(conn, cut_at_iso):
     """The first built live read at this cut (the live truth for parity and file prefixes), or None."""
-    return conn.execute(f"SELECT * FROM ({LIVE_TRUTH_SQL}) WHERE cut_at = ?", (cut_at_iso,)).fetchone()
+    return conn.execute(f"SELECT * FROM ({FIRST_BUILT_LIVE_READS_SQL}) WHERE cut_at = ?", (cut_at_iso,)).fetchone()
 
 
 def live_reads_count(conn, trade_date):
     """How many built live reads a session has (one per cut, whatever the attempt)."""
-    return conn.execute(f"SELECT COUNT(*) FROM ({LIVE_TRUTH_SQL}) WHERE trade_date = ?", (trade_date,)).fetchone()[0]
+    return conn.execute(f"SELECT COUNT(*) FROM ({FIRST_BUILT_LIVE_READS_SQL}) WHERE trade_date = ?",
+                        (trade_date,)).fetchone()[0]
 
 
 def live_slots_served(conn, trade_date):
@@ -370,7 +381,7 @@ def live_slots_served(conn, trade_date):
 def days_with_live_and_rebuilt_reads(conn):
     """Sessions that have at least one live read and one rebuilt read at the same cut."""
     rows = conn.execute(
-        f"SELECT DISTINCT l.trade_date FROM ({LIVE_TRUTH_SQL}) l JOIN collect_snapshots r "
+        f"SELECT DISTINCT l.trade_date FROM ({FIRST_BUILT_LIVE_READS_SQL}) l JOIN collect_snapshots r "
         "ON l.cut_at = r.cut_at AND r.snapshot_kind = 'read' AND r.row_origin = 'history_rebuilt' "
         "ORDER BY l.trade_date").fetchall()
     return [row["trade_date"] for row in rows]
@@ -384,7 +395,7 @@ def parity_pairs(conn, trade_date):
         + ", ".join(f"l.{column} AS live_{column}, r.{column} AS rebuilt_{column}" for column in VALUE_COLUMNS)
         + " FROM collect_observations l JOIN collect_observations r "
         " ON l.cut_at = r.cut_at AND l.measure_name = r.measure_name AND l.subject_key = r.subject_key "
-        f"WHERE l.trade_date = ? AND l.snapshot_id IN (SELECT snapshot_id FROM ({LIVE_TRUTH_SQL})) "
+        f"WHERE l.trade_date = ? AND l.snapshot_id IN (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL})) "
         "AND r.row_origin = 'history_rebuilt'", (trade_date,)).fetchall()
 
 
@@ -411,9 +422,9 @@ def pair_matches(pair):
         and pair["live_blank"] == pair["rebuilt_blank"]
 
 
-def pair_side(pair, side):
-    """One side of a parity pair as text: its value, or blank:<reason>."""
-    value = next((pair[f"{side}_{column}"] for column in VALUE_COLUMNS if pair[f"{side}_{column}"] is not None), None)
+def parity_side_value(pair, side):
+    """One side ('live' or 'rebuilt') of a parity pair as text: its value, or blank:<reason>."""
+    value = observation_value({column: pair[f"{side}_{column}"] for column in VALUE_COLUMNS})
     return value if value is not None else f"blank:{pair[f'{side}_blank']}"
 
 
