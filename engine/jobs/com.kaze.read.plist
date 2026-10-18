@@ -5,6 +5,7 @@
   <key>Label</key>
   <string>com.kaze.read</string>
 
+  <!-- install_jobs.sh replaces $HOME/kaze with the repo's real place when it installs this file. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
@@ -12,9 +13,9 @@
     <string>$HOME/kaze/engine/jobs/run_job.sh read</string>
   </array>
 
-  <!-- The 5-minute read. Fires at every minute ending in 0 or 5, all day; the job itself keeps only the
-       market-hours slots (09:35 to 15:55 New York) and exits with one log line otherwise, so no hour is
-       listed here and the box's own time zone does not matter. The :05 and :35 slots are the 30-minute reads. -->
+  <!-- The 5-minute read. Fires at every minute ending in 0 or 5, all day, in any time zone; the job itself keeps
+       only the market-hours slots (09:35 to 15:55 New York) and writes one log line otherwise. The :05 and :35
+       slots are the 30-minute reads. -->
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Minute</key><integer>0</integer></dict>
@@ -30,6 +31,13 @@
     <dict><key>Minute</key><integer>50</integer></dict>
     <dict><key>Minute</key><integer>55</integer></dict>
   </array>
+
+  <!-- Only what Python could not catch lands here (a missing .env, an import error);
+       the job's own log is under KAZE_DATA/logs. -->
+  <key>StandardOutPath</key>
+  <string>/tmp/com.kaze.read.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.kaze.read.launchd.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>

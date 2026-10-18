@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# launchd's one way into Kaze: go to the repo, find the data folder from .env, run the job and keep its output there.
-# launchd expands nothing in its log paths, so the job's own output file is chosen here, under $KAZE_DATA/logs.
+# launchd's one way into Kaze: find the repo from this script's own place, refuse loudly without .env, run the job.
+# The job writes its own log under KAZE_DATA/logs; only what Python cannot catch reaches launchd's capture file.
 set -u
-cd "$HOME/kaze" || exit 1
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
 job="${1:?usage: run_job.sh read|nightly}"
-data_dir="$(grep '^KAZE_DATA=' .env | cut -d= -f2-)"
-data_dir="${data_dir/#\~/$HOME}"
-mkdir -p "$data_dir/logs"
+cd "$repo" || exit 1
+if [[ ! -f .env ]]; then
+  echo "kaze $job: $repo/.env is missing; copy .env.example and fill in the two paths" >&2
+  exit 1
+fi
 case "$job" in
-  read) flags="" ;;
-  nightly) flags="--nightly" ;;
-  *) echo "unknown job $job" >&2; exit 2 ;;
+  read) exec /usr/bin/python3 -m engine.read_job ;;
+  nightly) exec /usr/bin/python3 -m engine.read_job --nightly-if-due ;;
+  *) echo "kaze: unknown job $job" >&2; exit 2 ;;
 esac
-exec /usr/bin/python3 -m engine.read_job $flags >> "$data_dir/logs/launchd_${job}_log.txt" 2>&1

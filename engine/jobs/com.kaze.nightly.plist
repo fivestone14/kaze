@@ -5,6 +5,7 @@
   <key>Label</key>
   <string>com.kaze.nightly</string>
 
+  <!-- install_jobs.sh replaces $HOME/kaze with the repo's real place when it installs this file. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
@@ -12,17 +13,18 @@
     <string>$HOME/kaze/engine/jobs/run_job.sh nightly</string>
   </array>
 
-  <!-- The nightly parity check and health line, once a day at 17:15 New York.
-       NOTE: launchd's StartCalendarInterval uses the box's own local time and ignores the TZ below (that
-       only scopes the spawned process). The station runs on Pacific, so Hour=14 Minute=15 is 14:15 PT,
-       which is 17:15 ET year-round (PT is ET minus 3 hours through daylight saving). -->
+  <!-- The nightly check. Fires at :15 of every hour in any time zone; the job itself runs only in the 17:00
+       New York hour (17:15 ET) and writes one log line otherwise, so the box's own time zone never matters. -->
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key>
-    <integer>14</integer>
     <key>Minute</key>
     <integer>15</integer>
   </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/com.kaze.nightly.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.kaze.nightly.launchd.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>
