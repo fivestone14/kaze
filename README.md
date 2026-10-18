@@ -36,6 +36,7 @@ Private data lives outside this repo, in the folder `KAZE_DATA` points to.
     python3 -m engine.read_job --pass-test                      # print the band's walk-forward coverage test
     engine/jobs/install_jobs.sh                                 # install the two launchd jobs
 
-Run `--nightly` once before any rebuild on a fresh store: it writes the history fit every read's band needs.
+On a fresh store run `--backfill-bars`, then `--nightly` (it writes the history fits every read's band needs), then
+any rebuild. `live/latest.json` carries `status: failed` with the reason when a live read crashes.
 
 `docs/data_map.md` says what the store holds and who writes it.

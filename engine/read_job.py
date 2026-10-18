@@ -12,6 +12,7 @@ BAR_WAIT_SECONDS = 100
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
 JOB_READ, JOB_NIGHTLY, JOB_REBUILD = "read", "nightly", "rebuild"
+RANGE_FAILED = "range_failed"
 
 
 def main():
@@ -43,8 +44,10 @@ def main():
             run_pass_test()
         else:
             run_live()
-    except Exception:
+    except Exception as failure:
         log(job, "FAILED\n" + traceback.format_exc().rstrip())
+        if job == JOB_READ:
+            live_feed.write_failed_feed(f"{type(failure).__name__}: {failure}")
         sys.exit(1)
 
 
@@ -72,7 +75,7 @@ def run_live():
     snapshot, observations, bars, feed_states = collect.build_read(
         conn, cut_at, "live_frozen", written_at, slot, slot_status, calendar, half_days,
         login=mirai_files.read_login_state(), bar_arrived=bar_arrived)
-    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at)
+    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at, JOB_READ)
     live_feed.write_live_feed(snapshot, observations, feed_states, forecast)
     reason = f", {snapshot['snapshot_status_reason']}" if snapshot["snapshot_status_reason"] else ""
     build = f"{snapshot['row_origin']} b{snapshot['build_attempt_number']}"
@@ -82,22 +85,34 @@ def run_live():
                   f"built in {snapshot['build_seconds']} s")
 
 
-def write_read(conn, snapshot, observations, bars, cut_at):
-    """Store a built read: its bars, then the range readings with the snapshot, then the range decisions."""
+def write_read(conn, snapshot, observations, bars, cut_at, job):
+    """Store a read: bars, then snapshot, readings and decisions in one transaction; a failed range step is marked."""
     new_bars = store.write_bars(conn, bars)
-    forecast = range_read.forecast_read(conn, snapshot, observations, cut_at)
-    observations.extend(range_read.reading_rows(snapshot, forecast))
-    store.write_snapshot(conn, snapshot, observations)
-    store.write_decisions(conn, *range_read.decision_rows(snapshot, forecast))
+    store.claim_snapshot_id(conn, snapshot)
+    forecast, decisions, values = None, (), ()
+    try:
+        forecast = range_read.forecast_read(conn, snapshot, observations, cut_at)
+        observations.extend(range_read.reading_rows(snapshot, observations, forecast))
+        decisions, values = range_read.decision_rows(snapshot, forecast)
+    except Exception:
+        log(job, "range step FAILED\n" + traceback.format_exc().rstrip())
+        forecast, decisions, values = None, (), ()
+        reason = snapshot["snapshot_status_reason"]
+        snapshot["snapshot_status_reason"] = f"{reason},{RANGE_FAILED}" if reason else RANGE_FAILED
+    store.write_snapshot(conn, snapshot, observations, decisions, values)
     return forecast, new_bars
 
 
 def band_summary(forecast):
-    """The 30-minute band in one phrase for a log line."""
-    channel = forecast["channels"]["30_minutes"]
-    if channel["half"] is None:
+    """The headline band in one phrase for a log line."""
+    if forecast is None:
+        return "range step failed"
+    channel = forecast["channels"][registry.HEADLINE_HORIZON]
+    band = channel["bands"][registry.BAND]
+    if band["half_width"] is None:
         return f"30-min band {channel['status']} ({channel['reason']})"
-    return f"30-min band {channel['lo']:.2f} to {channel['hi']:.2f} (half {channel['half']:.4f}, {channel['status']})"
+    return (f"30-min band {band['low']:.2f} to {band['high']:.2f} (half {band['half_width']:.4f}, "
+            f"{channel['status']})")
 
 
 def wait_for_bar(day, cut_at):
@@ -118,7 +133,7 @@ def rebuild_read(conn, cut_at, slot, calendar, half_days):
     snapshot, observations, bars, _ = collect.build_read(
         conn, cut_at, "history_rebuilt", session_clock.now_utc(), slot, "made" if slot else "not_scheduled", calendar,
         half_days)
-    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at)
+    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at, JOB_REBUILD)
     return snapshot, forecast, new_bars
 
 
@@ -191,7 +206,7 @@ def run_nightly_if_due():
 
 
 def run_nightly():
-    """Missed slots (on the session's own day), closing bars, history fits, rebuild, parity with live, one log line."""
+    """Missed slots (on the session's own day), the session's bars, history fits, rebuild, parity, one log line."""
     conn = store.open_store()
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
@@ -200,6 +215,7 @@ def run_nightly():
     missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
     live_reads = store.live_reads_count(conn, today.isoformat())
     closing_bars = write_session_bars(conn, today, "live_frozen", half_days, written_at) if live_reads else 0
+    write_session_bars(conn, today, "history_rebuilt", half_days, written_at)
     next_session = session_clock.next_trading_day(today)
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
@@ -216,7 +232,7 @@ def run_nightly():
                              f"rebuilt {store.parity_side_value(mismatch, 'rebuilt')}")
     live_bars = store.bar_count(conn, today.isoformat(), "live_frozen")
     parity = "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
-    fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'not possible'}"
+    fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
                      f"{rebuilt_reads} reads rebuilt, "
                      f"{live_bars} live bars ({closing_bars} added at the close); {fits}; parity: {parity}")
@@ -248,10 +264,9 @@ def write_missed_slots(conn, day, half_days, written_at):
 
 def write_parity_check(conn, day, compared, mismatches, tolerated, half_days, written_at):
     """A nightly_check snapshot for the session with the parity measures as its observations."""
-    commit, dirty = collect.git_head()
     cut_at = session_clock.session_close(date.fromisoformat(day), half_days)
     snapshot = store.base_snapshot_row("nightly_check", session_clock.iso_utc(cut_at), day, "live_frozen",
-                                  session_clock.iso_utc(written_at), commit, dirty)
+                                  session_clock.iso_utc(written_at))
     identical = (compared - len(mismatches)) / compared if compared else None
     observations = [
         store.observation_row(snapshot, "reads_compared_count", compared),

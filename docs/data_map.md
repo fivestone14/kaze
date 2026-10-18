@@ -10,15 +10,17 @@ blank, or either path is not a folder.
 
 The target is the four-pillar store of 2026-10-16: fifteen tables defined by two registries, every value stored long as
 measure x subject x value x blank reason x known_at. `engine/store.py` creates only the tables and columns the phases
-so far write (schema version 2, kept by hand with `NOT NULL` on keys and `CHECK` lists on word columns); each phase adds
-its tables through the next numbered schema step, applied in one transaction when a store is opened. The full design,
-for reference, is:
+so far write (schema version 3, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
+word lists); each phase adds its tables through the next numbered schema step, applied in one transaction when a store
+is opened, and a step that changes a word list rebuilds the table in place (rows kept, children still pointing at it).
+At every open the store refuses to run if any table's text differs from the code's, so a fresh store and a migrated
+one are identical. The full design, for reference, is:
 
 | Pillar | Table | What one row is | Built |
 |---|---|---|---|
-| Registry | `registry_measures` | one measure Kaze may store: name, plain meaning, unit, lane, the fact it carries, subjects, source feed, blank rule | Phase 1; seeded from `engine/registry.py` on every open (a name dropped from the code is dropped from the table) |
+| Registry | `registry_measures` | one measure Kaze may store: name, plain meaning, unit, lane, the fact it carries, subjects, source feed, blank rule | Phase 1; seeded from `engine/registry.py` on every open (a name dropped from the code is dropped from the table, refused while rows still use it) |
 | Registry | `registry_components` | one versioned thing: a feed, the Schwab login, the collector, the range engine, a read lane | Phase 1 |
-| Collect | `collect_snapshots` | one cut: a read at a moment, a nightly check, or a nightly history fit, with its slot, lane, origin, attempt, builder commit, source-file byte lengths, health counts, content hash | Phase 1; step 2 rebuilt it to allow the `nightly_history_fit` kind |
+| Collect | `collect_snapshots` | one cut: a read at a moment, a nightly check, or a nightly history fit, with its slot, lane, origin, attempt, builder commit, source-file byte lengths, health counts, content hash | Phase 1; steps 2 and 3 rebuilt it for the `nightly_history_fit` kind and the `thin` status |
 | Collect | `collect_observations` | one measure x subject at one cut, with its feed's status and age at the cut | Phase 1 |
 | Collect | `collect_market_prices` | one price record; for now one SPX 1-minute bar with the moment it was known | Phase 1 (bar columns only) |
 | Collect | `collect_calendar_and_events` | one dated fact: a scheduled event or a half-day session, with when the station first held it | Phase 1 (events and half days) |
@@ -37,7 +39,9 @@ each source file at a live read, so a rebuild of that cut reads only what the li
   `not_formed_yet`, `none_left_today`, `not_known_at_read`, ...). Counts over a window (tape trades and premium,
   headlines, gap markers) are values only while the feed's newest line is inside its stale limit; otherwise they are
   blank with the feed's reason. A table constraint enforces exactly one of the four value columns or a blank reason.
-- **Registered or refused.** The writer refuses an unregistered measure, a subject kind the measure does not allow, a
+- **Registered or refused.** `available_since_trade_date` on a measure is the first session Kaze served it
+  (2026-10-16 for every written measure; rows rebuilt for earlier sessions carry the same recipe), blank for a
+  measure no code writes yet. The writer refuses an unregistered measure, a subject kind the measure does not allow, a
   value in the wrong column, a number outside the measure's range, a word outside its list, and an input newer than the
   cut. Every row dict is checked against the table's columns, so a renamed column fails loudly.
 - **Point in time.** `cut_at` is the market moment a row describes; `known_at` is when it became usable. Reads carry
@@ -74,7 +78,7 @@ the rest are lane `range_every_5_minutes`. A `--at` rebuild uses the exact secon
 that second is a slot's own cut (HH:M5:59).
 
 `read_id` is `<lane>:<cut in New York time>`; `snapshot_id` is `read|<cut in UTC>|<origin>|kaze_collector@1|b<attempt>`.
-A scheduled slot no live read served gets a `snapshot_status = missed` row from the nightly, but only when the nightly
+A history fit built on fewer than 60 full sessions carries `snapshot_status = thin`. A scheduled slot no live read served gets a `snapshot_status = missed` row from the nightly, but only when the nightly
 runs on that session's own day; a hand `--nightly` on a later day never marks a past session Kaze never ran.
 
 ## What a read stores
@@ -96,7 +100,7 @@ list. By group:
 | headlines (60-minute window) | `headlines_last_60_minutes_count` (kind = all), `feed_coverage_last_60_minutes_portion` (blank: the poller leaves no stamps) |
 | Mirai's Claude forecast | `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes, to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes |
 | feed and login health | `feed_status`, `feed_age_seconds` (feed = every feed seen), `rows_received_today_count` (bars, quotes, breadth), `lines_skipped_today_count` (malformed lines per file), `login_state`, `login_hours_until_expiry`, `login_expires_at` (login = schwab; blank `not_known_at_read` on rebuilt reads), `are_needed_feeds_all_ok` (consumer = range_engine) |
-| range readings (Phase 2, from the store's bars) | `today_typical_1_minute_move_points` (speed: recency-weighted mean absolute 1-minute close change, half-life 15 minutes), `speed_fast_5_minute_half_life_points`, `speed_slow_30_minute_half_life_points`, `speed_fast_over_slow_ratio` (acceleration, a weight-0 reading), `typical_swing_points` (horizon = 5_minutes, 30_minutes, 60_minutes; speed x the square root of the minutes), `options_implied_swing_points` and `options_over_tape_swing_ratio` (horizon; the straddle left x the square root of horizon over minutes left, a check never added in), `up_legs_points`, `down_legs_points`, `trend_straightness_ratio` (window_minutes = 15, 30, 60; weight-0 push readings) |
+| range readings (Phase 2, from the store's bars) | `today_typical_1_minute_move_points` (speed: recency-weighted mean absolute 1-minute close change, half-life 15 minutes), `speed_fast_5_minute_half_life_points`, `speed_slow_30_minute_half_life_points`, `speed_fast_over_slow_ratio` (a weight-0 reading), `typical_swing_points` (horizon = 5_minutes, 30_minutes, 60_minutes; speed x the square root of the minutes), `options_implied_swing_points` and `options_over_tape_swing_ratio` (horizon; the straddle left x the square root of window minutes over minutes left, against the tape swing over the same minutes; a check never added in), `path_up_points`, `path_down_points`, `trend_straightness_ratio` (window_minutes = 15, 30, 60; weight-0 push readings) |
 | nightly check | `reads_compared_count`, `values_mismatched_count`, `tolerated_mismatches_count`, `rebuild_identical_portion` |
 | nightly history fit (Phase 2) | `band_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon), `fit_sessions_count`, `fit_windows_count`, `average_price_shrink_ratio` (horizon) |
 
@@ -109,58 +113,82 @@ or the push lane (which way), never both.
 ## The range forecast (Phase 2)
 
 The recipe is the verified worked-out sheet of 2026-10-16 12:35:59; its fixed numbers live in `engine/registry.py`
-(the `range_engine` component row carries them) and the 12:35 read reproduces the sheet to six decimals.
+(the `range_engine` component row carries them) and the 12:35 read reproduces the sheet to six decimals. Bars are read
+by minute of the session (`engine/range_fit.py`, `minute_series`): a missing minute is a gap, so a change across it is
+left out of the speed, a window starting or ending on it is skipped, and the path windows count real minutes.
 
 1. **Speed** (today) = the recency-weighted mean of |1-minute close change| over the session's bars up to the cut,
-   weight 0.5^(minutes ago / 15). Fast (half-life 5) and slow (half-life 30) speeds and their ratio are stored as
-   weight-0 readings. Bars come from `collect_market_prices` (today's and history's; live rows preferred over rebuilt
-   ones for the same minute), never from Mirai's files.
+   weight 0.5^(minutes ago / 15). The fast (half-life 5) and slow (half-life 30) speeds and `speed_fast_over_slow_ratio`
+   are stored as weight-0 readings. Bars come from `collect_market_prices` (today's and history's), never from Mirai's
+   files; for one minute with both a live and a rebuilt row the live row is taken (the values come from the same Mirai
+   file, so a later Mirai correction is seen only on minutes without a live row).
 2. **Swing** = speed x the square root of the horizon's minutes, for 5, 30 and 60.
-3. **Stretch** (history) = the 80% mark of |end move| / swing over every window of the prior 60 sessions, measured on
-   the same recipe (speed at the window's start from that day's bars, windows every 5 minutes from minute 30, sessions
-   with fewer than 380 bars skipped). The average band's multiplier is the same fit on |average price over the window
-   - start| / swing. Both are labelled with the recipe (`stretch_recipe_name`) and the sample counts.
+3. **Stretch** (history) = the 80% mark of |end move| / swing over every window of the prior 60 full sessions, measured
+   on the same recipe: speed at the window's start from that day's bars, windows every 5 minutes from minute 30. A full
+   session holds a bar for every minute (390, or 210 on a listed half day); the full sessions are picked first and the
+   last 60 of them taken, so a half day never shrinks the sample. The average band's multiplier is the same fit on
+   |average price over the window - start| / swing. Both carry the recipe label (`stretch_recipe_name`) and the
+   sample counts.
 4. **End band** = read price (the last close at the cut) +/- swing x stretch; **average band** the same with the average
    multiplier. The grade-start rule is `at_read`: the window runs from the end of the read's minute (12:36:00 for the
-   12:35 read) for the horizon, capped at the close; a capped window's decision is `clipped`.
-5. **Never-leaves odds** = the share of the same history's windows whose farthest excursion (highs and lows) stayed
+   12:35 read) for the horizon, capped at the close; a capped window's decision is `clipped`, its band is still the
+   full horizon's (as the sheet's recipe has it).
+5. **Never-leaves share** = the share of the same history's windows whose farthest excursion (highs and lows) stayed
    inside +/- X in that window's swings, at today's swing; X = 5 / 10 / 15 points for 5 / 30 / 60 minutes. Computed from
-   the history windows at read time (the same function the fit uses), so the decimals match the sheet.
+   the history windows at read time (the same function the fit uses), so the decimals match the sheet; the owner-rule
+   variant repeats it unchanged.
 6. **Options check** = straddle left x the square root of (window minutes / minutes left), stored beside the tape swing
-   with their ratio; shown, never added in.
-7. **Dials** all x1.00 (`width_multiplier`, roles `raw` and `applied`): `acceleration` carries the fast/slow ratio as
-   its raw value; `fed_window` carries 2.6 as its raw value when the window ends after an `FOMC` decision known at the
-   cut (the Fed window runs from the decision to the close). On such a read a second decision tagged
-   `variant_name = owner_rule` (parent = the base decision) applies the 2.6 to both bands, so Phase 3 grades the band
-   with and without it. No FOMC day in the store is known in time (the calendar was built 2026-09-27), so rebuilt
-   reads before that date never carry the variant.
+   over the same window minutes as `options_over_tape_swing_ratio`; shown, never added in. On a clipped window both
+   swings cover the minutes to the close, so the ratio compares like with like.
+7. **Dials** all x1.00 (`width_multiplier`, subject `adjustment`, roles `raw` and `applied`; the list is
+   `registry.WIDTH_DIALS`): `fast_over_slow` carries the fast/slow ratio as its raw value; `fed_window` carries 2.6 as
+   its raw value when the window ends after an `FOMC` decision known at the cut (the Fed window runs from the decision
+   to the close). On such a read a second decision tagged `variant_name = owner_rule` (parent = the base decision)
+   applies the 2.6 to both bands, so Phase 3 grades the band with and without it. No FOMC day in the store is known in
+   time (the calendar was built 2026-09-27), so rebuilt reads before that date never carry the variant.
 8. **Direction** = `chance_up_if_moves_probability` 0.5 with `trust_weight_applied_portion` 0: no input counts yet.
 
-**Where it lands.** The readings (1, 2, 6 and the legs) are observations on the read's own snapshot. Each read then
-writes one `reads_decisions` row per channel (`decision_kind = range_forecast`, producer `range_engine@1`, `run_kind`
-`live` or `history_replay`, `horizon_name`, `graded_price_measure = end_price`, `grade_start_rule_version = at_read`,
-the grade window, `decision_status` ok / clipped / blind with its reason) and its `reads_decision_values`:
-`band_centre_points`, the speed and swing used, `band_multiplier`, `stretch_recipe_name`, `fit_sessions_count`,
-`fit_windows_count` and `fit_snapshot_id` (which fit it used), `band_half_width_points`, `band_low_points` and
-`band_high_points` (band = 80 and average_80), `chance_stays_inside_rung_probability` (horizon, rung_points), the two
-dials and the direction. A read with fewer than two bars is `blind` (`speed_not_formed`, values blank
-`not_formed_yet`); one with no fit known at its cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`).
-Decision ids follow the design: `range_forecast|<snapshot_id>|range_engine@1|<run_kind>:<variant or live>|<horizon>|end_price|-|whole|r0`.
+**Where it lands.** The readings (1, 2, 6 and the path: `path_up_points`, `path_down_points`,
+`trend_straightness_ratio`) are observations on the read's own snapshot. Each read then writes one `reads_decisions`
+row per channel (`decision_kind = range_forecast`, producer `range_engine@1`, `run_kind` `live` or `history_replay`,
+`horizon_name`, `graded_price_measure = end_price`, `grade_start_rule_version = at_read`, the grade window,
+`decision_status` ok / clipped / blind with its reason) and its `reads_decision_values`: `band_centre_points`, the
+speed and swing used, `band_multiplier`, `stretch_recipe_name`, `fit_sessions_count`, `fit_windows_count` and
+`fit_snapshot_id` (which fit it used), `band_half_width_points`, `band_low_points` and `band_high_points` (band = 80
+and average_80), `chance_stays_inside_rung_probability` (horizon, rung_points), the two dials and the direction. A read
+with fewer than two bars is `blind` (`speed_not_formed`, values blank `not_formed_yet`); one with no fit known at its
+cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`). The snapshot, its observations, its decisions
+and their values are written in one transaction; if the range step itself fails, the snapshot still lands with
+`snapshot_status_reason = range_failed` and no decisions, the traceback goes to the job's log, and the live feed says
+so. Decision ids follow the design:
+`range_forecast|<snapshot_id>|range_engine@1|<run_kind>:<variant or live>|<horizon>|end_price|-|whole|r0`.
 
 **Fits and walk-forward.** The nightly writes one `nightly_history_fit` snapshot per session it serves (builder
 `range_engine@1`): `trade_date` is the session served, `cut_at` the close of the last session in its sample, and
 `known_at` that close plus 62 seconds (`bar_end_plus_62_seconds`) for a rebuilt fit or the write time for the live one
-(always before the served open). The first nightly on a store writes a rebuilt fit for every stored session that lacks
-one, then every nightly writes the live fit for the next trading day. A read uses the newest fit with
-`trade_date <= its day` and `known_at <= its cut`, so a fit never includes the read's own day; `--rebuild-day` and `--at`
-use the same rule, which is why `--nightly` must run once before rebuilding a fresh store.
+(always before the served open). A fit built on fewer than 60 full sessions has `snapshot_status = thin` (reason
+`<n>_of_60_sessions`); reads still use it and carry its counts. The nightly stores the session's bars before it fits,
+then writes a rebuilt fit for every stored session that lacks one, then the live fit for the next trading day unless a
+fit with the same or newer data already serves it (so a second nightly on one day adds nothing). A read uses the
+newest fit with `trade_date <= its day` and `known_at <= its cut`, so a fit never includes the read's own day;
+`--rebuild-day` and `--at` use the same rule. On a fresh store the order is therefore `--backfill-bars`, then
+`--nightly` (the fits), then any rebuild.
 
-**Pass test** (`--pass-test`). For every session with a full 60-session lookback behind it, the band is refitted on
-those sessions and every 5-minute read of the day (09:35 on, windows capped at the close) is checked: did the window's
-end (and its average) land inside that read's band? The day coverages are resampled 1,000 times (fixed seed); PASS when
-the 95% interval of the mean contains 0.80 and sits inside 0.75-0.85. The same is printed with a 20-session lookback
-for information only. On 2026-10-18 (14 test days, 2026-09-29 to 2026-10-16) every channel passed: end 5/30/60 means
-0.801 / 0.799 / 0.809, average 0.795 / 0.813 / 0.807.
+**Pass test** (`--pass-test`). For every session with 60 full sessions behind it, the band is refitted on those
+sessions and every 5-minute read of the day (09:35 on, windows capped at the close) is checked: did the window's end
+(and its average) land inside that read's band? The day coverages are resampled 20,000 times (fixed seed, enough for
+the interval to settle); PASS when the 95% interval of the mean contains 0.80 and sits inside 0.75-0.85; an interval
+that holds 0.80 but breaks a bound is printed as FAIL, not yet decidable, because 14 days cannot bound coverage to
++/-0.05. Clipped windows are reported as their own slice. The same is printed with a 20-session lookback for
+information only. On 2026-10-18 at HEAD (14 test days, 2026-09-29 to 2026-10-16): the headline 30-minute end band
+passes (mean 0.7987, interval 0.7653-0.8340), the 5-minute end band passes (0.8006, 0.7755-0.8228) and the 5-minute
+average band passes (0.7950, 0.7690-0.8237); the 60-minute end band (0.8089, 0.7607-0.8544), the 30-minute average band
+(0.8126, 0.7764-0.8506) and the 60-minute average band (0.8071, 0.7607-0.8516) hold 0.80 but cross the 0.85 ceiling
+and are not yet decidable until more test days exist. Nothing is tuned to the test.
+
+**Storage.** A decision value row costs about 1 KB and an observation about 670 B with their indexes; a trading day
+writes about 77 x 132 observations and 77 x 66 decision values live and the same again rebuilt, about 24 MB a day.
+There is no retention rule yet; Phase 3 decides one for `history_rebuilt` rows.
 
 ## Feeds (what Kaze reads from Mirai)
 
@@ -184,18 +212,10 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | Path | What it holds | Written by |
 |---|---|---|
 | `kaze.sqlite` (with `-wal` and `-shm` beside it) | the store | every job |
-| `live/latest.json` | the newest live read for the phone: `read_id`, `lane`, `slot`, `origin`, `status`, `status_reason`, `cut_at`, `known_at`, `feeds` (status live / partial / blind and age per feed), `login`, `range` (below), `values` (`measure` or `measure\|subject` keys, the range readings included), `blanks` (key to reason) | the live read job, after each read |
-
-The `range` block: `price` (read price), `read_at`, `window_from` (end of the read's minute), `mins_in`, `mins_left`,
-`speed`, `fast`, `slow`, `accel`, `straddle`, `fit` (`id`, `known_at`; null when none), `fed`, `fed_at`, `up_pct` (50),
-`trust` (0) and `channels` keyed `5_minutes` / `30_minutes` / `60_minutes`, each with `mins`, `swing`, `stretch`, `half`,
-`lo`, `hi`, `avg_stretch`, `avg_half`, `avg_lo`, `avg_hi`, `rung`, `stay_odds` (never-leaves odds for +/- rung),
-`opt_swing`, `opt_ratio`, `capped`, `fed_window`, `dials` (`fed_window`, `acceleration`: `raw`, `applied`),
-`owner_rule` (the x2.6 band's `half`, `lo`, `hi`, `avg_half`, `avg_lo`, `avg_hi`; null outside a Fed window), `status`
-and `ends_at`. Numbers carry six decimals; New York times.
+| `live/latest.json` | the newest live read for the phone: `read_id`, `lane`, `slot`, `origin`, `status`, `status_reason`, `cut_at`, `known_at`, `feeds` (status live / partial / blind and age per feed), `login`, `range` (the forecast, see below; null with `status_reason = range_failed`), `values` (`measure` or `measure\|subject` keys, the range readings included), `blanks` (key to reason); when the live job crashes it is replaced by `{status: failed, status_reason, failed_at}`, so a stale `cut_at` is never silent | the live read job, after each read |
 | `logs/read_log.txt` | one line per read-job run (including the quiet "market closed" lines) and any crash's traceback | the read job |
 | `logs/nightly_log.txt` | one health line per nightly run, one line per parity mismatch, and the hourly "not the nightly hour" lines | the nightly job |
-| `logs/rebuild_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`) | hand runs |
+| `logs/rebuild_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`; a `--pass-test` crash) | hand runs |
 | `logs/older/<day>/*.gz` | the logs of earlier days, kept 14 days | `engine/job_log.py` when a job first writes on a new day |
 | `/tmp/com.kaze.read.launchd.log`, `/tmp/com.kaze.nightly.launchd.log` | only what Python could not catch (a missing `.env`, an import error) | launchd |
 
@@ -207,8 +227,17 @@ and `ends_at`. Numbers carry six decimals; New York times.
 | `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, and its range decisions |
 | `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, plus the whole session's bars |
 | `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
-| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15 and acts only in the 17:00 New York hour) | 17:15 New York | `missed` rows for unserved slots, the session's closing bars (when Kaze was live), a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day, the session rebuilt, one `nightly_check` snapshot per session with both live and rebuilt reads, and the health line |
-| `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel with the verdict |
+| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15 and acts only in the 17:00 New York hour) | 17:15 New York | `missed` rows for unserved slots, the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt), a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists), the session rebuilt, one `nightly_check` snapshot per session with both live and rebuilt reads, and the health line |
+| `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
+
+The `range` block of `latest.json` is the forecast copied whole (floats at six decimals, moments on the New York clock):
+`price`, `read_at`, `window_from` (end of the read's minute), `newest_bar_at`, `minutes_in`, `minutes_left`, `speed`,
+`speed_fast`, `speed_slow`, `fast_over_slow`, `path` (15 / 30 / 60: `up`, `down`, `straightness`), `straddle`, `fit`
+(`id`, `known_at`, `status`; null when none), `fed_decision_at`, `chance_up_if_moves` (0.5), `trust` (0) and
+`channels` keyed `5_minutes` / `30_minutes` / `60_minutes`, each with `minutes`, `swing`, `stretch`, `average_stretch`,
+`fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_over_tape`, `clipped`,
+`ends_at`, `in_fed_window`, `dials` (`fed_window`, `fast_over_slow`: `raw`, `applied`), `bands` (`80` and `average_80`:
+`half_width`, `low`, `high`), `owner_rule_bands` (the same at x2.6; null outside a Fed window), `status` and `reason`.
 
 `engine/jobs/install_jobs.sh` writes the two plists into `~/Library/LaunchAgents` with this repo's real path and
 boots them (bootout, wait, bootstrap, enable).

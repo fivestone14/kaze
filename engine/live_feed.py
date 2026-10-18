@@ -1,12 +1,11 @@
 # Writes the small JSON file the phone reads after every live read: the snapshot's values, each feed's status (live,
-# partial or blind) and age, the Schwab login expiry and the range forecast. This file is the phone's whole contract.
+# partial or blind) and age, the Schwab login expiry and the range forecast copied whole; a failed job writes a failed
+# document so the phone never keeps an old file in silence. This file is the phone's whole contract with the store.
 import json
 import os
+from datetime import datetime
 
 from engine import paths, session_clock, store
-
-CHANNEL_KEYS = ("mins", "swing", "stretch", "half", "lo", "hi", "avg_stretch", "avg_half", "avg_lo", "avg_hi", "rung",
-                "stay_odds", "opt_swing", "opt_ratio", "capped", "fed_window", "dials", "owner_rule", "status")
 
 PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "frozen_feed": "partial",
                               "stand_in": "partial", "missing": "blind", "market_closed": "blind"}
@@ -29,40 +28,32 @@ def split_values_and_blanks(observations):
     return values, blanks
 
 
-def rounded_tree(value):
-    """A value, dict or list with every float at the store's precision."""
+def for_phone(value):
+    """A value, dict or list made phone-ready: floats at the store's precision, moments on the New York clock."""
     if isinstance(value, dict):
-        return {key: rounded_tree(inner) for key, inner in value.items()}
-    if isinstance(value, list):
-        return [rounded_tree(inner) for inner in value]
+        return {key: for_phone(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [for_phone(inner) for inner in value]
+    if isinstance(value, datetime):
+        return session_clock.iso_eastern(value)
     return store.rounded(value)
 
 
-def range_block(forecast):
-    """The range forecast for the phone: the read price and clock, speeds, fit, Fed flag, direction, each channel."""
-    channels = {}
-    for name, channel in forecast["channels"].items():
-        channels[name] = rounded_tree({key: channel[key] for key in CHANNEL_KEYS})
-        channels[name]["ends_at"] = session_clock.iso_eastern(channel["ends_at"])
-    return {
-        "price": forecast["price"], "read_at": session_clock.iso_eastern(forecast["cut_at"]),
-        "window_from": session_clock.iso_eastern(forecast["bar_ends_at"]), "mins_in": forecast["mins_in"],
-        "mins_left": forecast["mins_left"], "speed": store.rounded(forecast["speed"]),
-        "fast": store.rounded(forecast["fast"]), "slow": store.rounded(forecast["slow"]),
-        "accel": store.rounded(forecast["accel"]), "straddle": forecast["straddle"],
-        "fit": forecast["fit_id"] and {"id": forecast["fit_id"],
-                                       "known_at": session_clock.iso_eastern(forecast["fit_known_at"])},
-        "fed": forecast["fed_at"] is not None,
-        "fed_at": forecast["fed_at"] and session_clock.iso_eastern(forecast["fed_at"]),
-        "up_pct": forecast["up_pct"], "trust": forecast["trust"], "channels": channels,
-    }
+def write_document(document):
+    """Write latest.json atomically; returns the file path."""
+    path = paths.live_feed_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(document, indent=1))
+    os.replace(temporary, path)
+    return path
 
 
 def write_live_feed(snapshot, observations, feed_states, forecast):
-    """Write latest.json atomically from one snapshot's observations, feed states and forecast; returns the path."""
+    """Write latest.json from a snapshot's observations, feed states and forecast (None when the range step failed)."""
     values, blanks = split_values_and_blanks(observations)
     login = {short: values.pop(f"{name}|login=schwab", None) for name, short in LOGIN_FIELD_SHORT_NAMES.items()}
-    document = {
+    return write_document({
         "read_id": snapshot["read_id"], "lane": snapshot["read_lane"], "slot": snapshot["scheduled_slot_eastern"],
         "origin": snapshot["row_origin"], "status": snapshot["snapshot_status"],
         "status_reason": snapshot["snapshot_status_reason"],
@@ -70,11 +61,11 @@ def write_live_feed(snapshot, observations, feed_states, forecast):
         "known_at": session_clock.iso_eastern(session_clock.parse_iso(snapshot["known_at"])),
         "feeds": {name: {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"]}
                   for name, state in feed_states.items()},
-        "login": login, "range": range_block(forecast), "values": values, "blanks": blanks,
-    }
-    path = paths.live_feed_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(document, indent=1))
-    os.replace(temporary, path)
-    return path
+        "login": login, "range": for_phone(forecast), "values": values, "blanks": blanks,
+    })
+
+
+def write_failed_feed(reason):
+    """Write a latest.json that says the live read failed, with the reason and the moment."""
+    return write_document({"status": "failed", "status_reason": reason,
+                           "failed_at": session_clock.iso_eastern(session_clock.now_utc())})

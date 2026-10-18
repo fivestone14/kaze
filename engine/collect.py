@@ -1,13 +1,11 @@
 # Builds one read: Mirai's files as they stood at a cut become one snapshot row, one observation per measure (a blank
 # carries its reason, never 0.0), the calendar facts as known, and the session's new bars stamped by arrival.
-# Raw inputs only; speed and bands are Phase 2.
-import functools
+# Raw inputs only; the range engine reads them back from the store.
 import json
-import subprocess
 import time
 from datetime import date, timedelta
 
-from engine import mirai_files, paths, registry, session_clock, store
+from engine import mirai_files, registry, session_clock, store
 
 VIX_SYMBOLS = ("$VIX", "$VIX1D", "$VIX9D", "$VIX3M", "$VVIX")
 FUND_SYMBOLS = ("SPY", "RSP", "QQQ", "IWM", "SMH", "UUP", "USO")
@@ -18,7 +16,6 @@ CLAUDE_HORIZONS = {"30_minutes": "next_30_minutes", "to_close": "to_close"}
 CLAUDE_SIDES = ("up", "flat", "down")
 TAPE_WINDOW_MINUTES = 30
 HEADLINE_WINDOW_MINUTES = 60
-BAR_LENGTH_SECONDS = 60
 STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
 GAP_MARKERS_FOR_EMPTY_WINDOW = TAPE_WINDOW_MINUTES
@@ -107,11 +104,10 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
 
 def snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status):
     """The collect_snapshots row of a read at this cut, with its slot, lane and lateness."""
-    commit, dirty = git_head()
     day = session_clock.to_eastern(cut_at).date()
     lane = session_clock.lane_for_slot(slot)
     snapshot = store.base_snapshot_row("read", session_clock.iso_utc(cut_at), day.isoformat(), row_origin,
-                                  session_clock.iso_utc(written_at), commit, dirty)
+                                  session_clock.iso_utc(written_at))
     snapshot.update({
         "read_id": f"{lane}:{session_clock.iso_eastern(cut_at)}", "read_lane": lane,
         "read_lane_cadence_minutes": session_clock.READ_LANES[lane], "scheduled_slot_eastern": slot,
@@ -122,19 +118,6 @@ def snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status):
         late_by = written_at - session_clock.slot_start(day, slot)
         snapshot["slot_lateness_minutes"] = round(late_by.total_seconds() / 60, 2)
     return snapshot
-
-
-@functools.lru_cache(maxsize=1)
-def git_head():
-    """The repo's HEAD commit and whether the working tree had uncommitted changes; blanks when git is unavailable."""
-    try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=paths.REPO_ROOT, capture_output=True, text=True,
-                              check=True)
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=paths.REPO_ROOT, capture_output=True, text=True,
-                                check=True)
-    except (OSError, subprocess.CalledProcessError):
-        return None, None
-    return head.stdout.strip(), int(bool(status.stdout.strip()))
 
 
 def source_file_limits(conn, day, row_origin, cut_at_iso):
@@ -275,9 +258,10 @@ def collect_options_scan(read, scans):
     with_ruler = [s for s in scans if (s.get("range_ruler") or {}).get("quality") == "ok"]
     ruler = with_ruler[-1]["range_ruler"] if with_ruler else None
     blank = "not_priceable" if present else "feed_missing"
-    read.add_observation("same_day_straddle_mid_points", mirai_files.scan_straddle_points(ruler, "em_points"),
-                         blank=blank)
-    read.add_observation("opening_straddle_mid_points", mirai_files.scan_straddle_points(ruler, "em_open"), blank=blank)
+    read.add_observation("same_day_straddle_mid_points",
+                         store.rounded(mirai_files.scan_straddle_points(ruler, "em_points")), blank=blank)
+    read.add_observation("opening_straddle_mid_points",
+                         store.rounded(mirai_files.scan_straddle_points(ruler, "em_open")), blank=blank)
 
 
 def collect_options_tape(read, day, cut_at, bars, max_bytes):
@@ -465,7 +449,7 @@ def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
         if priced_at in already:
             continue
         if row_origin == "history_rebuilt" or bar["at"] >= own_slot_starts_at:
-            arrival = timedelta(seconds=BAR_LENGTH_SECONDS + registry.BAR_ARRIVAL_SECONDS)
+            arrival = timedelta(seconds=session_clock.BAR_LENGTH_SECONDS + registry.BAR_ARRIVAL_SECONDS)
             known_at = session_clock.iso_utc(bar["at"] + arrival)
             rule = registry.BAR_ARRIVAL_RULE
         else:
