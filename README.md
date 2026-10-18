@@ -34,9 +34,10 @@ Private data lives outside this repo, in the folder `KAZE_DATA` points to.
     python3 -m engine.read_job --at "2026-10-16 12:35:59"       # rebuild one past moment (New York time)
     python3 -m engine.read_job --rebuild-day 2026-10-16         # rebuild every 5-minute read of a session
     python3 -m engine.read_job --backfill-bars                  # load every session's SPX bars Mirai holds (one-off)
-    python3 -m engine.read_job --nightly                        # catch-up rebuilds, fits, grades, parity, backup
+    python3 -m engine.read_job --nightly                        # catch-up rebuilds, fits, grades, trust ledger, parity, backup
     python3 -m engine.read_job --scoreboard [2026-10-16]        # grades per session and channel, last 20 pooled
     python3 -m engine.read_job --pass-test                      # print the band's walk-forward coverage test
+    python3 -m engine.read_job --trust                          # the trust ledger: each reading and dial, verdict, weight
     engine/jobs/install_jobs.sh                                 # install the two launchd jobs
 
 On a fresh store run `--backfill-bars`, then `--nightly` (it writes the history fits every read's band needs), then

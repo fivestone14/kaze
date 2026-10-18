@@ -1,6 +1,6 @@
 # The range engine's history side: the speed recipe on minute-indexed bars, the windows of past sessions measured on
-# that same recipe, the nightly fit of the band multipliers (one nightly_history_fit cut per session served) and the
-# Phase 2 pass test with its day-resampled interval.
+# that same recipe, the nightly fit of the band multipliers, the closing-window ratio and the width cap (one
+# nightly_history_fit cut per session served) and the Phase 2 pass test with its day-resampled interval.
 import math
 from datetime import date, timedelta
 
@@ -76,9 +76,11 @@ def history_before(conn, day, lookback=registry.FIT_LOOKBACK_SESSIONS):
 
 
 def build_history(conn, day, lookback):
-    """history_before without the cache: each full session's windows, every 5 minutes from minute 30, in swings."""
+    """history_before without the cache: each full session's windows, every 5 minutes from minute 30, in swings, and
+    the closing sample: the windows on the same grid that end inside the last minutes before the close."""
     sessions = [session for session in store.full_sessions(conn) if session < day.isoformat()][-lookback:]
     table = {name: {move: [] for move in WINDOW_MOVES} for name in registry.HORIZON_MINUTES}
+    closing = {name: [] for name in registry.HORIZON_MINUTES}
     last_bar_at = None
     longest = max(registry.HORIZON_MINUTES.values())
     for session in sessions:
@@ -98,29 +100,61 @@ def build_history(conn, day, lookback):
                 swing = swing_points(start_speed, minutes)
                 for move, value in moves.items():
                     table[name][move].append(value / swing)
+        for name, minutes in registry.HORIZON_MINUTES.items():
+            closing[name].extend(closing_window_ratios(closes, highs, lows, minutes))
     windows = {name: {move: np.sort(np.array(values)) for move, values in moves.items()}
                for name, moves in table.items()}
-    return {"sessions": sessions, "last_bar_at": last_bar_at, "windows": windows}
+    return {"sessions": sessions, "last_bar_at": last_bar_at, "windows": windows,
+            "closing": {name: np.sort(np.array(values)) for name, values in closing.items()}}
+
+
+def closing_window_ratios(closes, highs, lows, minutes):
+    """|end move| in swings of the session's 5-minute-grid windows ending in the last minutes before the close."""
+    first_end = closes.size - registry.CLOSING_WINDOW_MINUTES
+    ratios = []
+    for last in range(first_end, closes.size):
+        start = last - minutes
+        if start % registry.FIT_WINDOW_STEP_MINUTES or start < 0:
+            continue
+        start_speed = speed(closes[:start + 1])
+        moves = window_moves(closes, highs, lows, start, last)
+        if start_speed and moves is not None:
+            ratios.append(moves[registry.BAND] / swing_points(start_speed, minutes))
+    return ratios
 
 
 def band_multiplier(sorted_ratios):
     """The swings that cover the band's share of past windows: the 80% mark of the sorted ratios, or None if empty."""
+    return mark(sorted_ratios, registry.BAND_PORTION)
+
+
+def mark(sorted_ratios, portion):
+    """The ratio at a share of the sorted sample (the band multiplier's own index rule), or None if empty."""
     if sorted_ratios.size == 0:
         return None
-    return float(sorted_ratios[int(registry.BAND_PORTION * sorted_ratios.size)])
+    return float(sorted_ratios[int(portion * sorted_ratios.size)])
 
 
-def horizon_fit(end, average, sessions, windows):
-    """One horizon's fit in the shape the fit writes and the read reads back: both multipliers, shrink, counts."""
+def horizon_fit(end, average, sessions, windows, closing=None, cap=None, closing_windows=None):
+    """One horizon's fit in the shape the fit writes and the read reads back: both multipliers, shrink, counts, the
+    closing-window ratio and the width cap."""
     return {registry.BAND: end, registry.AVERAGE_BAND: average, "shrink": average / end if end else None,
-            "sessions": sessions, "windows": windows}
+            "sessions": sessions, "windows": windows, "closing": closing, "cap": cap,
+            "closing_windows": closing_windows}
 
 
 def multipliers_from_history(history):
-    """Per horizon, the end and average band multipliers fitted on the history, with the sample counts."""
-    return {name: horizon_fit(band_multiplier(moves[registry.BAND]), band_multiplier(moves[registry.AVERAGE_BAND]),
-                              len(history["sessions"]), int(moves[registry.BAND].size))
-            for name, moves in history["windows"].items()}
+    """Per horizon, the end and average band multipliers fitted on the history with the sample counts, the closing
+    ratio (the closing sample's 80% mark over the all-day mark) and the cap (the 95% mark over the 80% mark)."""
+    fits = {}
+    for name, moves in history["windows"].items():
+        end = band_multiplier(moves[registry.BAND])
+        closing_mark = band_multiplier(history["closing"][name])
+        fits[name] = horizon_fit(end, band_multiplier(moves[registry.AVERAGE_BAND]), len(history["sessions"]),
+                                 int(moves[registry.BAND].size), closing_mark / end if end and closing_mark else None,
+                                 mark(moves[registry.BAND], registry.CAP_PORTION) / end if end else None,
+                                 int(history["closing"][name].size))
+    return fits
 
 
 def never_leaves_share(history, horizon_name, rung_points, swing):
@@ -161,6 +195,12 @@ def fit_snapshot_rows(conn, served_day, row_origin, written_at):
                                                   subject))
         observations.append(store.observation_row(snapshot, "fit_sessions_count", fit["sessions"], subject))
         observations.append(store.observation_row(snapshot, "fit_windows_count", fit["windows"], subject))
+        observations.append(store.observation_row(snapshot, "closing_window_multiplier", store.rounded(fit["closing"]),
+                                                  subject, blank_reason=registry.NO_FIT_REASON))
+        observations.append(store.observation_row(snapshot, "width_cap_multiplier", store.rounded(fit["cap"]), subject,
+                                                  blank_reason=registry.NO_FIT_REASON))
+        observations.append(store.observation_row(snapshot, "closing_fit_windows_count", fit["closing_windows"],
+                                                  subject))
     return snapshot, observations
 
 

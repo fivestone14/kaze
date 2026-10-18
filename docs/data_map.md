@@ -10,7 +10,7 @@ blank, or either path is not a folder.
 
 The target is the four-pillar store of 2026-10-16: fifteen tables defined by two registries, every value stored long as
 measure x subject x value x blank reason x known_at. `engine/store.py` creates only the tables and columns the phases
-so far write (schema version 5, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
+so far write (schema version 7, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
 word lists); each phase adds its tables through the next numbered schema step, applied in one transaction when a store
 is opened, and a step that changes a word list rebuilds the table in place (rows kept, children still pointing at it).
 At every open the store refuses to run if any table's text differs from the code's, so a fresh store and a migrated
@@ -28,7 +28,7 @@ one are identical. The full design, for reference, is:
 | Reads | `reads_decisions`, `reads_decision_values` | one decision header (for now a `range_forecast` per channel) and every number, word or id inside it | Phase 2 (the columns the range engine fills) |
 | Reads | `reads_trade_legs` | the legs of a trade-shaped decision | later |
 | Results | `results_outcomes`, `results_outcome_values` | one outcome header (a `market_window`: what happened after a read over one horizon; a `forecast_grade`: how one decision graded against it) and every fact or grade inside it | Phase 3 (the columns the window and grade rules fill) |
-| Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | later (Phase 4's trust ledger) |
+| Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | Phase 4 (the trust ledger; schema step 7, which also renamed the stored `fast_over_slow` dial `acceleration`) |
 
 The table text lives in `engine/store_schema.py`; `engine/store.py` shapes, checks, writes and reads rows. Since
 schema step 5 the three header tables (`collect_snapshots`, `reads_decisions`, `results_outcomes`) carry an integer
@@ -122,11 +122,13 @@ list. By group:
 | headlines (60-minute window) | `headlines_last_60_minutes_count` (kind = all), `feed_coverage_last_60_minutes_portion` (blank: the poller leaves no stamps) |
 | Mirai's Claude forecast | `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes, to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes |
 | feed and login health | `feed_status`, `feed_age_seconds` (feed = every feed seen), `rows_received_today_count` (bars, quotes, breadth), `lines_skipped_today_count` (malformed lines per file), `login_state`, `login_hours_until_expiry`, `login_expires_at` (login = schwab; blank `not_known_at_read` on rebuilt reads), `are_needed_feeds_all_ok` (consumer = range_engine) |
+| push readings (Phase 4) | `push_lean_probability` and `push_reading_text` (reading = `price_trend`, `straightness`, `breadth`, `big_tech_vs_rest`, `options_buyers`, `yield_change`, `mirai_claude`; the lean is the reading's own chance of up if price moves, the text its value in words; blank with the input's reason), `level_distance_from_price_points` (level_type = call_wall, put_wall; the wall less the read price) |
 | range readings (Phase 2, from the store's bars) | `today_typical_1_minute_move_points` (speed: recency-weighted mean absolute 1-minute close change, half-life 15 minutes), `speed_fast_5_minute_half_life_points`, `speed_slow_30_minute_half_life_points`, `speed_fast_over_slow_ratio` (a weight-0 reading), `typical_swing_points` (horizon = 5_minutes, 30_minutes, 60_minutes; speed x the square root of the minutes), `options_implied_swing_points` and `options_over_tape_swing_ratio` (horizon; the straddle left x the square root of window minutes over minutes left, against the tape swing over the same minutes; a check never added in), `path_up_points`, `path_down_points`, `trend_straightness_ratio` (window_minutes = 15, 30, 60; weight-0 push readings) |
 | nightly check | `reads_compared_count`, `values_mismatched_count`, `tolerated_mismatches_count`, `rebuild_identical_portion` |
-| nightly history fit (Phase 2) | `band_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon), `fit_sessions_count`, `fit_windows_count`, `average_price_shrink_ratio` (horizon) |
+| nightly history fit (Phase 2, Phase 4) | `band_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon), `fit_sessions_count`, `fit_windows_count`, `average_price_shrink_ratio` (horizon); from Phase 4 `closing_window_multiplier`, `width_cap_multiplier`, `closing_fit_windows_count` (horizon) |
 | market window (Phase 3, `results_outcome_values`) | `grade_start_price_points`, `grade_start_bar_at`, `grade_start_rule_name`, `end_price_points`, `average_price_points`, `high_price_points`, `low_price_points`, `end_move_points`, `average_move_points`, `high_move_points`, `low_move_points`, `minutes_covered_count`, `stayed_inside_rung` (rung_points = 5, 10, 15) |
 | forecast grade (Phase 3, `results_outcome_values`) | the three grade-start measures again, `was_inside_band` and `band_miss_points` (band = 80, average_80), `stayed_inside_rung` (the channel's own rung), `band_used_ratio` (band = 80; side = upper, lower) |
+| trust ledger (Phase 4, `results_evaluations`) | `trust_weight_portion`, `brier_skill_portion`, `interval_score_gain_points`, `band_coverage_portion` |
 
 Every registered measure has a writer; a measure, a word and its schema step arrive together.
 
@@ -164,13 +166,20 @@ left out of the speed, a window starting or ending on it is skipped, and the pat
 6. **Options check** = straddle left x the square root of (window minutes / minutes left), stored beside the tape swing
    over the same window minutes as `options_over_tape_swing_ratio`; shown, never added in. On a clipped window both
    swings cover the minutes to the close, so the ratio compares like with like.
-7. **Dials** all x1.00 (`width_multiplier`, subject `adjustment`, roles `raw` and `applied`; the list is
-   `registry.WIDTH_DIALS`): `fast_over_slow` carries the fast/slow ratio as its raw value; `fed_window` carries 2.6 as
-   its raw value when the window ends after an `FOMC` decision known at the cut (the Fed window runs from the decision
-   to the close). On such a read a second decision tagged `variant_name = owner_rule` (parent = the base decision)
-   applies the 2.6 to both bands, so Phase 3 grades the band with and without it. No FOMC day in the store is known in
-   time (the calendar was built 2026-09-27), so rebuilt reads before that date never carry the variant.
-8. **Direction** = `chance_up_if_moves_probability` 0.5 with `trust_weight_applied_portion` 0: no input counts yet.
+7. **Dials** (`width_multiplier`, subject `adjustment`, roles `raw` and `applied`; the list and order is
+   `registry.WIDTH_DIALS`): each dial's raw value is measured on every read and its applied value is
+   1 + weight x (raw - 1), where the weight is the one the trust ledger holds for that dial and channel (none yet, so
+   every applied value is 1.00). The applied values multiply into `adjustment = product` (raw = the product, applied =
+   the product held under the cap), which is what the bands are widened by. The six dials are listed under Readings,
+   dials and the trust ledger below. On a read whose window ends after an `FOMC` decision known at the cut a second
+   decision tagged `variant_name = owner_rule` (parent = the base decision) applies the Fed dial's 2.6 to both bands
+   (on top of the other applied dials, held under the cap; the 2.6 itself is never capped), so Phase 3 grades the band
+   with and without it. No FOMC day in the store is known in time (the calendar was built 2026-09-27), so rebuilt
+   reads before that date never carry the variant.
+8. **Direction** = `chance_up_if_moves_probability` = 0.5 + the sum over the push readings of trust x (lean - 0.5),
+   the trusts summing to at most 1, with `trust_weight_applied_portion` the sum; every trust is 0 until the ledger
+   writes one, so the call is 0.5 with trust 0. Each reading's lean is stored on the decision too
+   (`push_lean_probability`, subject `reading`, its applied trust in `trust_weight_applied_portion`).
 
 **Where it lands.** The readings (1, 2, 6 and the path: `path_up_points`, `path_down_points`,
 `trend_straightness_ratio`) are observations on the read's own snapshot. Each read then writes one `reads_decisions`
@@ -179,7 +188,8 @@ row per channel (`decision_kind = range_forecast`, producer `range_engine@1`, `r
 `decision_status` ok / clipped / blind with its reason) and its `reads_decision_values`: `band_centre_points`, the
 speed and swing used, `band_multiplier`, `stretch_recipe_name`, `fit_sessions_count`, `fit_windows_count` and
 `fit_snapshot_id` (which fit it used), `band_half_width_points`, `band_low_points` and `band_high_points` (band = 80
-and average_80), `chance_stays_inside_rung_probability` (horizon, rung_points), the two dials and the direction. A read
+and average_80), `chance_stays_inside_rung_probability` (horizon, rung_points), `closing_window_multiplier` and
+`width_cap_multiplier` (horizon), the six dials and their product, every reading's lean and the direction. A read
 with fewer than two bars is `blind` (`speed_not_formed`, values blank `not_formed_yet`); one with no fit known at its
 cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`); one served by a thin fit stays `ok` (the
 band is real) with `decision_status_reason = thin_fit_<n>_of_60`, which the phone block carries with `fit.status`. The
@@ -269,6 +279,86 @@ Every 5-minute read is graded, so a day's 30-minute reads pooled over both slice
 (2026-10-16: unclipped 51/71 plus clipped 6/6 = 57/77 = 0.740, the pass test's 0.740); the phone's score for a channel
 counts the windows its finished list holds.
 
+## Readings, dials and the trust ledger (Phase 4)
+
+Everything here starts at zero weight. A reading or dial changes a number on the phone only after the trust ledger has
+written it a weight, and the ledger writes one only from live graded windows under a test fixed in advance.
+
+**Push readings** (which way; `engine/push_read.py`). Each read turns inputs already on its snapshot into a value in
+words (`push_reading_text`) and a lean (`push_lean_probability`): the reading's own chance that the move is up if
+price moves, 0 to 1. Share readings lean by their share; signed readings lean by a smooth squash, 0.5 + 0.2 x
+tanh(value / scale), so they never lean past 0.3 or 0.7 (the scales are in `registry.LEAN_SCALE`):
+
+| Reading | Value in words | Lean |
+|---|---|---|
+| `price_trend` | SPX move since the prior close and since the open, points | squash of the move since the prior close, scale 10 points |
+| `straightness` | net move over total path in the last 30 minutes | 0.5 + 0.2 x straightness, signed by the net move (a choppy half hour leans nowhere) |
+| `breadth` | NYSE advancers / decliners | advancers over advancers plus decliners |
+| `big_tech_vs_rest` | QQQ change vs RSP change since the prior close | squash of QQQ less RSP, scale 0.5 percentage points |
+| `options_buyers` | share of sided same-day option premium that was bullish | that share |
+| `yield_change` | 10-year yield change since its prior close, basis points | squash, scale 5 bp, positive leaning the way the registry says (`leans_up`) |
+| `mirai_claude` | Mirai's Claude 30-minute up / flat / down | up over up plus down (a raw input, not Kaze's own channel) |
+
+A reading whose input is blank is blank with that input's reason (`feed_missing`, `provider_refused_symbol`,
+`not_formed_yet`, `too_old`, ...), never 0.5 pretending to be neutral, and its feed stamp is the input's. The
+12:35:59 read of 2026-10-16: price trend -53.03 since close -> 0.300; straightness 0.13 with a net of -5.05 ->
+0.474; breadth 1351 / 1335 -> 0.503; QQQ -1.68% vs RSP -0.28% -> 0.301; tape bull share 0.500; yield +3.8 bp ->
+0.628; Claude 28.5 / 45.5 / 26.0 -> 0.523. **Direction** per channel = 0.5 + the sum of trust x (lean - 0.5) over the
+readings with a lean, the trusts scaled to sum to at most 1 (`direction_all_sources`); with every trust 0 it is 0.5
+and the phone says `coin flip until earned`. Direction is a coin flip on every input tested so far, so none of these
+is expected to earn weight soon; they are on the board so the ledger can say so from live data.
+
+**Width dials** (`registry.WIDTH_DIALS`, in the ledger's scoring order), each stored per read per channel with a raw
+and an applied value (`width_multiplier`, subject `adjustment`), applied = 1 + weight x (raw - 1), weight 0 today:
+
+| Dial | Raw value | Evidence so far |
+|---|---|---|
+| `fed_window` | 2.6 when the window ends after an FOMC decision known at the cut | owner rule, graded with and without on every Fed read |
+| `release_window` | 1.4 when a timed calendar event other than a Fed decision has its own five minutes overlapping the window | x1.4 in the release's 5-minute window |
+| `closing_window` | the fitted closing ratio when the window ends inside the last 15 minutes before the close, else 1.0 | the 5-minute band held 57.9% in the last 15 minutes; a time-of-day widening brought it to 77.4% |
+| `acceleration` | fast speed (5-minute half-life) over slow speed (30-minute) | none yet |
+| `options_vs_tape` | (options-implied swing over tape swing) ^ 0.4 | none yet |
+| `walls` | 1.0; the wall distances (`level_distance_from_price_points`, call and put wall less the read price) are stored beside it as a width input | none; held at 1.0 until a rule is given, so the ledger can never move it |
+
+The **closing ratio** is fitted nightly from the same history as the stretch: the 80% mark of |end move| in swings
+over the windows on the 5-minute grid that end inside the last 15 minutes of each full session (three per horizon
+per session), over the all-day mark (`closing_window_multiplier`; 2026-10-16: 1.358 / 1.274 / 1.130 for 5 / 30 / 60
+minutes). The **cap**: the stacked dials' product is held under `width_cap_multiplier`, the history's 95% mark over
+its 80% mark (2026-10-16: 1.594 / 1.649 / 1.638), so no stack of dials ever widens the band past the widest the past
+data supports. Both are computed at read time from the history the fit used (the way the never-leaves share is) and
+written on the fit snapshot and the decision. The band's half-width is swing x stretch x the capped product; with
+every weight 0 the product is 1.00 and every Phase 2 and 3 number stands.
+
+**The trust ledger** (`results_evaluations`, `engine/trust.py`), written by the nightly after the session's windows
+are settled, for the next session (`trade_date` = the session the weights are in force for, `data_through_trade_date`
+= the session just graded, `known_at` = the write), one row per judged thing x channel x metric (114 rows a night):
+
+- The sample is live only: first-built live reads' base decisions, `run_kind = live`, whose grade counts under the
+  current rule, with their window's end move. Replayed history (`history_replay`) never counts, a day is one vote
+  (every interval is the day-resampled 95% interval of the day means, 20,000 draws, seed 1, the pass test's
+  machinery), and trust is kept apart per channel (horizon) and graded price measure (`end_price`).
+- **Leans** (`lean_brier_test@1`): over the windows that moved more than half the channel's rung (2.5 / 5 / 7.5
+  points) and had the lean, each window scores 1 - (lean - up)^2 / 0.25 (Brier skill over even odds, up = 1 when
+  the end move is positive); the score is the mean of the day means (`brier_skill_portion`); the weight is the
+  interval's low end floored at 0 (`trust_weight_portion`), so a weight above 0 needs the whole interval above 0;
+  verdict `passed` or `failed`.
+- **Dials** (`dial_band_test@1`), in the registry's order, each on top of the dials earned before it in the same
+  pass: over the windows the dial touches (raw not 1.00), the end band's half-width is rebuilt as swing x stretch x
+  the earned dials' raws, capped, with and without this dial's raw; each window scores the band's interval score
+  (2h + 10 x the points the move landed outside; a proper score for an 80% band) and the gain is without less
+  with (`interval_score_gain_points`, mean of the day means, with its interval); coverage with and without the dial
+  is written beside it (`band_coverage_portion`, slices `dial_on` / `dial_off`). The weight is 1 when the
+  interval's low end is above 0, else 0: one weight per dial, a proven dial at full strength. Claude's width call
+  (Phase 5) will be scored last.
+- **Not enough live sessions.** Under 20 sessions in a test's sample every row is blank `too_few_sessions` with
+  verdict `too_few_sessions` and `detail_text` "not enough live sessions: n of 20"; no weight moves from 0. Today,
+  with no live session yet, that is every row. The Fed and release dials need 20 sessions with such a window, so
+  they will stay there longest; the walls dial, raw 1.0, never has a window to score.
+- The read job applies only weights the ledger holds (`store.trust_weights_known`: the newest weight per component
+  and channel in force for the read's session or earlier and known by the cut), and copies every weight it applied
+  onto the value it moved (`trust_weight_applied_portion`). `--trust` prints the newest ledger per reading, dial and
+  channel: sessions, windows, score, interval, verdict and weight.
+
 **Storage** (measured 2026-10-18 on the real store: 74 sessions of bars, all 74 rebuilt and graded). Under schema
 step 4 the file was 1,439 MB, 94% of it the three long value tables whose text ids (a value id carried its outcome
 id, which carried the decision id, which carried the snapshot id) were 85% of each row and were stored twice more in
@@ -278,8 +368,9 @@ the indexes. Step 5 (integer rowid keys, one unique index per value table, the h
 MB for 34,188 (their text ids are the long ones left), decisions 12 + 5 MB, snapshots 3 + 1 MB. A rebuilt session of
 77 reads (9,908 observations, 5,082 decision values, 231 windows and 231 grades with 5,775 outcome values) costs
 4.0 MB; a live day writes that once live and once again rebuilt by the nightly, about 8 MB a day, so 100 sessions of
-live running add about 0.8 GB. The nightly's gzipped backup is about 12% of the file (35 MB). There is no retention rule
-yet; Will decides one at about 100 sessions.
+live running add about 0.8 GB. Phase 4 adds 16 observations and 57 decision values per read (the readings, the wall
+distances, the dials, the cap and closing ratio) and 114 ledger rows a night. The nightly's gzipped backup is about 12% of the file (35 MB).
+There is no retention rule yet; Will decides one at about 100 sessions.
 
 ## Feeds (what Kaze reads from Mirai)
 
@@ -321,22 +412,30 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, its range decisions, and the outcomes and grades of every window of that day ended and still open |
 | `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, the whole session's bars, then the session's outcomes and grades (the earlier rebuilt ones replaced with their reads); on a fresh store this is how a past session gets its grades |
 | `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
-| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once per session, on the first launch from 17:00 New York on when `nightly_done.txt` does not name the latest session, so a box asleep at 17:15 catches up at 18:15 and a weekend or holiday launch does nothing; a hand `--nightly` is refused with one line while the session is open and is a no-op once the session is done) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, parity, the backup file); `nightly_done.txt` |
+| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once per session, on the first launch from 17:00 New York on when `nightly_done.txt` does not name the latest session, so a box asleep at 17:15 catches up at 18:15 and a weekend or holiday launch does nothing; a hand `--nightly` is refused with one line while the session is open and is a no-op once the session is done) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); the trust ledger for the next session; one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, the ledger, parity, the backup file); `nightly_done.txt` |
 | `python3 -m engine.read_job --scoreboard [YYYY-MM-DD]` | by hand | nothing; prints the grades per session, run kind, channel, variant and clipped slice (one session, or every graded one) and the pooled last 20 sessions |
 | `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
+| `python3 -m engine.read_job --trust` | by hand | nothing; prints the trust ledger: every reading and dial per channel with its sample, score, interval, verdict and weight |
 
 The `range` block of `latest.json` is the forecast copied whole (floats at six decimals, moments on the New York clock):
 `price`, `read_at`, `window_from` (end of the read's minute), `newest_bar_at`, `minutes_in`, `minutes_left`, `speed`,
 `speed_fast`, `speed_slow`, `fast_over_slow`, `path` (15 / 30 / 60: `up`, `down`, `straightness`), `straddle`, `fit`
-(`id`, `known_at`, `status`; null when none), `fed_decision_at`, `chance_up_if_moves` (0.5), `trust` (0) and
+(`id`, `known_at`, `status`; null when none), `fed_decision_at`, `releases_at` (the day's timed events known at the
+cut, Fed decisions aside), `walls` (`call_wall`, `put_wall` prices), `push` (Phase 4: one entry per reading in the
+registry's order: `name`, `value` in words, `lean`, `reason` when blank, `feed` (the input's `source_feed_name`,
+`feed_status`, `feed_age_seconds`, `market_at`) and `trust` per channel), `chance_up_if_moves`, `trust` and
+`direction_text` (the headline channel's call: 0.5, 0 and `coin flip until earned` until a reading earns weight) and
 `channels` keyed `5_minutes` / `30_minutes` / `60_minutes`, each with `minutes`, `swing`, `stretch`, `average_stretch`,
 `fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_over_tape`, `clipped`,
-`ends_at`, `in_fed_window`, `dials` (`fed_window`, `fast_over_slow`: `raw`, `applied`), `bands` (`80` and `average_80`:
-`half_width`, `low`, `high`), `owner_rule_bands` (the same at x2.6; null outside a Fed window), `status` and `reason`;
-and, from Phase 3, `windows` (built by `engine/live_feed.py` from the store after the read and its grades are
-written; `{status: failed, reason}` when that step crashed). Every channel key is `5_minutes` / `30_minutes` /
-`60_minutes`; the 5-minute channel follows every read, the 30- and 60-minute channels the headline-lane reads (:05 and
-:35), in `current`, `finished` and `score` alike:
+`ends_at`, `in_fed_window`, `closing_multiplier`, `width_cap`, `dials` (keyed `fed_window`, `release_window`,
+`closing_window`, `acceleration`, `options_vs_tape`, `walls`, in that order: `raw`, `applied`, `weight`, `means` in one
+short phrase), `dial_product` (`raw`, `applied` = held under the cap), `direction` (`chance_up_if_moves`, `trust`,
+`weights` per reading, `text`), `bands` (`80` and `average_80`: `half_width`, `low`, `high`), `owner_rule_bands` (the
+same at x2.6; null outside a Fed window), `status` and `reason`; and, from Phase 3, `windows` (built by
+`engine/live_feed.py` from the store after the read and its grades are written; `{status: failed, reason}` when that
+step crashed). Every channel key is `5_minutes` / `30_minutes` / `60_minutes`; the 5-minute channel follows every
+read, the 30- and 60-minute channels the headline-lane reads (:05 and :35), in `current`, `finished` and `score`
+alike:
 
 - `current[channel]`: the channel's newest live window, measured the grade's way (`window_facts` over the bars held
   between `window_from` and the cut, never past `ends_at`). `read_id`, `read_at`, `price` (the read price the band and
@@ -359,8 +458,10 @@ written; `{status: failed, reason}` when that step crashed). Every channel key i
   out).
 - `score[channel]`: over that channel's `finished` list, per grade word, `yes` and `graded`.
 
-The grade words and what yes means (`GRADE_WORD_MEASURE`), the window kinds and every list behind them live in
-`engine/registry.py` (`OUTCOME_KINDS`, `LABEL_STATUSES`, `VALUE_STATUSES`, `BAND_SIDES`, `WINDOW_SIDES`).
+The grade words and what yes means (`GRADE_WORD_MEASURE`), the window kinds, the readings and dials with their
+meanings and parameters, the trust tests' parameters and every list behind them live in `engine/registry.py`
+(`OUTCOME_KINDS`, `LABEL_STATUSES`, `VALUE_STATUSES`, `BAND_SIDES`, `WINDOW_SIDES`, `PUSH_READINGS`, `WIDTH_DIALS`,
+`LEAN_TEST_PARAMETERS`, `DIAL_TEST_PARAMETERS`).
 
 `engine/jobs/install_jobs.sh` writes the two plists into `~/Library/LaunchAgents` with this repo's real path and
 boots them (bootout, wait, bootstrap, enable).

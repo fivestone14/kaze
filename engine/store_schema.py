@@ -4,7 +4,7 @@
 # integer rowid and keep one unique index on the design's own grain.
 from engine import registry
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -122,6 +122,28 @@ TABLE_COLUMNS_SQL = {
     value_status TEXT NOT NULL CHECK (value_status IN ({check_list(registry.VALUE_STATUSES)})),
     blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
     {ONE_VALUE_OR_BLANK_SQL}""",
+    "results_evaluations": f"""
+    evaluation_rowid INTEGER PRIMARY KEY, evaluation_row_id TEXT NOT NULL UNIQUE, evaluation_id TEXT NOT NULL,
+    evaluation_kind TEXT NOT NULL CHECK (evaluation_kind IN ({check_list(registry.EVALUATION_KINDS)})),
+    trade_date TEXT NOT NULL,
+    evaluated_kind TEXT NOT NULL CHECK (evaluated_kind IN ({check_list(registry.EVALUATED_KINDS)})),
+    evaluated_name TEXT NOT NULL, evaluated_version TEXT NOT NULL, judge_name TEXT NOT NULL,
+    judge_version TEXT NOT NULL, signal_lane TEXT NOT NULL CHECK (signal_lane IN ({check_list(registry.LANES)})),
+    overlap_group_name TEXT, horizon_name TEXT NOT NULL, graded_price_measure TEXT NOT NULL,
+    slice_key TEXT NOT NULL, metric_name TEXT NOT NULL, metric_value REAL,
+    metric_text TEXT CHECK (metric_text IS NULL OR metric_text IN ({check_list(registry.VERDICTS)})),
+    blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
+    metric_interval_low REAL, metric_interval_high REAL,
+    interval_method TEXT
+      CHECK (interval_method IS NULL OR interval_method IN ({check_list(registry.INTERVAL_METHODS)})),
+    baseline_name TEXT NOT NULL CHECK (baseline_name IN ({check_list(registry.BASELINES)})),
+    baseline_metric_value REAL, sessions_count INTEGER NOT NULL, independent_windows_count INTEGER NOT NULL,
+    rows_count INTEGER NOT NULL, live_frozen_rows_count INTEGER NOT NULL, data_from_trade_date TEXT,
+    data_through_trade_date TEXT NOT NULL, applies_from_at TEXT NOT NULL, was_pre_registered INTEGER NOT NULL,
+    test_family_name TEXT NOT NULL, test_family_size_count INTEGER NOT NULL, detail_text TEXT, known_at TEXT NOT NULL,
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})), builder_code_commit TEXT,
+    written_at TEXT NOT NULL,
+    CHECK ((metric_value IS NOT NULL) + (blank_reason IS NOT NULL) = 1)""",
 }
 TABLE_INDEXES_SQL = {
     "collect_snapshots": ("CREATE INDEX ix_snapshots_day_cut ON collect_snapshots (trade_date, cut_at)",
@@ -142,6 +164,9 @@ TABLE_INDEXES_SQL = {
                          "CREATE INDEX ix_outcomes_judged ON results_outcomes (judged_decision_id)"),
     "results_outcome_values": ("CREATE UNIQUE INDEX ux_outcome_values_key ON results_outcome_values "
                                "(outcome_rowid, measure_name, measure_version, subject_key)",),
+    "results_evaluations": ("CREATE INDEX ix_evaluations_day_kind ON results_evaluations (trade_date, evaluation_kind)",
+                            "CREATE INDEX ix_evaluations_evaluated ON results_evaluations "
+                            "(evaluated_kind, evaluated_name, horizon_name, known_at)"),
 }
 # Each long value table with its header table and the two columns that join them: the header's text id (what the
 # value rows carried before step 5) and the integer rowid they carry now.
@@ -154,6 +179,7 @@ PHASE_1_TABLES = ("registry_measures", "registry_components", "collect_snapshots
                   "collect_market_prices", "collect_calendar_and_events")
 PHASE_2_TABLES = ("reads_decisions", "reads_decision_values")
 PHASE_3_TABLES = ("results_outcomes", "results_outcome_values")
+PHASE_4_TABLES = ("results_evaluations",)
 
 
 def create_table_sql(table):
@@ -265,8 +291,16 @@ def schema_step_6(conn):
         (registry.SPX_SYMBOL, *registry.LABELS_THAT_COUNT, registry.SPX_SYMBOL))
 
 
+def schema_step_7(conn):
+    """Phase 4: the trust ledger (results_evaluations); the fast-over-slow dial takes its name, acceleration."""
+    for table in PHASE_4_TABLES:
+        create_table(conn, table)
+    conn.execute("UPDATE reads_decision_values SET subject_key = ? WHERE subject_key = ?",
+                 (registry.subject_key(adjustment=registry.ACCELERATION_DIAL), "adjustment=fast_over_slow"))
+
+
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
-                6: schema_step_6}
+                6: schema_step_6, 7: schema_step_7}
 
 
 def upgrade(conn):

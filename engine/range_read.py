@@ -1,27 +1,30 @@
 # One read's range forecast: today's speed and swings from the store's bars, the bands from the newest history fit
-# known at the cut, never-leaves share and the options check from that same history, the dials and the 50/50
-# direction. The forecast it builds is the phone's range block as well as the source of the stored readings and
-# decisions.
+# known at the cut, never-leaves share, closing ratio and width cap from that same history, the width dials applied by
+# the weights the trust ledger holds (none yet), the push readings and the direction call. The forecast it builds is
+# the phone's range block as well as the source of the stored readings and decisions.
 import math
 from datetime import date, timedelta
 
 import numpy as np
 
-from engine import range_fit, registry, session_clock, store
+from engine import push_read, range_fit, registry, session_clock, store
 
 DECISION_KIND = "range_forecast"
 PRODUCER = ("forecaster", registry.RANGE_ENGINE_NAME, registry.RANGE_ENGINE_VERSION)
 GRADED_PRICE = registry.BAND_PRICE_MEASURE[registry.BAND]
-NO_EFFECT = 1.0
+NO_EFFECT = registry.NO_EFFECT
 BAND_EDGES = ("half_width", "low", "high")
+# Why a dial's raw value can be blank; the dials left out always read.
+DIAL_BLANK = {registry.ACCELERATION_DIAL: registry.NOT_FORMED_REASON,
+              registry.OPTIONS_VS_TAPE_DIAL: registry.NOT_PRICEABLE_REASON,
+              registry.CLOSING_DIAL: registry.NO_FIT_REASON}
+WALL_TYPES = ("call_wall", "put_wall")
 
 
 def value_of(observations, measure_name, subject_key=store.WHOLE):
     """The value of one observation in a read's list, or None when it is absent or blank."""
-    for observation in observations:
-        if observation["measure_name"] == measure_name and observation["subject_key"] == subject_key:
-            return store.observation_value(observation)
-    return None
+    row = push_read.observation_of(observations, measure_name, subject_key)
+    return store.observation_value(row) if row is not None else None
 
 
 def stored_fit(conn, fit_snapshot):
@@ -52,6 +55,9 @@ def forecast_read(conn, snapshot, observations, cut_at):
     fit_snapshot = store.newest_fit_known(conn, day.isoformat(), snapshot["cut_at"])
     fits = stored_fit(conn, fit_snapshot) if fit_snapshot else None
     history = range_fit.history_before(conn, date.fromisoformat(fit_snapshot["trade_date"])) if fit_snapshot else None
+    fitted = range_fit.multipliers_from_history(history) if history else None
+    events = store.calendar_events_known(conn, day.isoformat(), snapshot["cut_at"])
+    weights = store.trust_weights_known(conn, day.isoformat(), snapshot["cut_at"])
     forecast = {
         "price": float(closes[-1]) if closes.size else None, "read_at": cut_at,
         "window_from": cut_at.replace(second=0, microsecond=0) + timedelta(seconds=session_clock.BAR_LENGTH_SECONDS),
@@ -64,12 +70,22 @@ def forecast_read(conn, snapshot, observations, cut_at):
         "straddle": value_of(observations, "same_day_straddle_mid_points"),
         "fit": {"id": fit_snapshot["snapshot_id"], "known_at": session_clock.parse_iso(fit_snapshot["known_at"]),
                 "status": fit_snapshot["snapshot_status"]} if fit_snapshot else None,
-        "fed_decision_at": fed_decision_at(conn, day, snapshot["cut_at"]),
-        "chance_up_if_moves": registry.DIRECTION_UNTIL_EARNED, "trust": 0.0,
+        "fed_decision_at": fed_decision_at(events),
+        "releases_at": [session_clock.parse_iso(starts_at) for starts_at, kind in events
+                        if kind not in registry.FED_DECISION_EVENT_KINDS],
+        "walls": {level: value_of(observations, "level_price_points", registry.subject_key(level_type=level))
+                  for level in WALL_TYPES},
         "channels": {},
     }
+    forecast["push"] = push_read.readings(observations, forecast["path"])
     for name, minutes in registry.HORIZON_MINUTES.items():
-        forecast["channels"][name] = channel_forecast(forecast, name, minutes, fits, history)
+        forecast["channels"][name] = channel_forecast(forecast, name, minutes, fits, fitted, history, weights)
+    for entry in forecast["push"]:
+        entry["trust"] = {name: channel["direction"]["weights"].get(entry["name"], 0.0)
+                          for name, channel in forecast["channels"].items()}
+    headline = forecast["channels"][registry.HEADLINE_HORIZON]["direction"]
+    forecast.update({"chance_up_if_moves": headline["chance_up_if_moves"], "trust": headline["trust"],
+                     "direction_text": headline["text"]})
     return forecast
 
 
@@ -83,17 +99,56 @@ def path_moves(closes, minutes):
     return {"up": up, "down": down, "straightness": abs(up - down) / (up + down) if up + down else None}
 
 
-def fed_decision_at(conn, day, cut_at_iso):
+def fed_decision_at(events):
     """When the day's Fed decision lands, from the calendar facts known at the cut, or None when there is none."""
-    times = [starts_at for starts_at, kind in store.calendar_events_known(conn, day.isoformat(), cut_at_iso)
-             if kind in registry.FED_DECISION_EVENT_KINDS]
+    times = [starts_at for starts_at, kind in events if kind in registry.FED_DECISION_EVENT_KINDS]
     return session_clock.parse_iso(min(times)) if times else None
 
 
-def channel_forecast(forecast, name, minutes, fits, history):
-    """One horizon's swing, multipliers, bands, never-leaves share, options check, dials, window and status."""
+def release_in_window(releases_at, window_from, ends_at):
+    """True when a scheduled release's own five minutes overlap the window."""
+    slot = timedelta(minutes=session_clock.SLOT_MINUTES)
+    return any(starts_at < ends_at and starts_at + slot > window_from for starts_at in releases_at)
+
+
+def dial_raw_values(forecast, channel_fit, window_from, ends_at, in_fed_window, options_over_tape):
+    """Every dial's raw value for one channel's window; None where its input is missing (blank with DIAL_BLANK)."""
+    minutes_left = forecast["minutes_left"]
+    close_at = window_from + timedelta(minutes=minutes_left) if minutes_left is not None else None
+    in_closing = close_at is not None and ends_at >= close_at - timedelta(minutes=registry.CLOSING_WINDOW_MINUTES)
+    return {
+        registry.OWNER_RULE_DIAL: registry.FED_OWNER_RULE_MULTIPLIER if in_fed_window else NO_EFFECT,
+        registry.RELEASE_DIAL: registry.RELEASE_WINDOW_MULTIPLIER
+        if release_in_window(forecast["releases_at"], window_from, ends_at) else NO_EFFECT,
+        registry.CLOSING_DIAL: channel_fit["closing"] if in_closing else NO_EFFECT,
+        registry.ACCELERATION_DIAL: forecast["fast_over_slow"],
+        registry.OPTIONS_VS_TAPE_DIAL: options_over_tape ** registry.OPTIONS_VS_TAPE_POWER
+        if options_over_tape is not None else None,
+        registry.WALLS_DIAL: registry.WALLS_MULTIPLIER,
+    }
+
+
+def applied_dials(raw_values, weights, horizon_name):
+    """Each dial's applied value, 1 + weight x (raw - 1), with its weight and meaning; a blank raw applies nothing."""
+    dials = {}
+    for dial, raw in raw_values.items():
+        weight = weights.get((registry.WIDTH_DIAL_KIND, dial, horizon_name), 0.0)
+        applied = NO_EFFECT + weight * (raw - NO_EFFECT) if raw is not None else NO_EFFECT
+        dials[dial] = {registry.RAW_ROLE: raw, registry.APPLIED_ROLE: applied, "weight": weight,
+                       "means": registry.WIDTH_DIAL_MEANING[dial]}
+    return dials
+
+
+def capped(product, cap):
+    """The stacked dials' product held under the history's cap (no cap known: the product as it is)."""
+    return min(product, cap) if cap is not None else product
+
+
+def channel_forecast(forecast, name, minutes, fits, fitted, history, weights):
+    """One horizon's swing, multipliers, bands, never-leaves share, options check, dials, direction, window, status."""
     speed, minutes_left, price = forecast["speed"], forecast["minutes_left"], forecast["price"]
     fit = fits[name] if fits else range_fit.horizon_fit(None, None, None, None)
+    fit.update({key: fitted[name][key] for key in ("closing", "cap")} if fitted else {})
     swing = range_fit.swing_points(speed, minutes) if speed is not None else None
     window_minutes = min(minutes, minutes_left) if minutes_left is not None else minutes
     ends_at = forecast["window_from"] + timedelta(minutes=window_minutes)
@@ -101,24 +156,30 @@ def channel_forecast(forecast, name, minutes, fits, history):
     straddle = forecast["straddle"]
     options_swing = straddle * math.sqrt(window_minutes / minutes_left) if straddle and minutes_left else None
     window_swing = range_fit.swing_points(speed, window_minutes) if speed else None
-    dial_raw = {registry.OWNER_RULE_DIAL: registry.FED_OWNER_RULE_MULTIPLIER if in_fed_window else NO_EFFECT,
-                "fast_over_slow": forecast["fast_over_slow"]}
+    options_over_tape = options_swing / window_swing if options_swing and window_swing else None
+    dials = applied_dials(dial_raw_values(forecast, fit, forecast["window_from"], ends_at, in_fed_window,
+                                          options_over_tape), weights, name)
+    product = math.prod(dial[registry.APPLIED_ROLE] for dial in dials.values())
+    others = product / dials[registry.OWNER_RULE_DIAL][registry.APPLIED_ROLE]
     channel = {
         "minutes": minutes, "swing": swing, "stretch": fit[registry.BAND],
         "average_stretch": fit[registry.AVERAGE_BAND],
         "fit_sessions": fit["sessions"], "fit_windows": fit["windows"], "rung_points": registry.RUNG_POINTS[name],
         "stays_inside_share": range_fit.never_leaves_share(history, name, registry.RUNG_POINTS[name], swing)
         if history else None,
-        "options_swing": options_swing,
-        "options_over_tape": options_swing / window_swing if options_swing and window_swing else None,
+        "options_swing": options_swing, "options_over_tape": options_over_tape,
         "clipped": minutes_left is not None and minutes > minutes_left, "ends_at": ends_at,
-        "in_fed_window": in_fed_window,
-        "dials": {dial: {registry.RAW_ROLE: dial_raw[dial], registry.APPLIED_ROLE: NO_EFFECT}
-                  for dial in registry.WIDTH_DIALS},
-        "bands": band_edges(price, swing, fit, NO_EFFECT),
-        "owner_rule_bands": (band_edges(price, swing, fit, registry.FED_OWNER_RULE_MULTIPLIER)
-                            if in_fed_window else None),
+        "in_fed_window": in_fed_window, "closing_multiplier": fit["closing"], "width_cap": fit["cap"],
+        "dials": dials,
+        "dial_product": {registry.RAW_ROLE: product, registry.APPLIED_ROLE: capped(product, fit["cap"])},
+        "direction": push_read.direction(forecast["push"], {reading: weights.get((registry.PUSH_READING_KIND, reading,
+                                                                                   name), 0.0)
+                                                            for reading in registry.PUSH_READINGS}),
     }
+    channel["bands"] = band_edges(price, swing, fit, channel["dial_product"][registry.APPLIED_ROLE])
+    channel["owner_rule_bands"] = (band_edges(price, swing, fit,
+                                              capped(others, fit["cap"]) * registry.FED_OWNER_RULE_MULTIPLIER)
+                                   if in_fed_window else None)
     if swing is None:
         channel["status"], channel["reason"] = registry.DECISION_BLIND, "speed_not_formed"
     elif channel["stretch"] is None:
@@ -149,7 +210,8 @@ def feed_stamp(observations, feed):
 
 
 def reading_rows(snapshot, observations, forecast):
-    """The read's range readings as observations on its snapshot: speeds, swings, the options check and the path."""
+    """The read's range readings as observations on its snapshot: speeds, swings, the options check, the path, the
+    wall distances and the push readings."""
     rows = []
     stamps = {feed: feed_stamp(observations, feed) for feed in registry.RANGE_INPUT_FEEDS}
     bars_stamp = dict(stamps["spx_bars"],
@@ -169,14 +231,22 @@ def reading_rows(snapshot, observations, forecast):
         not_formed if forecast["speed_slow"] is None else "no_activity")
     for name, channel in forecast["channels"].items():
         add("typical_swing_points", channel["swing"], bars_stamp, not_formed, horizon=name)
-        add("options_implied_swing_points", channel["options_swing"], scan_stamp, "not_priceable", horizon=name)
-        add("options_over_tape_swing_ratio", channel["options_over_tape"], scan_stamp, "not_priceable", horizon=name)
+        add("options_implied_swing_points", channel["options_swing"], scan_stamp, registry.NOT_PRICEABLE_REASON,
+            horizon=name)
+        add("options_over_tape_swing_ratio", channel["options_over_tape"], scan_stamp, registry.NOT_PRICEABLE_REASON,
+            horizon=name)
     for minutes, path in forecast["path"].items():
         formed = path is not None
         add("path_up_points", path["up"] if formed else None, bars_stamp, not_formed, window_minutes=minutes)
         add("path_down_points", path["down"] if formed else None, bars_stamp, not_formed, window_minutes=minutes)
         add("trend_straightness_ratio", path["straightness"] if formed else None, bars_stamp,
             not_formed if not formed else "no_activity", window_minutes=minutes)
+    for level, wall in forecast["walls"].items():
+        wall_row = push_read.observation_of(observations, "level_price_points", registry.subject_key(level_type=level))
+        formed = wall is not None and forecast["price"] is not None
+        add("level_distance_from_price_points", wall - forecast["price"] if formed else None, scan_stamp,
+            "feed_missing" if wall is not None else wall_row["blank_reason"], level_type=level)
+    rows.extend(push_read.reading_rows(snapshot, forecast["push"]))
     return rows
 
 
@@ -204,7 +274,8 @@ def decision_rows(snapshot, forecast):
 
 
 def value_rows(decision, forecast, name, variant):
-    """A decision's values: centre, speed, swing, fit, bands (Fed-widened on the owner_rule), rung share, dials, up."""
+    """A decision's values: centre, speed, swing, fit, bands (Fed-widened on the owner_rule), rung share, the dials
+    and their product, the cap, the closing ratio, every reading's lean with its trust and the direction call."""
     rows = []
     channel = forecast["channels"][name]
     bands = channel["owner_rule_bands"] if variant == registry.OWNER_RULE_VARIANT else channel["bands"]
@@ -223,6 +294,8 @@ def value_rows(decision, forecast, name, variant):
     add("fit_snapshot_id", forecast["fit"] and forecast["fit"]["id"], blank=no_fit)
     add("fit_sessions_count", channel["fit_sessions"], horizon, no_fit)
     add("fit_windows_count", channel["fit_windows"], horizon, no_fit)
+    add("closing_window_multiplier", channel["closing_multiplier"], horizon, no_fit)
+    add("width_cap_multiplier", channel["width_cap"], horizon, no_fit)
     for band, edges in bands.items():
         subject = registry.subject_key(band=band, horizon=name)
         add("band_multiplier", channel["stretch" if band == registry.BAND else "average_stretch"], subject, no_fit)
@@ -238,7 +311,14 @@ def value_rows(decision, forecast, name, variant):
         raw, applied = setting[registry.RAW_ROLE], setting[registry.APPLIED_ROLE]
         if variant == registry.OWNER_RULE_VARIANT and dial == registry.OWNER_RULE_DIAL:
             applied = raw
-        add("width_multiplier", raw, subject, not_formed, value_role=registry.RAW_ROLE)
-        add("width_multiplier", applied, subject, value_role=registry.APPLIED_ROLE)
-    add("chance_up_if_moves_probability", forecast["chance_up_if_moves"], trust_weight=forecast["trust"])
+        add("width_multiplier", raw, subject, DIAL_BLANK.get(dial), value_role=registry.RAW_ROLE)
+        add("width_multiplier", applied, subject, value_role=registry.APPLIED_ROLE, trust_weight=setting["weight"])
+    subject = registry.subject_key(adjustment=registry.STACKED_DIALS)
+    add("width_multiplier", channel["dial_product"][registry.RAW_ROLE], subject, value_role=registry.RAW_ROLE)
+    add("width_multiplier", channel["dial_product"][registry.APPLIED_ROLE], subject, value_role=registry.APPLIED_ROLE)
+    direction = channel["direction"]
+    for entry in forecast["push"]:
+        add("push_lean_probability", entry["lean"], registry.subject_key(reading=entry["name"]), entry["reason"],
+            trust_weight=direction["weights"].get(entry["name"]))
+    add("chance_up_if_moves_probability", direction["chance_up_if_moves"], trust_weight=direction["trust"])
     return rows

@@ -1,13 +1,13 @@
 # The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, grades, live feed) and
-# the nightly (catch-up rebuilds, fits, every open window settled, parity, backup); by hand it rebuilds a moment or a
-# session, backfills bars, or prints the scoreboard or the range pass test.
+# the nightly (catch-up rebuilds, fits, every open window settled, the trust ledger, parity, backup); by hand it
+# rebuilds a moment or a session, backfills bars, or prints the scoreboard, the range pass test or the trust ledger.
 import argparse
 import sys
 import traceback
 from datetime import date
 
 from engine import backup, collect, grade, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry
-from engine import session_clock, store
+from engine import session_clock, store, trust
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
@@ -29,9 +29,11 @@ def main():
     parser.add_argument("--scoreboard", nargs="?", const=WHOLE_SCOREBOARD, metavar="YYYY-MM-DD",
                         help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
+    parser.add_argument("--trust", action="store_true",
+                        help="print the trust ledger: every reading and dial per channel with its verdict and weight")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
-    if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test:
+    if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test or args.trust:
         job = JOB_REBUILD
     try:
         if args.nightly_if_due:
@@ -48,6 +50,8 @@ def main():
             run_scoreboard(None if args.scoreboard == WHOLE_SCOREBOARD else args.scoreboard)
         elif args.pass_test:
             run_pass_test()
+        elif args.trust:
+            print("\n".join(trust.ledger_lines(store.open_store())))
         else:
             run_live()
     except Exception as failure:
@@ -255,8 +259,8 @@ def run_nightly_if_due():
 
 def run_nightly():
     """Missed slots (on the session's own day), bars and rebuilds for today and any live day never rebuilt, history
-    fits, every open window of every session settled, parity, the backup, the health line, the done marker. Refused
-    while the session is still open, and a no-op once the latest session is done (a weekend or a second run)."""
+    fits, every open window of every session settled, the trust ledger, parity, the backup, the health line, the done
+    marker. Refused while the session is still open, a no-op once the latest session is done (a weekend, a rerun)."""
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
     today = session_clock.latest_trading_day(session_clock.to_eastern(written_at).date())
@@ -285,6 +289,7 @@ def run_nightly():
                                                        range_read.DECISION_KIND):
         windows, grades = grade.close_windows(conn, date.fromisoformat(trade_date), written_at, written_at)
         settled.append(f"{trade_date} {windows} windows ({grades} grades)")
+    ledger = trust.write_ledger(conn, today, next_session, written_at)
     parity = parity_summaries(conn, half_days, written_at)
     packed, pruned, same_disk = backup.write_backup(conn, today)
     if same_disk:
@@ -296,7 +301,7 @@ def run_nightly():
     log(JOB_NIGHTLY, f"nightly {today}: {store.live_reads_count(conn, today.isoformat())} live reads, {missed} missed "
                      f"slots marked, {store.snapshots_with_reason(conn, today.isoformat(), GRADE_FAILED)} reads with a "
                      f"failed grading step, {live_bars} live bars ({bars}); rebuilt {', '.join(rebuilt)}; {fits}; "
-                     f"settled {', '.join(settled) or 'nothing open'}; parity: {parity}; "
+                     f"settled {', '.join(settled) or 'nothing open'}; {ledger}; parity: {parity}; "
                      f"backup {packed.name} ({pruned} older removed)")
     paths.nightly_done_file().write_text(today.isoformat() + "\n")
 
