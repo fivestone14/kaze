@@ -3,7 +3,7 @@
 # until the ledger writes one, so the call stays a coin flip. A reading with a blank input stays blank with that reason.
 import math
 
-from engine.store import registry, store
+from engine.store import components, registry, store
 
 
 def observation_of(observations, measure_name, subject_key=store.WHOLE):
@@ -14,7 +14,7 @@ def observation_of(observations, measure_name, subject_key=store.WHOLE):
 
 def tilted_lean(unit):
     """A lean from a unit tilt in -1..1: even plus the tilt times the unit."""
-    return registry.EVEN_CHANCE + registry.LEAN_TILT * unit
+    return components.EVEN_CHANCE + components.LEAN_TILT * unit
 
 
 def squashed_lean(value, scale, leans_up=True):
@@ -36,8 +36,7 @@ def reading_entry(name, value, lean, reason, stamp_row):
 
 
 def build_reading(name, inputs, build):
-    """One reading built from its input rows' values, or blank with the first blank input's reason; stamped with the
-    first input's feed."""
+    """One reading from its input rows' values, or blank with the first blank input's reason; the first input stamps."""
     stamp = next((row for row in inputs if row is not None), None)
     values = [store.observation_value(row) if row is not None else None for row in inputs]
     for row, value in zip(inputs, values):
@@ -47,65 +46,65 @@ def build_reading(name, inputs, build):
     return reading_entry(name, text, lean, None if lean is not None else "no_activity", stamp)
 
 
-def readings(observations, path):
-    """Every push reading of a read from its observations and the range engine's path legs, in the registry's order."""
+def readings(observations, path_moves):
+    """Every push reading of a read from its observations and the range engine's path moves, in the registry's order."""
+    # The value in words is what the phone shows beside the lean, so it is short and title-cased here, once.
     def row(measure_name, **subject):
         """The read's observation of a measure and subject."""
         return observation_of(observations, measure_name, registry.subject_key(**subject))
 
-    scale = registry.LEAN_SCALE
+    scale = components.LEAN_SCALE
     yield_measure = registry.MEASURES_BY_NAME["ten_year_yield_change_basis_points"]
     yield_leans_up = yield_measure["positive_value_means"] == "leans_up"
     return [
-        build_reading(registry.PRICE_TREND, [row("move_points", since="prior_close"), row("move_points", since="open")],
-                      lambda since_close, since_open: (f"{since_close:+.2f} since close, {since_open:+.2f} since open",
-                                                       squashed_lean(since_close, scale[registry.PRICE_TREND]))),
-        straightness_reading(path[registry.STRAIGHTNESS_WINDOW_MINUTES], row("spx_price_points")),
-        build_reading(registry.BREADTH, [row("nyse_advancing_portion"), row("nyse_advancing_count"),
-                                         row("nyse_declining_count")],
-                      lambda share, advancing, declining: (f"{int(advancing)} advancing / {int(declining)} declining",
-                                                           share)),
-        build_reading(registry.BIG_TECH_VS_REST,
-                      [row("fund_change_from_prior_close_pct", symbol=registry.BIG_TECH_SYMBOL),
-                       row("fund_change_from_prior_close_pct", symbol=registry.REST_SYMBOL)],
-                      lambda big_tech, rest: (f"{registry.BIG_TECH_SYMBOL} {big_tech:+.2f}% vs {registry.REST_SYMBOL} "
-                                              f"{rest:+.2f}%",
-                                              squashed_lean(big_tech - rest, scale[registry.BIG_TECH_VS_REST]))),
-        build_reading(registry.OPTIONS_BUYERS, [row("bullish_portion_of_sided_premium")],
-                      lambda bullish: (f"{bullish:.1%} of sided premium bullish", bullish)),
-        build_reading(registry.YIELD_CHANGE, [row("ten_year_yield_change_basis_points")],
-                      lambda change: (f"{change:+.1f} bp since prior close",
-                                      squashed_lean(change, scale[registry.YIELD_CHANGE], yield_leans_up))),
-        build_reading(registry.MIRAI_CLAUDE, [row("mirai_claude_forecast_pct", horizon=registry.CLAUDE_LEAN_HORIZON,
-                                                  side=side) for side in registry.CLAUDE_SIDES],
-                      lambda up, flat, down: (f"up {up:.1f} / flat {flat:.1f} / down {down:.1f}",
+        build_reading(components.PRICE_TREND,
+                      [row("move_points", since="prior_close"), row("move_points", since="open")],
+                      lambda since_close, since_open: (f"{since_close:+.0f} Since Close",
+                                                       squashed_lean(since_close, scale[components.PRICE_TREND]))),
+        straightness_reading(path_moves[components.STRAIGHTNESS_WINDOW_MINUTES], row("spx_price_points")),
+        build_reading(components.BREADTH, [row("nyse_advancing_portion")],
+                      lambda share: (f"{share:.0%} Advancing", share)),
+        build_reading(components.BIG_TECH_VS_REST,
+                      [row("fund_change_from_prior_close_pct", symbol=components.BIG_TECH_SYMBOL),
+                       row("fund_change_from_prior_close_pct", symbol=components.REST_SYMBOL)],
+                      lambda big_tech, rest: (f"{components.BIG_TECH_SYMBOL} {big_tech - rest:+.1f}% vs "
+                                              f"{components.REST_SYMBOL}",
+                                              squashed_lean(big_tech - rest, scale[components.BIG_TECH_VS_REST]))),
+        build_reading(components.OPTIONS_BUYERS, [row("bullish_portion_of_sided_premium")],
+                      lambda bullish: (f"{bullish:.0%} Bullish", bullish)),
+        build_reading(components.YIELD_CHANGE, [row("ten_year_yield_change_basis_points")],
+                      lambda change: (f"{change:+.1f} bp",
+                                      squashed_lean(change, scale[components.YIELD_CHANGE], yield_leans_up))),
+        build_reading(components.MIRAI_CLAUDE, [row("mirai_claude_forecast_pct", horizon=components.CLAUDE_LEAN_HORIZON,
+                                                    side=side) for side in components.CLAUDE_SIDES],
+                      lambda up, flat, down: (f"{up / (up + down):.0%} Up" if up + down else "No Side",
                                               up / (up + down) if up + down else None)),
     ]
 
 
-def straightness_reading(legs, price_row):
+def straightness_reading(path, price_row):
     """Straightness over the 30-minute window as a lean: the tilt of straightness, signed by the net move."""
-    if legs is None:
+    if path is None:
         reason = price_row["blank_reason"] if price_row is not None and price_row["blank_reason"] \
             else registry.NOT_FORMED_REASON
-        return reading_entry(registry.STRAIGHTNESS, None, None, reason, price_row)
-    net, path = legs["up"] - legs["down"], legs["up"] + legs["down"]
-    if legs["straightness"] is None:
-        return reading_entry(registry.STRAIGHTNESS, None, None, "no_activity", price_row)
-    lean = tilted_lean(legs["straightness"] * (1 if net > 0 else -1 if net < 0 else 0))
-    return reading_entry(registry.STRAIGHTNESS, f"{legs['straightness']:.2f} straight, net {net:+.2f} over "
-                         f"{path:.2f} of path in {registry.STRAIGHTNESS_WINDOW_MINUTES} min", lean, None, price_row)
+        return reading_entry(components.STRAIGHTNESS, None, None, reason, price_row)
+    net = path["up"] - path["down"]
+    if path["straightness"] is None:
+        return reading_entry(components.STRAIGHTNESS, None, None, "no_activity", price_row)
+    lean = tilted_lean(path["straightness"] * (1 if net > 0 else -1 if net < 0 else 0))
+    return reading_entry(components.STRAIGHTNESS, f"{path['straightness']:.2f} Straight, Net {net:+.1f}", lean, None,
+                         price_row)
 
 
 def combined_lean(leans, weights):
     """Even plus the sum of weight times (lean less even) over the leans present; the one formula of the call."""
-    return registry.EVEN_CHANCE + sum(weights.get(name, 0.0) * (lean - registry.EVEN_CHANCE)
-                                      for name, lean in leans.items() if lean is not None)
+    return components.EVEN_CHANCE + sum(weights.get(name, 0.0) * (lean - components.EVEN_CHANCE)
+                                        for name, lean in leans.items() if lean is not None)
 
 
 def direction(push, weights):
-    """One channel's direction call from the readings with a lean, the trusts scaled to sum to at most 1; the weights
-    actually applied come back beside it."""
+    """One channel's direction call from the readings with a lean, the trusts scaled to sum to at most 1."""
+    # The weights actually applied come back beside it.
     present = {entry["name"]: entry["lean_if_trusted"] for entry in push if entry["lean_if_trusted"] is not None}
     applied = {name: weights.get(name, 0.0) for name in present}
     total = sum(applied.values())
@@ -120,31 +119,30 @@ def direction(push, weights):
 def direction_text(chance, trust_applied):
     """The call in words: the coin flip until any trust is earned, then which way and how strongly."""
     if trust_applied == 0:
-        return registry.DIRECTION_TEXT_UNTIL_EARNED
-    if chance == registry.EVEN_CHANCE:
+        return components.DIRECTION_TEXT_UNTIL_EARNED
+    if chance == components.EVEN_CHANCE:
         return "even"
-    return f"up {chance:.0%}" if chance > registry.EVEN_CHANCE else f"down {1 - chance:.0%}"
+    return f"up {chance:.0%}" if chance > components.EVEN_CHANCE else f"down {1 - chance:.0%}"
 
 
 def apply_push(forecast, push, weights):
-    """Put the readings on the forecast and call the direction per channel from them with the ledger's weights; each
-    entry gains its weight per channel and whether any of it is earned; the headline channel's call goes on top."""
+    """Put the readings on the forecast and call the direction per channel from them with the ledger's weights."""
+    # Each entry gains its weight per channel; the headline channel's call goes on top of the forecast.
     forecast["push"] = push
     for name, channel in forecast["channels"].items():
-        channel["direction"] = direction(push, {reading: weights.get((registry.PUSH_READING_KIND, reading, name), 0.0)
-                                               for reading in registry.PUSH_READINGS})
+        channel["direction"] = direction(push, {reading: weights.get((components.PUSH_READING_KIND, reading, name), 0.0)
+                                               for reading in components.PUSH_READINGS})
     for entry in push:
         entry["weight_by_channel"] = {name: channel["direction"]["weights"].get(entry["name"], 0.0)
                                       for name, channel in forecast["channels"].items()}
-        entry["status"] = registry.PUSH_EARNED if any(entry["weight_by_channel"].values()) else registry.PUSH_UNTESTED
-    headline = forecast["channels"][registry.HEADLINE_HORIZON]["direction"]
+    headline = forecast["channels"][components.HEADLINE_HORIZON]["direction"]
     forecast.update({"chance_up_if_moves": headline["chance_up_if_moves"], "trust_applied": headline["trust_applied"],
                      "direction_text": headline["text"]})
 
 
 def lean_rows(snapshot, push):
-    """The push readings as observations on the read's snapshot: each lean and its value in words, stamped with the
-    input's feed, blank with the input's reason."""
+    """The push readings as observations on the read's snapshot: each lean and its value in words."""
+    # Stamped with the input's feed, blank with the input's reason.
     rows = []
     for entry in push:
         feed = entry["feed"] or {}

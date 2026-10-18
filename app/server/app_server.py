@@ -9,17 +9,17 @@ import time
 from base64 import b64decode
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 from engine import paths, session_clock
 from engine.jobs import job_log
-from engine.store import store
+from engine.store import store, store_queries
 
 JOB = "app"
 WEB_FOLDER = (paths.REPO_ROOT / "app" / "web").resolve()
 FEED_ROUTE, BARS_ROUTE = "/latest.json", "/bars.json"
 PORT_KEY, TOKEN_KEY, DEFAULT_PORT = "KAZE_APP_PORT", "KAZE_APP_TOKEN", 8791
 AUTH_USER = "kaze"
+BASIC_PREFIX = "Basic "
 BARS_CACHE_SECONDS = 20
 HANDLER_TIMEOUT_SECONDS = 15
 LOGGED_ROUTE_CHARS = 120
@@ -46,10 +46,10 @@ EXPECTED_AUTH = f"{AUTH_USER}:{TOKEN}".encode()
 
 def authorized(header):
     """True when the Authorization header carries the Basic pair kaze:<token>, compared in constant time."""
-    if not header or not header.startswith("Basic "):
+    if not header or not header.startswith(BASIC_PREFIX):
         return False
     try:
-        given = b64decode(header[6:], validate=True)
+        given = b64decode(header[len(BASIC_PREFIX):], validate=True)
     except ValueError:
         return False
     return hmac.compare_digest(given, EXPECTED_AUTH)
@@ -71,8 +71,8 @@ def feed_document():
 
 
 def feed_trade_date():
-    """The session the live feed describes (the date of its cut), or today's New York date when there is none or
-    the file is half-written."""
+    """The session the live feed describes (the date of its cut), else today's New York date."""
+    # Today when there is no feed or the file is half-written.
     document = feed_document()
     try:
         cut_at = json.loads(document).get("cut_at") if document else None
@@ -80,7 +80,7 @@ def feed_trade_date():
         cut_at = None
     if cut_at:
         return session_clock.parse_iso(cut_at).date().isoformat()
-    return session_clock.to_eastern(session_clock.now_utc()).date().isoformat()
+    return session_clock.today_eastern().isoformat()
 
 
 class StoreMissing(Exception):
@@ -88,9 +88,9 @@ class StoreMissing(Exception):
 
 
 def read_only_store():
-    """A connection that only reads an existing store: opened read-only when the WAL sidecars exist (SQLite refuses a
-    read-only open of a WAL store without them, as after a restore from backup), else opened without create and
-    only ever queried."""
+    """A connection that only reads an existing store, never creating one."""
+    # Opened read-only when the WAL sidecars exist (SQLite refuses a read-only open of a WAL store without them, as
+    # after a restore from backup), else opened without create and only ever queried.
     file = paths.store_file()
     if not file.is_file():
         raise StoreMissing(f"no store at {file.name}")
@@ -110,7 +110,7 @@ def bars_document():
         conn = read_only_store()
         try:
             bars = [{"at": session_clock.iso_eastern(session_clock.parse_iso(bar["priced_at"])), "close": bar["close"]}
-                    for bar in store.session_bars(conn, trade_date)]
+                    for bar in store_queries.session_bars(conn, trade_date)]
         finally:
             conn.close()
         body = json.dumps({"trade_date": trade_date, "bars": bars}).encode()
@@ -119,12 +119,13 @@ def bars_document():
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    """One request: the token first, then one of the five things this server serves; a crash inside is a 503 and
-    one log line, a client gone mid-reply is one log line, never a traceback."""
+    """One request: the token first, then one of the five things this server serves, never a traceback."""
+    # A crash inside is a 503 and one log line; a client gone mid-reply is one log line.
     timeout = HANDLER_TIMEOUT_SECONDS
     status_sent = None
 
     def do_GET(self):
+        """Answer one request and write its one log line (route, status, milliseconds)."""
         started = time.monotonic()
         route = self.path.split("?", 1)[0]
         logged = route[:LOGGED_ROUTE_CHARS]
@@ -159,45 +160,34 @@ class AppHandler(BaseHTTPRequestHandler):
             if document is None:
                 self.send_plain(HTTPStatus.NOT_FOUND, "no live feed yet")
             else:
-                self.send_bytes(HTTPStatus.OK, document, CONTENT_TYPES[".json"], NO_STORE)
+                self.send(HTTPStatus.OK, document, CONTENT_TYPES[".json"], NO_STORE)
         elif route == BARS_ROUTE:
-            self.send_bytes(HTTPStatus.OK, bars_document(), CONTENT_TYPES[".json"], NO_STORE)
+            self.send(HTTPStatus.OK, bars_document(), CONTENT_TYPES[".json"], NO_STORE)
         else:
             file = web_file(route)
             if file is None:
                 self.send_plain(HTTPStatus.NOT_FOUND, "not here")
             else:
-                self.send_bytes(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache",
-                                PAGE_POLICY if file.suffix == ".html" else None)
+                headers = {"Content-Security-Policy": PAGE_POLICY} if file.suffix == ".html" else None
+                self.send(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache", headers)
 
-    def send_bytes(self, status, body, content_type, cache_control, policy=None):
-        """Send a response with its content type, cache rule, length and, for the page, its content security policy
-        (HEAD sends the headers only)."""
+    def send(self, status, body, content_type, cache_control, headers=None):
+        """Send one response: status, any extra headers, content type, cache rule, length; HEAD sends headers only."""
         self.status_sent = status.value
         self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", cache_control)
-        if policy:
-            self.send_header("Content-Security-Policy", policy)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def send_plain(self, status, text, extra_headers=None):
-        """A short plain-text answer (401, 404), with any extra headers first."""
-        self.status_sent = status.value
-        self.send_response(status)
-        for name, value in (extra_headers or {}).items():
-            self.send_header(name, value)
-        body = text.encode()
-        self.send_header("Content-Type", CONTENT_TYPES[".txt"])
-        self.send_header("Cache-Control", NO_STORE)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+    def send_plain(self, status, text, headers=None):
+        """A short plain-text answer (401, 404, 405), never cached."""
+        self.send(status, text.encode(), CONTENT_TYPES[".txt"], NO_STORE, headers)
 
     def version_string(self):
         """The Server header: the name, no Python version."""
@@ -208,10 +198,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 class QuietServer(ThreadingHTTPServer):
-    """The threaded server with its traceback printer replaced by one log line, so launchd's capture file stays
-    empty whatever a client does."""
+    """The threaded server with its traceback printer replaced by one log line, whatever a client does."""
 
     def handle_error(self, request, client_address):
+        """One log line for a request the server could not finish, so launchd's capture file stays empty."""
         failure = sys.exc_info()[1]
         job_log.write_line(JOB, f"request dropped {type(failure).__name__}: {failure}")
 

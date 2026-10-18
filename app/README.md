@@ -28,12 +28,13 @@ keeps it alive (`KeepAlive`, a minute between restarts). The shell holds `KAZE_U
 | `/bars.json` | `{trade_date, bars: [{at, close}]}`, the session's 1-minute SPX closes from the store | `no-store` |
 
 `/bars.json` reads the store over a read-only connection (a plain, query-only open when the WAL sidecars are absent,
-as after a restore from backup), rebuilt at most every 20 s; the session is the one `latest.json` describes (the
-date of its `cut_at`), today's New York date when there is no feed; a missing store is a 503 that says so, and the
-server never creates one. The page is sent with `Content-Security-Policy: default-src 'self'` (no inline styles or
-scripts anywhere), so nothing but the Mac's own files can run in it. Any method but GET and HEAD is a 401 without
-the token and a 405 with it. A crash inside a request is a 503 and one log line; a client that drops the connection
-mid-reply is one log line; nothing prints a traceback (the server's error hook is one log line too).
+as after a restore from backup, see `docs/data_map.md`, Operations), rebuilt at most every 20 s; the session is the
+one `latest.json` describes (the date of its `cut_at`), today's New York date when there is no feed; a missing store
+is a 503 that says so, and the server never creates one. The page is sent with
+`Content-Security-Policy: default-src 'self'` (no inline styles or scripts anywhere), so nothing but the Mac's own
+files can run in it. Any method but GET and HEAD is a 401 without the token and a 405 with it. A crash inside a
+request is a 503 and one log line; a client that drops the connection mid-reply is one log line; nothing prints a
+traceback (the server's error hook is one log line too).
 
 The server logs one line per request to `$KAZE_DATA/logs/app_log.txt` (route cut to 120 characters, status,
 milliseconds), never the token or a body. The one hop in front of it, the https address the phone reaches, is
@@ -55,6 +56,9 @@ Add the two lines to `.env` (see `.env.example`) and keep the file to yourself:
 Then `engine/jobs/install_jobs.sh` installs `com.kaze.app` beside the read and the nightly, or run it by hand:
 
     python3 -m app.server.app_server
+
+After changing the token, restart the running server (`launchctl kickstart -k gui/$(id -u)/com.kaze.app`) and
+rebuild the APK, which carries the token; after changing the tunnel address, rebuild the APK alone.
 
 ## Building the APK
 
@@ -95,13 +99,19 @@ Edit `app/web/index.html`, `app.css` or `app.js` and pull down on the phone. The
 next load is the new file; the tab and the 5 / 30 / 60 choice survive the pull. The APK changes only when the shell
 changes (the server address, the token, the colours compiled into the window), which is rare.
 
-The data contract is `latest.json` alone, plus `bars.json` for the price line. Sight and Steps explain the read the
-Read page's live window belongs to (its chain travels on `windows.current`); the Which Way and Feeds cards are the
-newest read's. Where the feed has no value the page shows `—`; where a step failed the page says so (`failed`,
+The data contract is `latest.json` alone, plus `bars.json` for the price line; `docs/data_map.md` ("The phone feed")
+lists every key, and the page reads nothing the contract does not name. Sight and Steps explain the read the Read
+page's live window belongs to (its chain travels on `windows.current`); the Which Way and Feeds cards are the newest
+read's. Where the feed has no value the page shows `—`; where a step failed the page says so (`failed`,
 `range_failed`, `push_failed`, `grade_failed`) in the banner at the top and in the block the failure empties; each
-block draws inside its own guard, so one bad field empties that block with its reason, never the page. The header
-says `Live` within six minutes of the read, `Late` after that while the session is open, `Closed · Last Read 15:55`
-once it is over (from the feed's `session` block), and the strip, the list and the pill say `Last` or `Ended` instead
-of `Live` whenever the read is not live. A 401, a 404 (no feed yet), a 503 and an unreachable Mac each get their own
-words; an unreachable Mac or an unreadable feed keeps the last good numbers on screen under `Last` wording.
-Times are rendered in the phone's own zone.
+block draws inside its own guard, so one bad field empties that block with its reason, never the page.
+
+The header's words come from the feed's `session` block and the phone's clock, rendered in the phone's own zone:
+`Live · 12:35` within six minutes of the read, `Late · Last Read 12:35 · 9m Ago` after that while the session is
+open, `Closed · Last Read 15:55` once the session is over, and `No Read Yet Today · Last Read Fri 15:55` (rust)
+once the next session has opened and eleven minutes have passed with no newer read (the Mac asleep, the jobs not
+installed, `.env` broken). The strip, the list and the pill say `Last` or `Ended` instead of `Live` whenever the
+read is not live. A 401, a 404 (no feed yet), a 503 and an unreachable Mac each get their own words; an unreachable
+Mac or an unreadable feed keeps the last good numbers on screen under `Last` wording. The Feeds card also carries the
+calendar's horizon note (`Calendar Ends 2026-12-31`, then `Calendar Ended ...` with the feed blind) and whether the
+nightly ran for the last session.

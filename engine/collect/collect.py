@@ -5,9 +5,9 @@ import json
 import time
 from datetime import date, timedelta
 
-from engine import session_clock
+from engine import paths, session_clock
 from engine.collect import mirai_files
-from engine.store import registry, store
+from engine.store import components, registry, store, store_queries
 
 VIX_SYMBOLS = ("$VIX", "$VIX1D", "$VIX9D", "$VIX3M", "$VVIX")
 FUND_SYMBOLS = ("SPY", "RSP", "QQQ", "IWM", "SMH", "UUP", "USO")
@@ -20,17 +20,21 @@ HEADLINE_WINDOW_MINUTES = 60
 STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
 GAP_MARKERS_FOR_EMPTY_WINDOW = TAPE_WINDOW_MINUTES
-MISSING_FEED_STATE = {"status": "missing", "age": None, "market_at": None, "received_at": None}
-UNNOTED_FEED_STATE = {"status": None, "age": None, "market_at": None, "received_at": None}
-SOURCE_FILES = {"spx_bars": mirai_files.SPX_BARS, "watchlist_quotes": mirai_files.WATCHLIST_QUOTES,
-                "options_scan": mirai_files.OPTIONS_SCANS, "options_tape": mirai_files.OPTIONS_TAPE,
-                "claude_forecast": mirai_files.CLAUDE_FORECASTS, "news_headlines": mirai_files.HEADLINES}
+ONE_HOUR = timedelta(hours=1)
+# The per-day files a live read measures first (byte length), so a rebuild of the cut parses the same prefix.
+SOURCE_FILES = {feed: paths.MIRAI_FILES[feed] for feed in registry.FEEDS_WITH_LINE_COUNTS}
+
+
+def feed_state(status):
+    """A feed's state before anything landed: the status given (missing, or None for a feed never noted), no age."""
+    return {"status": status, "age": None, "market_at": None, "received_at": None}
 
 
 class ReadBuilder:
     """Collects the observations of one snapshot, stamping each with its source feed's status and age at the cut."""
 
     def __init__(self, snapshot, cut_at):
+        """An empty read at a cut."""
         self.snapshot = snapshot
         self.cut_at = cut_at
         self.observations = []
@@ -39,7 +43,7 @@ class ReadBuilder:
     def note_feed(self, feed, newest_at, received_at=None, present=True, status=None):
         """Record what a feed had landed by the cut; its status is missing, stale or ok unless one is given."""
         if not present or newest_at is None:
-            self.feed_states[feed] = dict(MISSING_FEED_STATE)
+            self.feed_states[feed] = feed_state("missing")
             return
         age = round((self.cut_at - newest_at).total_seconds(), 3)
         if status is None:
@@ -49,12 +53,12 @@ class ReadBuilder:
 
     def feed_ok(self, feed):
         """True when the feed's newest input is inside its stale limit."""
-        return self.feed_states.get(feed, MISSING_FEED_STATE)["status"] == "ok"
+        return self.feed_states.get(feed, feed_state("missing"))["status"] == "ok"
 
     def add_observation(self, measure_name, value, blank=None, source=None, subject_points=None, **subject):
         """Add one observation stamped with its feed's state; None is blank with the reason given, else the feed's."""
         source = source or registry.MEASURES_BY_NAME[measure_name]["source_feed_name"]
-        state = self.feed_states.get(source, UNNOTED_FEED_STATE)
+        state = self.feed_states.get(source, feed_state(None))
         if value is None and blank is None:
             blank = "feed_stale" if state["status"] in ("stale", "late") else "feed_missing"
         self.observations.append(store.observation_row(
@@ -107,8 +111,8 @@ def snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status):
     """The collect_snapshots row of a read at this cut, with its slot, lane and lateness."""
     day = session_clock.to_eastern(cut_at).date()
     lane = session_clock.lane_for_slot(slot)
-    snapshot = store.base_snapshot_row("read", session_clock.iso_utc(cut_at), day.isoformat(), row_origin,
-                                  session_clock.iso_utc(written_at))
+    snapshot = store.snapshot_row_shared("read", session_clock.iso_utc(cut_at), day.isoformat(), row_origin,
+                                         session_clock.iso_utc(written_at))
     snapshot.update({
         "read_id": f"{lane}:{session_clock.iso_eastern(cut_at)}", "read_lane": lane,
         "read_lane_cadence_minutes": session_clock.READ_LANES[lane], "scheduled_slot_eastern": slot,
@@ -124,7 +128,7 @@ def snapshot_row_for_read(cut_at, row_origin, written_at, slot, slot_status):
 def source_file_limits(conn, day, row_origin, cut_at_iso):
     """Byte length per source file this read may parse: measured now when live, the live twin's record when rebuilt."""
     if row_origin == "history_rebuilt":
-        live_twin = store.live_snapshot_at(conn, cut_at_iso)
+        live_twin = store_queries.live_snapshot_at(conn, cut_at_iso)
         if live_twin and live_twin["source_files_json_text"]:
             return json.loads(live_twin["source_files_json_text"])
         return {}
@@ -136,7 +140,8 @@ def collect_clock(read, cut_at, day, half_days):
     """Minutes finished and minutes left in the session (no feed: the clock is the clock)."""
     since_open = session_clock.minutes_since_open(cut_at)
     read.add_observation("minutes_since_session_open", since_open)
-    read.add_observation("minutes_until_session_close", session_clock.session_minutes(day, half_days) - since_open)
+    read.add_observation("minutes_until_session_close",
+                         session_clock.session_length_minutes(day, half_days) - since_open)
 
 
 def collect_prices(read, bars, bar_arrived):
@@ -159,10 +164,10 @@ def collect_prices(read, bars, bar_arrived):
     read.add_observation("today_open_points", first["open"])
     read.add_observation("session_high_points", high)
     read.add_observation("session_low_points", low)
-    read.add_observation("range_so_far_points", round(high - low, store.STORED_DECIMALS))
-    read.add_observation("move_points", round(closes[-1] - first["open"], store.STORED_DECIMALS), since="open")
+    read.add_observation("range_so_far_points", store.rounded(high - low))
+    read.add_observation("move_points", store.rounded(closes[-1] - first["open"]), since="open")
     for since, minutes in MOVE_SINCE_MINUTES.items():
-        value = round(closes[-1] - closes[-1 - minutes], store.STORED_DECIMALS) if len(closes) > minutes else None
+        value = store.rounded(closes[-1] - closes[-1 - minutes]) if len(closes) > minutes else None
         read.add_observation("move_points", value, blank="not_formed_yet", since=since)
 
 
@@ -175,7 +180,7 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
     spx = quotes.get("$SPX") or {}
     read.add_observation("prior_close_points", spx.get("close"))
     last = bars[-1]["close"] if bars else None
-    move = round(last - spx["close"], store.STORED_DECIMALS) if last is not None and spx.get("close") else None
+    move = store.rounded(last - spx["close"]) if last is not None and spx.get("close") else None
     read.add_observation("move_points", move, blank="feed_missing", source="spx_bars", since="prior_close")
     for symbol in VIX_SYMBOLS:
         quote = quotes.get(symbol) or {}
@@ -194,7 +199,7 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
     yield_pct = tnx["last"] / TNX_QUOTE_PER_YIELD_PCT if tnx.get("last") else None
     yield_change = None
     if tnx.get("last") and tnx.get("close"):
-        yield_change = round((tnx["last"] - tnx["close"]) * TNX_QUOTE_PER_YIELD_PCT, store.STORED_DECIMALS)
+        yield_change = store.rounded((tnx["last"] - tnx["close"]) * TNX_QUOTE_PER_YIELD_PCT)
     read.add_observation("ten_year_yield_annual_pct", yield_pct, blank=blank_reason_for_symbol(row))
     read.add_observation("ten_year_yield_change_basis_points", yield_change, blank=blank_reason_for_symbol(row))
 
@@ -209,7 +214,7 @@ def change_from_prior_close_pct(quotes, symbol):
     quote = quotes.get(symbol) or {}
     if not quote.get("last") or not quote.get("close"):
         return None
-    return round((quote["last"] / quote["close"] - 1) * 100, store.STORED_DECIMALS)
+    return store.rounded((quote["last"] / quote["close"] - 1) * 100)
 
 
 def count_above_prior_close(quotes, symbols):
@@ -235,7 +240,7 @@ def collect_breadth(read, quotes_rows):
     portion, reason = None, "feed_missing"
     if advancing is not None and declining is not None:
         total = advancing + declining
-        portion = round(advancing / total, store.STORED_DECIMALS) if total > 0 else None
+        portion = store.rounded(advancing / total) if total > 0 else None
         reason = "no_activity"
     read.add_observation("nyse_advancing_portion", portion, blank=reason)
 
@@ -247,13 +252,13 @@ def collect_options_scan(read, scans):
     read.note_feed("options_scan", scan.get("at"), received_at=scan.get("at"), present=present)
     views = scan.get("gex_views") or {}
     read.add_observation("vwap_points", scan.get("vwap"))
-    for level in registry.WALL_TYPES:
+    for level in components.WALL_TYPES:
         read.add_observation("level_price_points", views.get(f"{level}_gamma"), level_type=level)
         read.add_observation("level_gamma_share_portion", views.get(f"{level}_gamma_share"), level_type=level)
     read.add_observation("dealer_net_gamma_usd", views.get("net_gex"))
     read.add_observation("dealer_gamma_sign", scan.get("gamma_sign"))
     atm_iv = scan.get("atm_iv")
-    atm_iv_pct = round(atm_iv * 100, store.STORED_DECIMALS) if atm_iv else None
+    atm_iv_pct = store.rounded(atm_iv * 100) if atm_iv else None
     read.add_observation("same_day_atm_iv_calendar_year_pct", atm_iv_pct)
     with_ruler = [s for s in scans if (s.get("range_ruler") or {}).get("quality") == "ok"]
     ruler = with_ruler[-1]["range_ruler"] if with_ruler else None
@@ -275,7 +280,7 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes):
     read.add_observation("options_call_premium_last_30_minutes_usd", calls_usd)
     read.add_observation("options_put_premium_last_30_minutes_usd", puts_usd)
     sided = window["bull_usd"] + window["bear_usd"]
-    bullish = round(window["bull_usd"] / sided, store.STORED_DECIMALS) if counted and sided > 0 else None
+    bullish = store.rounded(window["bull_usd"] / sided) if counted and sided > 0 else None
     read.add_observation("bullish_portion_of_sided_premium", bullish, blank="no_activity" if counted else None)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
@@ -303,9 +308,9 @@ def collect_overnight(read, night):
 def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
     """Events still ahead today, taken from the store's calendar facts as they were known at the cut."""
     if calendar is not None:
-        first_copy = not store.has_calendar_facts(conn)
+        first_copy = not store_queries.has_calendar_facts(conn)
         store.write_calendar_facts(conn, calendar_fact_rows(calendar, row_origin, written_at, first_copy))
-    known_at = store.calendar_known_at(conn, session_clock.iso_utc(cut_at))
+    known_at = store_queries.calendar_known_at(conn, session_clock.iso_utc(cut_at))
     known_moment = session_clock.parse_iso(known_at) if known_at else None
     if calendar is None or known_moment is not None:
         read.note_feed("event_calendar", known_moment, received_at=known_moment, present=known_moment is not None)
@@ -321,8 +326,8 @@ def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
         read.add_observation("minutes_until_next_event", None, blank="calendar_not_covering_day", impact="any")
         return
     cut_iso = session_clock.iso_utc(cut_at)
-    left = [(starts_at, kind) for starts_at, kind, _ in store.calendar_events_known(conn, day.isoformat(), cut_iso)
-            if starts_at > cut_iso]
+    left = [(starts_at, kind) for starts_at, kind, _
+            in store_queries.calendar_events_known(conn, day.isoformat(), cut_iso) if starts_at > cut_iso]
     read.add_observation("events_left_today_count", len(left))
     next_at, next_kind = left[0] if left else (None, None)
     minutes = round((session_clock.parse_iso(next_at) - cut_at).total_seconds() / 60, 3) if next_at else None
@@ -358,20 +363,17 @@ def calendar_fact_rows(calendar, row_origin, written_at, first_copy):
             facts.append({"fact_kind": registry.SCHEDULED_EVENT_FACT, "fact_id": fact_id,
                           "starts_at": starts_at, **shared})
     for fact in facts:
-        fact["fact_record_id"] = f"{fact['fact_kind']}|{fact['fact_id']}|{fact['fact_version']}"
+        fact["fact_record_id"] = store.calendar_fact_id_for(fact)
     return facts
 
 
 def collect_headlines(read, headlines):
-    """Headlines captured in the last 60 minutes, counted only while the feed is fresh; the coverage twin is blank."""
+    """Headlines captured in the last 60 minutes, counted only while the feed is fresh."""
     read.note_feed("news_headlines", headlines["newest_at"], received_at=headlines["newest_at"],
                    present=headlines["present"])
     counted = read.feed_ok("news_headlines")
     read.add_observation("headlines_last_60_minutes_count", headlines["count"] if counted else None,
                          kind="all")
-    read.add_observation("feed_coverage_last_60_minutes_portion", None, blank="not_known_at_read",
-                         source="news_headlines",
-                         feed="news_headlines")
 
 
 def collect_mirai_claude_forecast(read, forecast, cut_at):
@@ -388,7 +390,7 @@ def collect_mirai_claude_forecast(read, forecast, cut_at):
         answer = (forecast["forecast"].get(field) or {}) if usable else {}
         ok = answer.get("status") == "ok"
         base = answer.get("base_rate_shown_to_claude") or answer.get("base_rate") or {}
-        for side in registry.CLAUDE_SIDES:
+        for side in components.CLAUDE_SIDES:
             read.add_observation("mirai_claude_forecast_pct", answer.get(f"{side}_pct") if ok else None, blank=blank,
                                  horizon=horizon, side=side)
             read.add_observation("mirai_claude_base_rate_pct", base.get(f"{side}_pct") if ok else None, blank=blank,
@@ -410,17 +412,17 @@ def collect_login(read, login, cut_at, row_origin):
         read.add_observation("login_expires_at", None, blank="not_known_at_read", login="schwab")
         return
     expires_at = login["reported_at"] + timedelta(days=login["days_left"])
-    hours_left = round((expires_at - cut_at).total_seconds() / 3600, 2)
-    if hours_left <= 0:
+    left = expires_at - cut_at
+    if left <= timedelta(0):
         state = "expired"
     elif login["state"] != "ok":
         state = "unknown"
-    elif hours_left <= registry.LOGIN_RENEW_WARNING_DAYS * 24:
+    elif left <= timedelta(days=registry.LOGIN_RENEW_WARNING_DAYS):
         state = "renew_soon"
     else:
         state = "ok"
     read.add_observation("login_state", state, login="schwab")
-    read.add_observation("login_hours_until_expiry", hours_left, login="schwab")
+    read.add_observation("login_hours_until_expiry", round(left / ONE_HOUR, 2), login="schwab")
     read.add_observation("login_expires_at", session_clock.iso_utc(expires_at), login="schwab")
 
 
@@ -440,11 +442,12 @@ def collect_feed_health(read, day, rows_received):
 
 
 def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
-    """Price rows for bars not yet stored under this origin: a bar of the read's own slot, or any bar a rebuild writes
-    once the session has closed, is known 62 s after it ends; anything else is known when it is written."""
-    already = store.stored_bar_times(conn, day.isoformat(), row_origin)
+    """Price rows for bars not yet stored under this origin, each stamped with the moment it became known."""
+    # A bar of the read's own slot, or any bar a rebuild writes once the session has closed, is known 62 s after it
+    # ends; anything else is known when it is written.
+    already = store_queries.stored_bar_times(conn, day.isoformat(), row_origin)
     own_slot_starts_at = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
-    session_closed = written_at >= session_clock.session_close(day, store.half_day_sessions(conn))
+    session_closed = written_at >= session_clock.session_close(day, store_queries.half_day_sessions(conn))
     rows = []
     for bar in bars:
         priced_at = session_clock.iso_utc(bar["at"])

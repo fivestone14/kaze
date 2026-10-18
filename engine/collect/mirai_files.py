@@ -11,16 +11,10 @@ import numpy as np
 from engine import paths
 from engine.session_clock import eastern_from_hhmm, file_modified_at, parse_iso, session_open
 
-SPX_BARS = "market/spx_price_bars_by_minute/{day}.jsonl"
-WATCHLIST_QUOTES = "market/watchlist_quotes_by_minute/{day}.jsonl"
-OPTIONS_SCANS = "spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl"
-OPTIONS_TAPE = "market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl"
-FUTURES_BARS = "market/futures_price_bars_by_minute/{day}.jsonl"
-CLAUDE_FORECASTS = "spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl"
-HEADLINES = "market/news_headlines_by_article/{day}.jsonl"
-EVENT_CALENDAR = "market_event_calendar_by_event.json"
-AUTH_WATCH_LOG = "operations/logs/auth_watch_output_log.txt"
+FILES = paths.MIRAI_FILES
 NIGHT_STARTS_AT = "18:00"
+# The nightly and the phone warn this many days before the calendar's covers_through runs out.
+CALENDAR_WARNING_DAYS = 14
 HALF_DAY_EVENT_KIND = "HALF_DAY_CLOSE"
 # Vendor trade-condition codes 130-144 mark legs of multi-leg packages, which have no clear buyer or seller side.
 MULTI_LEG_CONDITIONS = range(130, 145)
@@ -32,9 +26,14 @@ TAPE_CACHE = {}
 SKIPPED_LINES = {}
 
 
+def plain_day_file(template, day):
+    """The plain (not gzipped) per-day Mirai file a template names, whether or not it exists."""
+    return paths.mirai_data(template.format(day=day))
+
+
 def day_file_path(template, day):
     """The plain or gzipped copy of a per-day Mirai file, or None when neither exists."""
-    plain = paths.mirai_data(template.format(day=day))
+    plain = plain_day_file(template, day)
     if plain.exists():
         return plain
     zipped = plain.with_name(plain.name + ".gz")
@@ -48,7 +47,7 @@ def open_bytes(path):
 
 def file_bytes(template, day):
     """Byte length of the plain per-day file right now, or None when only a gzipped copy (or nothing) exists."""
-    plain = paths.mirai_data(template.format(day=day))
+    plain = plain_day_file(template, day)
     return plain.stat().st_size if plain.exists() else None
 
 
@@ -98,17 +97,17 @@ def newest_row_with(rows, field):
 
 def read_spx_bars(day, cut):
     """SPX 1-minute bars whose start is at or before the cut."""
-    return rows_at_or_before(SPX_BARS, day, cut)
+    return rows_at_or_before(FILES["spx_bars"], day, cut)
 
 
 def read_quotes_rows(day, cut):
     """Watchlist rows (quotes and breadth bars) polled at or before the cut."""
-    return rows_at_or_before(WATCHLIST_QUOTES, day, cut)
+    return rows_at_or_before(FILES["watchlist_quotes"], day, cut)
 
 
 def read_native_scans(day, cut, max_bytes=None):
     """Options scans built from the native chain at or before the cut, within the first max_bytes of the file."""
-    scans = rows_at_or_before(OPTIONS_SCANS, day, cut, max_bytes=max_bytes)
+    scans = rows_at_or_before(FILES["options_scan"], day, cut, max_bytes=max_bytes)
     return [scan for scan in scans if str(scan.get("gex_source", "")).startswith("native")]
 
 
@@ -122,7 +121,7 @@ def read_tape_day(day):
     """The day's whole tape as numpy columns (with each line's end byte offset) plus gap markers, parsed once."""
     if day in TAPE_CACHE:
         return TAPE_CACHE[day]
-    path = day_file_path(OPTIONS_TAPE, day)
+    path = day_file_path(FILES["options_tape"], day)
     columns = {"ts_ms": [], "offset": [], "strike": [], "is_call": [], "price": [], "size": [], "bid": [], "ask": [],
                "condition": []}
     gaps, skipped, offset = [], 0, 0
@@ -219,7 +218,7 @@ def read_overnight_futures(day):
     night_start = eastern_from_hhmm(day - timedelta(days=1), NIGHT_STARTS_AT)
     open_at = session_open(day)
     highs, lows, newest = [], [], None
-    for bar in read_jsonl(day_file_path(FUTURES_BARS, day)):
+    for bar in read_jsonl(day_file_path(FILES["futures_bars"], day)):
         if bar.get("symbol") != "/ES" or bar.get("bar_minutes") != 1:
             continue
         at = parse_iso(bar["ts"])
@@ -234,7 +233,7 @@ def read_overnight_futures(day):
 
 def read_event_calendar():
     """Mirai's event calendar with its covered span and the file's last-changed moment; None when the file is absent."""
-    path = paths.mirai_settings(EVENT_CALENDAR)
+    path = paths.mirai_settings(paths.EVENT_CALENDAR_FILE)
     if not path.exists():
         return None
     calendar = json.loads(path.read_text())
@@ -254,13 +253,18 @@ def session_calendar():
 
 def calendar_covers(calendar, day):
     """True when the day sits inside the calendar's covered span."""
-    return date.fromisoformat(calendar["covers_from"]) <= day <= date.fromisoformat(calendar["covers_through"])
+    return date.fromisoformat(calendar["covers_from"]) <= day <= calendar_covers_through(calendar)
+
+
+def calendar_covers_through(calendar):
+    """The last day the calendar covers; past it the event measures are blank and the half days unknown."""
+    return date.fromisoformat(calendar["covers_through"])
 
 
 def read_claude_final_forecast(day, cut):
     """Mirai's newest live final forecast written at or before the cut with a usable 30-minute answer, or None."""
     newest = None
-    for row in rows_at_or_before(CLAUDE_FORECASTS, day, cut, time_field="written_at"):
+    for row in rows_at_or_before(FILES["claude_forecast"], day, cut, time_field="written_at"):
         if row.get("line_type") != "final_forecast" or row.get("test_variant") not in (None, "none"):
             continue
         if ((row.get("forecast") or {}).get("next_30_minutes") or {}).get("status") != "ok":
@@ -272,16 +276,16 @@ def read_claude_final_forecast(day, cut):
 
 def read_headlines(day, cut, minutes):
     """Headlines captured in the window to the cut, the newest capture time, and whether the file exists."""
-    rows = rows_at_or_before(HEADLINES, day, cut, time_field="captured_at")
+    rows = rows_at_or_before(FILES["news_headlines"], day, cut, time_field="captured_at")
     window_start = cut - timedelta(minutes=minutes)
-    return {"present": day_file_path(HEADLINES, day) is not None,
+    return {"present": day_file_path(FILES["news_headlines"], day) is not None,
             "count": sum(1 for row in rows if row["at"] >= window_start),
             "newest_at": max((row["at"] for row in rows), default=None)}
 
 
 def read_login_state():
     """The Schwab login as the auth watch last logged it: state, days left (None when it printed ?), the log's time."""
-    path = paths.mirai_data(AUTH_WATCH_LOG)
+    path = paths.mirai_data(FILES["schwab_login"])
     if not path.exists():
         return None
     with open(path, "rb") as handle:

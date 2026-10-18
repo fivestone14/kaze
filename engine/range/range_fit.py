@@ -1,6 +1,6 @@
 # The range engine's history side: the speed recipe on minute-indexed bars, the windows of past sessions measured on
-# that same recipe, the nightly fit of the band multipliers (one nightly_history_fit cut per session served), the
-# time-of-day ratios and width cap a read takes from the same history, and the Phase 2 pass test with its interval.
+# that same recipe, the nightly fit of the stretch multipliers (one nightly_history_fit cut per session served), the
+# time-of-day ratios and width cap a read takes from the same history, and the band's pass test with its interval.
 import math
 from datetime import date, timedelta
 
@@ -8,15 +8,17 @@ import numpy as np
 
 from engine import session_clock
 from engine.range import width_dials
-from engine.store import registry, store
+from engine.store import components, registry, store, store_queries
 
 FARTHEST = "farthest"
-WINDOW_MOVES = (registry.BAND, registry.AVERAGE_BAND, FARTHEST)
+WINDOW_MOVES = (components.BAND, components.AVERAGE_BAND, FARTHEST)
 BOOTSTRAP_DRAWS = 20000
 BOOTSTRAP_SEED = 1
-PASS_INTERVAL_PERCENTILES = (2.5, 97.5)
+# The interval's two percentiles, from the one interval percent the trust tests are registered with.
+INTERVAL_PERCENTILES = ((100 - components.INTERVAL_PERCENT) / 2, 100 - (100 - components.INTERVAL_PERCENT) / 2)
 PASS_BAND_BOUNDS = (0.75, 0.85)
 INFORMATION_LOOKBACK_SESSIONS = 20
+# Per process: every read rebuilds the history table once (about a quarter second), which is fine for a 5-minute job.
 HISTORY_CACHE = {}
 
 
@@ -25,14 +27,14 @@ HISTORY_CACHE = {}
 def minute_series(bars, trade_date):
     """Closes, highs and lows placed by minute of the session (NaN where a bar is missing), up to the last bar held."""
     day = date.fromisoformat(trade_date)
-    minutes = [session_clock.session_minute(session_clock.parse_iso(bar["priced_at"]), day) for bar in bars]
+    minutes = [session_clock.minute_of_session(session_clock.parse_iso(bar["priced_at"]), day) for bar in bars]
     series = np.full((3, minutes[-1] + 1 if minutes else 0), np.nan)
     for minute, bar in zip(minutes, bars):
         series[:, minute] = (bar["close"], bar["high"], bar["low"])
     return series[0], series[1], series[2]
 
 
-def speed(closes, half_life_minutes=registry.SPEED_HALF_LIFE_MINUTES):
+def speed(closes, half_life_minutes=components.SPEED_HALF_LIFE_MINUTES):
     """Recency-weighted mean |1-minute close change|, newest weighs 1, halving per half-life; gaps left out."""
     changes = np.abs(np.diff(np.asarray(closes, dtype=float)))
     present = ~np.isnan(changes)
@@ -63,13 +65,14 @@ def window_moves(closes, highs, lows, start, last):
     if facts is None or np.isnan(closes[start]):
         return None
     start_close = closes[start]
-    return {registry.BAND: abs(facts["end"] - start_close), registry.AVERAGE_BAND: abs(facts["average"] - start_close),
+    return {components.BAND: abs(facts["end"] - start_close),
+            components.AVERAGE_BAND: abs(facts["average"] - start_close),
             FARTHEST: max(facts["high"] - start_close, start_close - facts["low"])}
 
 
 # ---- History: the prior sessions' windows and the multipliers fitted on them ---------------------------------------
 
-def history_before(conn, day, lookback=registry.FIT_LOOKBACK_SESSIONS):
+def history_before(conn, day, lookback=components.FIT_LOOKBACK_SESSIONS):
     """The last full sessions before a day, cached: sorted window moves in swings per horizon, sessions, last bar."""
     key = (day, lookback)
     if key not in HISTORY_CACHE:
@@ -78,29 +81,29 @@ def history_before(conn, day, lookback=registry.FIT_LOOKBACK_SESSIONS):
 
 
 def build_history(conn, day, lookback):
-    """history_before without the cache: each full session's windows, every 5 minutes from minute 30, in swings, and
-    two time-of-day samples on the same grid: windows ending inside the last minutes before the close (unclipped,
-    the full horizon held) and windows a timed release, as known at the served day's open, lands in."""
-    sessions = [session for session in store.full_sessions(conn) if session < day.isoformat()][-lookback:]
-    table = {name: {move: [] for move in WINDOW_MOVES} for name in registry.HORIZON_MINUTES}
-    closing = {name: [] for name in registry.HORIZON_MINUTES}
-    release = {name: [] for name in registry.HORIZON_MINUTES}
+    """history_before without the cache: each full session's windows in swings, plus the two time-of-day samples."""
+    # Windows every 5 minutes from minute 30; the time-of-day samples on the same grid: windows ending inside the last
+    # minutes before the close (unclipped, the full horizon held) and windows a timed release, as known at the served
+    # day's open, lands in.
+    sessions = [session for session in store_queries.full_sessions(conn) if session < day.isoformat()][-lookback:]
+    table = {name: {move: [] for move in WINDOW_MOVES} for name in components.HORIZON_MINUTES}
+    closing = {name: [] for name in components.HORIZON_MINUTES}
+    release = {name: [] for name in components.HORIZON_MINUTES}
     known_by = session_clock.iso_utc(session_clock.session_open(day))
     last_bar_at = None
-    longest = max(registry.HORIZON_MINUTES.values())
+    longest = max(components.HORIZON_MINUTES.values())
     for session in sessions:
-        bars = store.session_bars(conn, session)
+        bars = store_queries.session_bars(conn, session)
         last_bar_at = bars[-1]["priced_at"]
         closes, highs, lows = minute_series(bars, session)
-        releases_at = [release["at"] for release
-                       in width_dials.releases(store.calendar_events_known(conn, session, known_by))]
+        releases_at = width_dials.release_times(store_queries.calendar_events_known(conn, session, known_by))
         # the last start is the longest horizon before the session's last minute, so every window ends on a held bar
-        starts = range(registry.FIT_FIRST_WINDOW_MINUTE, closes.size - longest, registry.FIT_WINDOW_STEP_MINUTES)
+        starts = range(components.FIT_FIRST_WINDOW_MINUTE, closes.size - longest, components.FIT_WINDOW_STEP_MINUTES)
         for start in starts:
             start_speed = speed(closes[:start + 1])
             if not start_speed:
                 continue
-            for name, minutes in registry.HORIZON_MINUTES.items():
+            for name, minutes in components.HORIZON_MINUTES.items():
                 moves = window_moves(closes, highs, lows, start, start + minutes)
                 if moves is None:
                     continue
@@ -108,9 +111,9 @@ def build_history(conn, day, lookback):
                 for move, value in moves.items():
                     table[name][move].append(value / swing)
         open_at = session_clock.session_open(date.fromisoformat(session))
-        for name, minutes in registry.HORIZON_MINUTES.items():
+        for name, minutes in components.HORIZON_MINUTES.items():
             closing[name].extend(end_move_ratios(closes, highs, lows, minutes,
-                                                 range(closes.size - registry.CLOSING_WINDOW_MINUTES, closes.size)))
+                                                 range(closes.size - components.CLOSING_WINDOW_MINUTES, closes.size)))
             release[name].extend(end_move_ratios(
                 closes, highs, lows, minutes, range(minutes + 1, closes.size),
                 lambda last: width_dials.release_in_window(releases_at, open_at + timedelta(minutes=last - minutes + 1),
@@ -123,27 +126,27 @@ def build_history(conn, day, lookback):
 
 
 def end_move_ratios(closes, highs, lows, minutes, last_minutes, picked=lambda last: True):
-    """|end move| in swings of the session's 5-minute-grid windows of a horizon ending on the minutes given (and
-    picked), each at its start speed; the all-day sample's own measurement."""
+    """|end move| in swings of the session's grid windows of a horizon ending on the minutes given (and picked)."""
+    # Each at its start speed: the all-day sample's own measurement.
     ratios = []
     for last in last_minutes:
         start = last - minutes
-        if start % registry.FIT_WINDOW_STEP_MINUTES or start < 0 or not picked(last):
+        if start % components.FIT_WINDOW_STEP_MINUTES or start < 0 or not picked(last):
             continue
         start_speed = speed(closes[:start + 1])
         moves = window_moves(closes, highs, lows, start, last)
         if start_speed and moves is not None:
-            ratios.append(moves[registry.BAND] / swing_points(start_speed, minutes))
+            ratios.append(moves[components.BAND] / swing_points(start_speed, minutes))
     return ratios
 
 
-def band_multiplier(sorted_ratios):
+def stretch_multiplier(sorted_ratios):
     """The swings that cover the band's share of past windows: the 80% mark of the sorted ratios, or None if empty."""
-    return ratio_at_share(sorted_ratios, registry.BAND_PORTION)
+    return ratio_at_share(sorted_ratios, components.BAND_PORTION)
 
 
 def ratio_at_share(sorted_ratios, portion):
-    """The ratio at a share of the sorted sample (the band multiplier's own index rule), or None if empty."""
+    """The ratio at a share of the sorted sample (the stretch multiplier's own index rule), or None if empty."""
     if sorted_ratios.size == 0:
         return None
     return float(sorted_ratios[int(portion * sorted_ratios.size)])
@@ -151,7 +154,7 @@ def ratio_at_share(sorted_ratios, portion):
 
 def horizon_fit(end, average, sessions, windows):
     """One horizon's fit in the shape the fit writes and the read reads back: both multipliers, shrink, counts."""
-    return {registry.BAND: end, registry.AVERAGE_BAND: average, "shrink": average / end if end else None,
+    return {components.BAND: end, components.AVERAGE_BAND: average, "shrink": average / end if end else None,
             "sessions": sessions, "windows": windows}
 
 
@@ -161,23 +164,25 @@ def empty_fit():
 
 
 def multipliers_from_history(history):
-    """Per horizon, the end and average band multipliers fitted on the history, with the sample counts."""
-    return {name: horizon_fit(band_multiplier(moves[registry.BAND]), band_multiplier(moves[registry.AVERAGE_BAND]),
-                              len(history["sessions"]), int(moves[registry.BAND].size))
+    """Per horizon, the end and average stretch multipliers fitted on the history, with the sample counts."""
+    return {name: horizon_fit(stretch_multiplier(moves[components.BAND]),
+                              stretch_multiplier(moves[components.AVERAGE_BAND]),
+                              len(history["sessions"]), int(moves[components.BAND].size))
             for name, moves in history["windows"].items()}
 
 
 def width_ratios(history):
-    """Per horizon, what the dials take from the same history: the closing and release ratios (each sample's 80% mark
-    over the all-day mark; None without a sample) and the cap (the 95% mark over the 80% mark), with sample sizes."""
+    """Per horizon, what the dials take from the same history: the closing and release ratios and the cap."""
+    # Each time-of-day sample's 80% mark over the all-day mark (None without a sample); the cap is the 95% mark over
+    # the 80% mark; the sample sizes come along.
     ratios = {}
     for name, moves in history["windows"].items():
-        end = band_multiplier(moves[registry.BAND])
-        closing_mark = band_multiplier(history["closing"][name])
-        release_mark = band_multiplier(history["release"][name])
+        end = stretch_multiplier(moves[components.BAND])
+        closing_mark = stretch_multiplier(history["closing"][name])
+        release_mark = stretch_multiplier(history["release"][name])
         ratios[name] = {"closing": closing_mark / end if end and closing_mark else None,
                         "release": release_mark / end if end and release_mark else None,
-                        "cap": ratio_at_share(moves[registry.BAND], registry.CAP_PORTION) / end if end else None,
+                        "cap": ratio_at_share(moves[components.BAND], components.CAP_PORTION) / end if end else None,
                         "closing_windows": int(history["closing"][name].size),
                         "release_windows": int(history["release"][name].size)}
     return ratios
@@ -200,35 +205,35 @@ def fit_snapshot_rows(conn, served_day, row_origin, written_at):
         return None
     last_bar_ends_at = session_clock.parse_iso(history["last_bar_at"]) + timedelta(
         seconds=session_clock.BAR_LENGTH_SECONDS)
-    snapshot = store.base_snapshot_row(registry.FIT_SNAPSHOT_KIND, session_clock.iso_utc(last_bar_ends_at),
-                                       served_day.isoformat(), row_origin, session_clock.iso_utc(written_at),
-                                       builder=(registry.RANGE_ENGINE_NAME, registry.RANGE_ENGINE_VERSION))
+    snapshot = store.snapshot_row_shared(registry.FIT_SNAPSHOT_KIND, session_clock.iso_utc(last_bar_ends_at),
+                                         served_day.isoformat(), row_origin, session_clock.iso_utc(written_at),
+                                         builder=(components.RANGE_ENGINE_NAME, components.RANGE_ENGINE_VERSION))
     if row_origin == "history_rebuilt":
         landed = last_bar_ends_at + timedelta(seconds=registry.BAR_ARRIVAL_SECONDS)
         snapshot.update({"known_at": session_clock.iso_utc(landed), "known_at_rule": registry.BAR_ARRIVAL_RULE})
-    if len(history["sessions"]) < registry.FIT_LOOKBACK_SESSIONS:
+    if len(history["sessions"]) < components.FIT_LOOKBACK_SESSIONS:
         snapshot["snapshot_status"] = "thin"
-        snapshot["snapshot_status_reason"] = f"{len(history['sessions'])}_of_{registry.FIT_LOOKBACK_SESSIONS}_sessions"
+        snapshot["snapshot_status_reason"] = \
+            f"{len(history['sessions'])}_of_{components.FIT_LOOKBACK_SESSIONS}_sessions"
     observations = []
+    add = store.row_adder(store.observation_row, snapshot, observations)
     for name, fit in multipliers_from_history(history).items():
-        for band in registry.BAND_PRICE_MEASURE:
+        for band in components.BAND_PRICE_MEASURE:
             subject = registry.subject_key(band=band, horizon=name)
-            observations.append(store.observation_row(snapshot, "band_multiplier", store.rounded(fit[band]), subject))
-            observations.append(store.observation_row(snapshot, "stretch_recipe_name", registry.STRETCH_RECIPE[band],
-                                                      subject))
+            add("stretch_multiplier", fit[band], subject)
+            add("stretch_recipe_name", components.STRETCH_RECIPE_LABEL[band], subject)
         subject = registry.subject_key(horizon=name)
-        observations.append(store.observation_row(snapshot, "average_price_shrink_ratio", store.rounded(fit["shrink"]),
-                                                  subject))
-        observations.append(store.observation_row(snapshot, "fit_sessions_count", fit["sessions"], subject))
-        observations.append(store.observation_row(snapshot, "fit_windows_count", fit["windows"], subject))
+        add("average_price_shrink_ratio", fit["shrink"], subject)
+        add("fit_sessions_count", fit["sessions"], subject)
+        add("fit_windows_count", fit["windows"], subject)
     return snapshot, observations
 
 
 def write_fits(conn, next_session, written_at):
     """A rebuilt fit per stored session lacking one, then the next session's live fit unless as fresh a one exists."""
-    served = store.sessions_served_by_a_fit(conn)
+    served = store_queries.sessions_served_by_a_fit(conn)
     rebuilt = 0
-    for day, _ in store.sessions_with_bars(conn):
+    for day, _ in store_queries.sessions_with_bars(conn):
         if day in served:
             continue
         rows = fit_snapshot_rows(conn, date.fromisoformat(day), "history_rebuilt", written_at)
@@ -236,7 +241,7 @@ def write_fits(conn, next_session, written_at):
             store.write_snapshot(conn, *rows)
             rebuilt += 1
     rows = fit_snapshot_rows(conn, next_session, "live_frozen", written_at)
-    existing = store.newest_fit_serving(conn, next_session.isoformat())
+    existing = store_queries.newest_fit_serving(conn, next_session.isoformat())
     if rows is None or (existing is not None and existing["cut_at"] >= rows[0]["cut_at"]):
         return rebuilt, 0
     store.write_snapshot(conn, *rows)
@@ -253,13 +258,13 @@ def day_reads(bars, trade_date, fits):
         read_speed = speed(closes[:start + 1])
         if read_speed is None:
             continue
-        for name, minutes in registry.HORIZON_MINUTES.items():
+        for name, minutes in components.HORIZON_MINUTES.items():
             last = min(start + minutes, closes.size - 1)
             moves = window_moves(closes, highs, lows, start, last)
             if moves is None:
                 continue
             swing = swing_points(read_speed, minutes)
-            for band in registry.BAND_PRICE_MEASURE:
+            for band in components.BAND_PRICE_MEASURE:
                 if fits[name][band] is not None:
                     reads.append((name, band, moves[band] <= swing * fits[name][band], last < start + minutes))
     return reads
@@ -268,11 +273,11 @@ def day_reads(bars, trade_date, fits):
 def pass_test(conn, lookback):
     """Walk-forward reads of every session with a full lookback of full sessions behind it, by day."""
     reads_by_day = {}
-    for day, _ in store.sessions_with_bars(conn):
+    for day, _ in store_queries.sessions_with_bars(conn):
         history = history_before(conn, date.fromisoformat(day), lookback)
         if len(history["sessions"]) < lookback:
             continue
-        reads_by_day[day] = day_reads(store.session_bars(conn, day), day, multipliers_from_history(history))
+        reads_by_day[day] = day_reads(store_queries.session_bars(conn, day), day, multipliers_from_history(history))
     return reads_by_day
 
 
@@ -286,13 +291,13 @@ def coverage(reads, column, clipped=None):
 def bootstrap_interval(values):
     """Mean coverage and its day-resampled interval: the mean of each draw's days, at the interval's percentiles."""
     draws = np.random.default_rng(BOOTSTRAP_SEED).choice(values, size=(BOOTSTRAP_DRAWS, len(values)), replace=True)
-    low, high = np.percentile(draws.mean(axis=1), PASS_INTERVAL_PERCENTILES)
+    low, high = np.percentile(draws.mean(axis=1), INTERVAL_PERCENTILES)
     return float(np.mean(values)), float(low), float(high)
 
 
 def pass_verdict(low, high):
     """PASS when the interval holds the band's share inside the bounds; holding the share but too wide is undecided."""
-    holds_share = low <= registry.BAND_PORTION <= high
+    holds_share = low <= components.BAND_PORTION <= high
     bounded = PASS_BAND_BOUNDS[0] <= low and high <= PASS_BAND_BOUNDS[1]
     if holds_share and bounded:
         return "PASS"
@@ -302,9 +307,9 @@ def pass_verdict(low, high):
 def pass_test_lines(conn, lookback, heading):
     """The pass test printed: per-day coverage per column, then mean, interval and verdict, then the clipped slice."""
     reads_by_day = pass_test(conn, lookback)
-    columns = [(name, band) for band in registry.BAND_PRICE_MEASURE for name in registry.HORIZON_MINUTES]
-    labels = {registry.BAND: "end", registry.AVERAGE_BAND: "avg"}
-    label = {column: f"{labels[column[1]]}{registry.HORIZON_MINUTES[column[0]]}" for column in columns}
+    columns = [(name, band) for band in components.BAND_PRICE_MEASURE for name in components.HORIZON_MINUTES]
+    labels = {components.BAND: "end", components.AVERAGE_BAND: "avg"}
+    label = {column: f"{labels[column[1]]}{components.HORIZON_MINUTES[column[0]]}" for column in columns}
     lines = [f"{heading}: {lookback}-session lookback, {BOOTSTRAP_DRAWS} day-resampled draws, seed {BOOTSTRAP_SEED}",
              f"test days: {len(reads_by_day)} - interval width is driven by the number of days",
              "day         " + " ".join(label[column].rjust(8) for column in columns)]
@@ -313,8 +318,8 @@ def pass_test_lines(conn, lookback, heading):
     for column in columns:
         values = [coverage(reads, column)[0] for reads in reads_by_day.values()]
         mean, low, high = bootstrap_interval(values)
-        lines.append(f"{label[column]}: mean {mean:.4f}, 95% interval {low:.4f} to {high:.4f}, "
-                     f"{pass_verdict(low, high)}")
+        lines.append(f"{label[column]}: mean {mean:.4f}, {components.INTERVAL_PERCENT}% interval {low:.4f} to "
+                     f"{high:.4f}, {pass_verdict(low, high)}")
     lines.append("clipped windows (capped at the close) as their own slice, pooled over the test days:")
     for column in columns:
         pooled = [read for reads in reads_by_day.values() for read in reads]

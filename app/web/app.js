@@ -5,18 +5,21 @@
 const CHANNELS = { "5_minutes": 5, "30_minutes": 30, "60_minutes": 60 };
 const FRESH_SECONDS = 6 * 60;
 const CLOSE_GRACE_SECONDS = 60;
+const FIRST_READ_SECONDS = 5 * 60;
 const POLL_MS = 30000;
 const POLL_BACKOFF_MAX_MS = 5 * 60000;
 const FETCH_TIMEOUT_MS = 10000;
-const PROMISED_SHARE = 0.8;
 const LIST_ROWS_SHOWN = 12;
+const LEAN_DEAD_ZONE = 0.01;
+const CHART_PAD_SHARE = 0.06;
+const CONE_STEPS = 4;
 const FONT = "Plus Jakarta Sans, sans-serif";
-const C = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
-            faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
-            white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
+const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
+                 faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
+                 white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
 const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, liveShare: 0.25 };
 const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6 };
-const BAR = { width: 312, centre: 156, reach: 136.7 };
+const RANGE_BAR = { width: 312, centre: 156, reach: 136.7 };
 const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2 };
 const METER = { width: 86, small: 50 };
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
@@ -49,6 +52,14 @@ function fmt(value, decimals = 0, signed = false) {
 function clock(iso) {
   if (!iso) return "—";
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
+/** "Fri 10-16" for a moment or a bare date; a bare date is read as a local day, never as UTC midnight. */
+function dayWord(iso) {
+  if (!iso) return "—";
+  const when = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00` : iso);
+  return `${when.toLocaleDateString([], { weekday: "short" })} ${String(when.getMonth() + 1).padStart(2, "0")}`
+       + `-${String(when.getDate()).padStart(2, "0")}`;
 }
 
 function ago(seconds) {
@@ -145,8 +156,13 @@ function liveWindow() {
   return block ? block.current[state.channel] : null;
 }
 
-function half(bands, name) {
+function halfWidth(bands, name) {
   return bands && bands[name] ? bands[name].half_width : null;
+}
+
+function bandPortion() {
+  const block = range();
+  return block && block.band_portion !== undefined ? block.band_portion : null;
 }
 
 function reasons() {
@@ -164,15 +180,21 @@ function feedAgeSeconds() {
   return moment ? (Date.now() - new Date(moment).getTime()) / 1000 : null;
 }
 
+/** The feed's standing: live within six minutes of its read, late after that while the session is open, closed once
+ *  the session is over, and no_read_today once the next session has had time for its first read with no newer feed. */
 function feedState() {
   const feed = state.feed;
   if (!feed) return "none";
   if (state.unreachable) return "unreachable";
   if (state.unreadable) return "unreadable";
   if (feed.status === "failed") return "failed";
-  const session = feed.session;
-  const closesAt = session && session.closes_at ? new Date(session.closes_at).getTime() : null;
-  if (closesAt !== null && Date.now() > closesAt + CLOSE_GRACE_SECONDS * 1000) return "closed";
+  const session = feed.session || {};
+  const closesAt = session.closes_at ? new Date(session.closes_at).getTime() : null;
+  const nextOpen = session.next_session_opens_at ? new Date(session.next_session_opens_at).getTime() : null;
+  if (closesAt !== null && Date.now() > closesAt + CLOSE_GRACE_SECONDS * 1000) {
+    const firstReadDue = nextOpen === null ? null : nextOpen + (FIRST_READ_SECONDS + FRESH_SECONDS) * 1000;
+    return firstReadDue !== null && Date.now() > firstReadDue ? "no_read_today" : "closed";
+  }
   return feedAgeSeconds() > FRESH_SECONDS ? "late" : "live";
 }
 
@@ -196,8 +218,7 @@ function explainedRead() {
            speed_fast: block.speed_fast, speed_slow: block.speed_slow, swing: ch.swing, stretch: ch.stretch,
            average_stretch: ch.average_stretch, fit_sessions: ch.fit_sessions, fit_windows: ch.fit_windows,
            stays_inside_share: ch.stays_inside_share, dials: ch.dials, dials_product: ch.dials_product,
-           straddle: block.straddle,
-           minutes_left: block.minutes_left, options_swing: ch.options_swing, options_over_tape: ch.options_over_tape,
+           straddle: block.straddle, minutes_left: block.minutes_left, options_swing: ch.options_swing,
            options_check: ch.options_check, chance_up_if_moves: ch.direction ? ch.direction.chance_up_if_moves : null,
            trust_applied: ch.direction ? ch.direction.trust_applied : null };
 }
@@ -297,13 +318,15 @@ function render() {
 function renderClock() {
   const feed = state.feed;
   const kind = feedState();
+  const cut = feed && feed.cut_at;
   const last = clock(feed && (feed.cut_at || feed.failed_at));
   const words = { none: state.unreadable ? "Feed Unreadable" : "No Feed",
                   failed: `Failed · ${clock(feed && feed.failed_at)}`,
                   unreachable: `Can't Reach · Last Read ${last}`, unreadable: `Feed Unreadable · Last Read ${last}`,
-                  closed: `Closed · Last Read ${clock(feed && feed.cut_at)}`,
-                  late: `Late · Last Read ${clock(feed && feed.cut_at)} · ${ago(feedAgeSeconds())} Ago`,
-                  live: `Live · ${clock(feed && feed.cut_at)}` };
+                  closed: `Closed · Last Read ${clock(cut)}`,
+                  no_read_today: `No Read Yet Today · Last Read ${dayWord(cut)} ${clock(cut)}`,
+                  late: `Late · Last Read ${clock(cut)} · ${ago(feedAgeSeconds())} Ago`,
+                  live: `Live · ${clock(cut)}` };
   document.querySelectorAll(".clock-text").forEach((node) => { node.textContent = words[kind]; });
   document.querySelectorAll(".clock-dot").forEach((node) => { node.className = `clock-dot ${kind}`; });
   const block = range();
@@ -370,45 +393,46 @@ function renderChart(current, finished, minutes) {
   const startMs = endMs - span / pxPerMinute * 60000;
   const ms = (iso) => new Date(iso).getTime();
   const x = (iso) => CHART.left + (ms(iso) - startMs) / 60000 * pxPerMinute;
-  const boxes = finished.filter((w) => ms(w.window_from) >= startMs && w.half_width !== null);
+  const boxes = finished.filter((window) => ms(window.window_from) >= startMs && window.half_width !== null);
   const bars = state.bars.filter((bar) => ms(bar.at) >= startMs && ms(bar.at) <= endMs);
-  const liveHalf = current ? half(current.bands, "80") : null;
+  const liveHalf = current ? halfWidth(current.bands, "80") : null;
   const prices = [];
-  boxes.forEach((w) => prices.push(w.price + w.half_width, w.price - w.half_width, w.high, w.low));
+  boxes.forEach((window) => prices.push(window.price + window.half_width, window.price - window.half_width,
+                                        window.high, window.low));
   bars.forEach((bar) => prices.push(bar.close));
   if (liveHalf !== null) prices.push(current.price + liveHalf, current.price - liveHalf);
   const known = prices.filter((p) => p !== null && p !== undefined);
   if (!known.length) return;
-  const pad = (Math.max(...known) - Math.min(...known)) * 0.06 || 1;
+  const pad = (Math.max(...known) - Math.min(...known)) * CHART_PAD_SHARE || 1;
   const high = Math.max(...known) + pad, low = Math.min(...known) - pad;
   const y = (price) => CHART.top + (high - price) / (high - low) * (CHART.bottom - CHART.top);
-  const parts = boxes.map((w) => readBox(w, x, y));
+  const parts = boxes.map((window) => readBox(window, x, y));
   if (liveHalf !== null) parts.push(liveCone(current, x, y));
   parts.push(priceLines(current, bars, x, y), axisLabels(current, boxes, bars, x));
   chart.innerHTML = parts.join("");
 }
 
-function readBox(w, x, y) {
-  const x0 = x(w.window_from), x1 = x(w.ends_at);
-  const y0 = y(w.price + w.half_width), y1 = y(w.price - w.half_width), yRead = y(w.price);
-  const inside = w.grades.ends_inside;
-  const colour = inside === null ? C.grey : inside ? C.green : C.rust;
+function readBox(window, x, y) {
+  const x0 = x(window.window_from), x1 = x(window.ends_at);
+  const y0 = y(window.price + window.half_width), y1 = y(window.price - window.half_width), yRead = y(window.price);
+  const inside = window.grades.ends_inside;
+  const colour = inside === null ? COLOUR.grey : inside ? COLOUR.green : COLOUR.rust;
   const gaugeX = x1 - 10;
-  const parts = [svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, C.ink, 0.045),
-                 svgRect(gaugeX, y0 + 20, 5, Math.max(0, y1 - y0 - 26), 2.5, C.ink, 0.08)];
-  if (w.end !== null) {
-    const yEnd = y(w.end);
+  const parts = [svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, COLOUR.ink, 0.045),
+                 svgRect(gaugeX, y0 + 20, 5, Math.max(0, y1 - y0 - 26), 2.5, COLOUR.ink, 0.08)];
+  if (window.end !== null) {
+    const yEnd = y(window.end);
     const usedTop = Math.min(yRead, yEnd), usedBottom = Math.max(yRead, yEnd);
     parts.push(svgRect(gaugeX, usedTop, 5, usedBottom - usedTop, 2.5, colour, 0.75),
-               svgLine(gaugeX - 3, yEnd, gaugeX + 8, yEnd, C.ink, 1.6));
+               svgLine(gaugeX - 3, yEnd, gaugeX + 8, yEnd, COLOUR.ink, 1.6));
   }
   const cx = gaugeX + 2.5, cy = y0 + 8;
   parts.push(`<circle cx="${cx}" cy="${cy}" r="6" fill="${colour}"/>`);
   if (inside === true) {
-    parts.push(`<path d="M${cx - 3.5} ${cy}l2.5 2.5 4-4.5" fill="none" stroke="${C.white}" stroke-width="1.8" `
+    parts.push(`<path d="M${cx - 3.5} ${cy}l2.5 2.5 4-4.5" fill="none" stroke="${COLOUR.white}" stroke-width="1.8" `
                + `stroke-linecap="round" stroke-linejoin="round"/>`);
   } else if (inside === false) {
-    parts.push(`<path d="M${cx - 3} ${cy - 3}l6 6M${cx + 3} ${cy - 3}l-6 6" stroke="${C.white}" `
+    parts.push(`<path d="M${cx - 3} ${cy - 3}l6 6M${cx + 3} ${cy - 3}l-6 6" stroke="${COLOUR.white}" `
                + `stroke-width="1.8" stroke-linecap="round"/>`);
   }
   return parts.join("");
@@ -418,15 +442,15 @@ function liveCone(current, x, y) {
   const xr = x(current.read_at), xe = x(current.ends_at);
   const cone = (reachAtEnd, opacity) => {
     const upper = [], lower = [];
-    for (let step = 0; step <= 4; step += 1) {
-      const t = step / 4, px = xr + t * (xe - xr), reach = reachAtEnd * Math.sqrt(t);
+    for (let step = 0; step <= CONE_STEPS; step += 1) {
+      const t = step / CONE_STEPS, px = xr + t * (xe - xr), reach = reachAtEnd * Math.sqrt(t);
       upper.push(`${px.toFixed(1)},${y(current.price + reach).toFixed(1)}`);
       lower.unshift(`${px.toFixed(1)},${y(current.price - reach).toFixed(1)}`);
     }
-    return `<polygon points="${upper.concat(lower).join(" ")}" fill="${C.blue}" fill-opacity="${opacity}"/>`;
+    return `<polygon points="${upper.concat(lower).join(" ")}" fill="${COLOUR.blue}" fill-opacity="${opacity}"/>`;
   };
-  const endHalf = half(current.bands, "80"), averageHalf = half(current.bands, "average_80");
-  const label = `font-size="10" text-anchor="end" fill="${C.blue}"`;
+  const endHalf = halfWidth(current.bands, "80"), averageHalf = halfWidth(current.bands, "average_80");
+  const label = `font-size="10" text-anchor="end" fill="${COLOUR.blue}"`;
   return cone(endHalf, 0.12) + (averageHalf !== null ? cone(averageHalf, 0.2) : "")
        + svgText(xe, y(current.price + endHalf) - 4, fmt(current.price + endHalf), label)
        + svgText(xe, y(current.price - endHalf) + 11, fmt(current.price - endHalf), label);
@@ -440,7 +464,7 @@ function priceLines(current, bars, x, y) {
   const point = (bar) => `${x(bar.at).toFixed(1)},${y(bar.close).toFixed(1)}`;
   const round = `stroke-linejoin="round" stroke-linecap="round"`;
   const parts = [];
-  if (before.length) parts.push(svgPolyline(before.map(point), C.ink, 2, round));
+  if (before.length) parts.push(svgPolyline(before.map(point), COLOUR.ink, 2, round));
   const last = bars[bars.length - 1];
   const lastX = x(last.at), lastY = y(last.close);
   if (current && after.length) {
@@ -451,25 +475,28 @@ function priceLines(current, bars, x, y) {
       sum += bar.close;
       averages.push(`${x(bar.at).toFixed(1)},${y(sum / (index + 1)).toFixed(1)}`);
     });
-    parts.push(svgPolyline([start].concat(after.map(point)), C.blue, 2.6, round),
-               svgPolyline([start].concat(averages), C.ink, 1.8, `stroke-dasharray="4 2.5"`),
-               `<circle cx="${lastX}" cy="${lastY}" r="9" fill="${C.blue}" fill-opacity="0.15"/>`,
-               `<circle cx="${lastX}" cy="${lastY}" r="5" fill="${C.blue}" stroke="${C.cream}" stroke-width="2"/>`,
-               `<circle cx="${lastX}" cy="${y(sum / after.length)}" r="4.5" fill="${C.cream}" stroke="${C.ink}" `
-               + `stroke-width="2"/>`);
+    parts.push(svgPolyline([start].concat(after.map(point)), COLOUR.blue, 2.6, round),
+               svgPolyline([start].concat(averages), COLOUR.ink, 1.8, `stroke-dasharray="4 2.5"`),
+               `<circle cx="${lastX}" cy="${lastY}" r="9" fill="${COLOUR.blue}" fill-opacity="0.15"/>`,
+               `<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
+               + `stroke-width="2"/>`,
+               `<circle cx="${lastX}" cy="${y(sum / after.length)}" r="4.5" fill="${COLOUR.cream}" `
+               + `stroke="${COLOUR.ink}" stroke-width="2"/>`);
   } else {
-    parts.push(`<circle cx="${lastX}" cy="${lastY}" r="5" fill="${C.blue}" stroke="${C.cream}" stroke-width="2"/>`);
+    parts.push(`<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
+               + `stroke-width="2"/>`);
   }
   return parts.join("");
 }
 
 function axisLabels(current, boxes, bars, x) {
-  const parts = boxes.map((w) => svgText((x(w.window_from) + x(w.ends_at)) / 2, CHART.labelY, clock(w.read_at),
-                                         `font-size="10" text-anchor="middle" fill="${C.faint}"`));
+  const parts = boxes.map((window) => svgText((x(window.window_from) + x(window.ends_at)) / 2, CHART.labelY,
+                                              clock(window.read_at),
+                                              `font-size="10" text-anchor="middle" fill="${COLOUR.faint}"`));
   const last = bars[bars.length - 1];
   const nowX = clamp(last ? x(last.at) : current ? x(current.read_at) : CHART.width - 12, 12, CHART.width - 12);
   parts.push(svgText(nowX, CHART.labelY, isLive() ? "Now" : "Last",
-                     `font-size="10" text-anchor="middle" fill="${C.ink}" font-weight="700"`));
+                     `font-size="10" text-anchor="middle" fill="${COLOUR.ink}" font-weight="700"`));
   return parts.join("");
 }
 
@@ -477,7 +504,7 @@ function renderStrip() {
   const current = liveWindow();
   const strip = el("strip");
   const verdict = el("strip-verdict");
-  const endHalf = current ? half(current.bands, "80") : null;
+  const endHalf = current ? halfWidth(current.bands, "80") : null;
   note("strip-note", endHalf ? "" : emptyReason());
   strip.hidden = !endHalf;
   if (!endHalf) {
@@ -486,12 +513,12 @@ function renderStrip() {
     verdict.className = "faint";
     return;
   }
-  const averageHalf = half(current.bands, "average_80");
+  const averageHalf = halfWidth(current.bands, "average_80");
   const scale = STRIP.reach / endHalf;
   const edgeLeft = STRIP.centre - STRIP.reach, edgeRight = STRIP.centre + STRIP.reach;
   const at = (move) => clamp(STRIP.centre + move * scale, STRIP.edge, STRIP.width - STRIP.edge);
   const move = current.now.move, averageMove = current.now.average_move;
-  const inside = current.so_far.average_inside;
+  const inside = current.average_inside;
   verdict.textContent = inside === null ? "—" : inside ? "Inside ✓" : "Outside ✗";
   verdict.className = inside === null ? "faint" : inside ? "inside" : "outside";
   const liveX = at(move || 0), averageX = averageMove === null ? null : at(averageMove);
@@ -501,27 +528,29 @@ function renderStrip() {
   const dashed = `stroke-dasharray="3 2"`;
   const parts = [
     svgText(liveX + (liveLeft ? 3 : -3), 10, `${isLive() ? "Live" : "Last"} ${fmt(move, 1, true)}`,
-            `${bold} text-anchor="${liveLeft ? "end" : "start"}" fill="${C.blue}"`),
-    svgLine(0, 32, STRIP.width, 32, C.sand, 1),
+            `${bold} text-anchor="${liveLeft ? "end" : "start"}" fill="${COLOUR.blue}"`),
+    svgLine(0, 32, STRIP.width, 32, COLOUR.sand, 1),
   ];
   if (averageHalf !== null) {
     const bandLeft = STRIP.centre - averageHalf * scale, bandRight = STRIP.centre + averageHalf * scale;
-    parts.push(svgRect(bandLeft, 21, bandRight - bandLeft, 22, 5, C.band),
-               svgText(bandLeft, 60, fmt(-averageHalf, 1), `${small} fill="${C.faint}"`),
-               svgText(bandRight, 60, fmt(averageHalf, 1, true), `${small} fill="${C.faint}"`));
+    parts.push(svgRect(bandLeft, 21, bandRight - bandLeft, 22, 5, COLOUR.band),
+               svgText(bandLeft, 60, fmt(-averageHalf, 1), `${small} fill="${COLOUR.faint}"`),
+               svgText(bandRight, 60, fmt(averageHalf, 1, true), `${small} fill="${COLOUR.faint}"`));
   }
-  parts.push(svgLine(edgeLeft, 20, edgeLeft, 44, C.rust, 1.5, dashed),
-             svgLine(edgeRight, 20, edgeRight, 44, C.rust, 1.5, dashed),
-             svgLine(STRIP.centre, 17, STRIP.centre, 47, C.ink, 2.5), svgLine(liveX, 15, liveX, 49, C.blue, 3));
+  parts.push(svgLine(edgeLeft, 20, edgeLeft, 44, COLOUR.rust, 1.5, dashed),
+             svgLine(edgeRight, 20, edgeRight, 44, COLOUR.rust, 1.5, dashed),
+             svgLine(STRIP.centre, 17, STRIP.centre, 47, COLOUR.ink, 2.5),
+             svgLine(liveX, 15, liveX, 49, COLOUR.blue, 3));
   if (averageX !== null) {
     parts.push(svgText(averageX + (liveLeft ? -4 : 4), 10, `Average ${fmt(averageMove, 1, true)}`,
-                       `${bold} text-anchor="${liveLeft ? "start" : "end"}" fill="${C.ink}"`),
-               `<circle cx="${averageX}" cy="32" r="6" fill="${C.cream}" stroke="${C.ink}" stroke-width="2" `
-               + `${dashed}/>`);
+                       `${bold} text-anchor="${liveLeft ? "start" : "end"}" fill="${COLOUR.ink}"`),
+               `<circle cx="${averageX}" cy="32" r="6" fill="${COLOUR.cream}" stroke="${COLOUR.ink}" `
+               + `stroke-width="2" ${dashed}/>`);
   }
-  parts.push(svgText(STRIP.centre, 60, `Read ${fmt(current.price, 1)}`, `${bold} text-anchor="middle" fill="${C.ink}"`),
-             svgText(edgeLeft, 60, fmt(-endHalf, 1), `${small} fill="${C.rust}"`),
-             svgText(edgeRight, 60, fmt(endHalf, 1, true), `${small} fill="${C.rust}"`));
+  parts.push(svgText(STRIP.centre, 60, `Read ${fmt(current.price, 1)}`,
+                     `${bold} text-anchor="middle" fill="${COLOUR.ink}"`),
+             svgText(edgeLeft, 60, fmt(-endHalf, 1), `${small} fill="${COLOUR.rust}"`),
+             svgText(edgeRight, 60, fmt(endHalf, 1, true), `${small} fill="${COLOUR.rust}"`));
   strip.innerHTML = parts.join("");
 }
 
@@ -529,16 +558,16 @@ function renderReadsList() {
   const current = liveWindow();
   const finished = windows() ? windows().finished[state.channel] : [];
   const rows = [];
-  if (current && half(current.bands, "80") !== null) {
+  if (current && halfWidth(current.bands, "80") !== null) {
     const word = isLive() ? "Live" : current.ended ? "Ended" : "Last";
-    rows.push(readRow(current.read_at, half(current.bands, "80"), current.now.farthest_up,
+    rows.push(readRow(current.read_at, halfWidth(current.bands, "80"), current.now.farthest_up,
                       current.now.farthest_down, current.now.move, word, "live"));
   }
-  finished.forEach((w) => {
-    const inside = w.grades.ends_inside;
-    const word = inside === null ? titleCase(w.status || "pending") : inside ? "Inside" : "Outside";
-    rows.push(readRow(w.read_at, w.half_width, w.farthest_up, w.farthest_down, w.end_move, word,
-                      inside === null ? "faint" : inside ? "inside" : "outside"));
+  finished.forEach((window) => {
+    const inside = window.grades.ends_inside;
+    const word = inside === null ? titleCase(window.status || "pending") : inside ? "Inside" : "Outside";
+    rows.push(readRow(window.read_at, window.half_width, window.farthest_up, window.farthest_down, window.end_move,
+                      word, inside === null ? "faint" : inside ? "inside" : "outside"));
   });
   const shown = state.showAll ? rows : rows.slice(0, LIST_ROWS_SHOWN);
   const more = rows.length > shown.length
@@ -546,13 +575,14 @@ function renderReadsList() {
   el("reads-list").innerHTML = shown.join("") + more || `<p class="block-note">${esc(emptyReason())}</p>`;
 }
 
-function readRow(readAt, halfWidth, up, down, endMove, word, kind) {
-  const colour = kind === "live" ? C.blue : kind === "inside" ? C.green : kind === "outside" ? C.rust : C.grey;
-  const scale = halfWidth ? ROW.reach / halfWidth : 0;
+function readRow(readAt, half, up, down, endMove, word, kind) {
+  const colour = kind === "live" ? COLOUR.blue : kind === "inside" ? COLOUR.green
+               : kind === "outside" ? COLOUR.rust : COLOUR.grey;
+  const scale = half ? ROW.reach / half : 0;
   const spanLeft = clamp(ROW.centre - (down || 0) * scale, 2, ROW.width - 2);
   const spanRight = clamp(ROW.centre + (up || 0) * scale, 2, ROW.width - 2);
-  const bar = [svgRect(ROW.trackLeft, 2, ROW.trackRight - ROW.trackLeft, 6, 3, C.track)];
-  if (up !== null && down !== null && halfWidth) {
+  const bar = [svgRect(ROW.trackLeft, 2, ROW.trackRight - ROW.trackLeft, 6, 3, COLOUR.track)];
+  if (up !== null && down !== null && half) {
     const innerLeft = Math.max(spanLeft, ROW.trackLeft), innerRight = Math.min(spanRight, ROW.trackRight);
     if (innerRight > innerLeft) bar.push(svgRect(innerLeft, 3.5, innerRight - innerLeft, 3, 1.5, colour, 0.45));
     if (spanLeft < ROW.trackLeft) bar.push(svgRect(spanLeft, 3.5, ROW.trackLeft - spanLeft, 3, 1.5, colour, 0.6));
@@ -560,12 +590,12 @@ function readRow(readAt, halfWidth, up, down, endMove, word, kind) {
       bar.push(svgRect(ROW.trackRight, 3.5, spanRight - ROW.trackRight, 3, 1.5, colour, 0.6));
     }
   }
-  if (endMove !== null && halfWidth) {
+  if (endMove !== null && half) {
     const dotX = clamp(ROW.centre + endMove * scale, 5, ROW.width - 5);
     bar.push(`<circle cx="${dotX}" cy="5" r="3.5" fill="${colour}"/>`);
   }
   const travelled = up === null || down === null ? "—" : `${fmt(up, 0, true)} −${fmt(down)}`;
-  const span = halfWidth ? `${travelled} · ±${fmt(halfWidth)}` : "—";
+  const span = half ? `${travelled} · ±${fmt(half)}` : "—";
   return `<div class="read-row"><span class="when ${kind === "live" ? "live" : ""}">${clock(readAt)}</span>`
        + `<svg viewBox="0 0 ${ROW.width} 10" aria-hidden="true">${bar.join("")}</svg>`
        + `<span class="span">${span}</span><span class="word ${kind}">${esc(word)}</span></div>`;
@@ -574,7 +604,8 @@ function readRow(readAt, halfWidth, up, down, endMove, word, kind) {
 function renderScores() {
   const score = windows() ? windows().score[state.channel] : null;
   const read = explainedRead();
-  const targets = { ends_inside: PROMISED_SHARE, average_inside: PROMISED_SHARE,
+  const promised = bandPortion();
+  const targets = { ends_inside: promised, average_inside: promised,
                     never_left: read ? read.stays_inside_share : null };
   const labels = { ends_inside: "Ends Inside", average_inside: "Average Inside", never_left: "Never Left" };
   el("scores").innerHTML = Object.keys(labels).map((word) => {
@@ -603,7 +634,7 @@ function readLine(read, minutes, short = false) {
 function renderSight() {
   const read = explainedRead();
   const minutes = CHANNELS[state.channel];
-  const usable = read && read.status !== "blind" && half(read.bands, "80") !== null;
+  const usable = read && read.status !== "blind" && halfWidth(read.bands, "80") !== null;
   note("sight-note", usable ? "" : emptyReason());
   el("sight-read-line").textContent = readLine(read, minutes, true);
   renderSpeedBars(usable ? read : null);
@@ -620,19 +651,19 @@ function renderSpeedBars(read) {
   const barHeight = (value) => (value === null ? 0 : (SPEED.baseline - SPEED.top) * value / most);
   const parts = bars.map(([name, memory, value, opacity], index) => {
     const x = SPEED.left + index * SPEED.step, height = barHeight(value), y = SPEED.baseline - height;
-    const inkOrWhite = opacity > 0.9 ? C.white : C.ink;
+    const inkOrWhite = opacity > 0.9 ? COLOUR.white : COLOUR.ink;
     const middle = x + SPEED.barWidth / 2;
-    return svgRect(x, y, SPEED.barWidth, height, 5, C.blue, opacity)
+    return svgRect(x, y, SPEED.barWidth, height, 5, COLOUR.blue, opacity)
          + svgText(middle, SPEED.baseline - 6, fmt(value, 2),
                    `font-size="10" font-weight="700" text-anchor="middle" fill="${inkOrWhite}"`)
-         + svgText(middle, 62, name, `font-size="9.5" font-weight="700" text-anchor="middle" fill="${C.faint}"`)
-         + svgText(middle, 72, memory, `font-size="8.5" text-anchor="middle" fill="${C.faint}"`);
+         + svgText(middle, 62, name, `font-size="9.5" font-weight="700" text-anchor="middle" fill="${COLOUR.faint}"`)
+         + svgText(middle, 72, memory, `font-size="8.5" text-anchor="middle" fill="${COLOUR.faint}"`);
   });
   if (read && read.speed !== null) {
     const usedY = SPEED.baseline - barHeight(read.speed);
-    parts.push(svgLine(0, usedY, SPEED.width, usedY, C.ink, 1.4, `stroke-dasharray="4 3"`));
+    parts.push(svgLine(0, usedY, SPEED.width, usedY, COLOUR.ink, 1.4, `stroke-dasharray="4 3"`));
   }
-  parts.push(svgLine(0, SPEED.baseline, SPEED.width, SPEED.baseline, C.sand, 1));
+  parts.push(svgLine(0, SPEED.baseline, SPEED.width, SPEED.baseline, COLOUR.sand, 1));
   el("speed-bars").innerHTML = parts.join("");
 }
 
@@ -641,7 +672,7 @@ function dialsApplied(read) {
 }
 
 function renderChain(read, minutes) {
-  const bandHalf = read ? half(read.bands, "80") : null;
+  const bandHalf = read ? halfWidth(read.bands, "80") : null;
   const applied = dialsApplied(read);
   el("chain").innerHTML = `<span class="box">${read ? fmt(read.speed, 2) : "—"}</span>`
     + `<span class="arrow">× √${minutes} →</span><span class="box">${plusMinus(read && read.swing)} Swing</span>`
@@ -650,34 +681,38 @@ function renderChain(read, minutes) {
 }
 
 function renderRangeBar(read) {
-  const bandHalf = read ? half(read.bands, "80") : null;
+  const bandHalf = read ? halfWidth(read.bands, "80") : null;
   el("range-bar").hidden = !bandHalf;
   if (!bandHalf) {
     el("range-bar").innerHTML = "";
     return;
   }
-  const scale = BAR.reach / bandHalf, averageHalf = half(read.bands, "average_80"), rung = Number(read.rung_points);
+  const scale = RANGE_BAR.reach / bandHalf, averageHalf = halfWidth(read.bands, "average_80");
+  const rung = Number(read.rung_points);
   const bold = `font-size="10" font-weight="700" text-anchor="middle"`;
-  const parts = [svgRect(BAR.centre - bandHalf * scale, 8, 2 * bandHalf * scale, 20, 6, C.blue, 0.14)];
+  const parts = [svgRect(RANGE_BAR.centre - bandHalf * scale, 8, 2 * bandHalf * scale, 20, 6, COLOUR.blue, 0.14)];
   if (averageHalf !== null) {
-    parts.push(svgRect(BAR.centre - averageHalf * scale, 8, 2 * averageHalf * scale, 20, 5, C.blue, 0.22),
-               svgText(BAR.centre - averageHalf * scale + 3, 22, `Avg ${plusMinus(averageHalf)}`,
-                       `font-size="9.5" fill="${C.blue}"`));
+    parts.push(svgRect(RANGE_BAR.centre - averageHalf * scale, 8, 2 * averageHalf * scale, 20, 5, COLOUR.blue, 0.22),
+               svgText(RANGE_BAR.centre - averageHalf * scale + 3, 22, `Avg ${plusMinus(averageHalf)}`,
+                       `font-size="9.5" fill="${COLOUR.blue}"`));
   }
-  const rungLeft = BAR.centre - rung * scale, rungRight = clamp(BAR.centre + rung * scale, 0, BAR.width);
+  const rungLeft = RANGE_BAR.centre - rung * scale;
+  const rungRight = clamp(RANGE_BAR.centre + rung * scale, 0, RANGE_BAR.width);
   const dashed = `stroke-dasharray="2 2"`;
-  const labelFits = rungRight + 24 < BAR.centre + bandHalf * scale;
-  const labelX = !Number.isFinite(rung) ? BAR.width - 20 : labelFits ? rungRight + 3 : rungRight - 3;
+  const labelFits = rungRight + 24 < RANGE_BAR.centre + bandHalf * scale;
+  const labelX = !Number.isFinite(rung) ? RANGE_BAR.width - 20 : labelFits ? rungRight + 3 : rungRight - 3;
   if (Number.isFinite(rung)) {
-    parts.push(svgLine(rungLeft, 4, rungLeft, 32, C.ink, 1, dashed),
-               svgLine(rungRight, 4, rungRight, 32, C.ink, 1, dashed));
+    parts.push(svgLine(rungLeft, 4, rungLeft, 32, COLOUR.ink, 1, dashed),
+               svgLine(rungRight, 4, rungRight, 32, COLOUR.ink, 1, dashed));
   }
-  parts.push(svgLine(BAR.centre, 3, BAR.centre, 33, C.ink, 2.5),
-             svgText(BAR.centre - bandHalf * scale, 45, fmt(read.bands["80"].low), `${bold} fill="${C.blue}"`),
-             svgText(BAR.centre, 45, `Read ${fmt(read.price)}`, `${bold} fill="${C.ink}"`),
-             svgText(BAR.centre + bandHalf * scale, 45, fmt(read.bands["80"].high), `${bold} fill="${C.blue}"`),
+  parts.push(svgLine(RANGE_BAR.centre, 3, RANGE_BAR.centre, 33, COLOUR.ink, 2.5),
+             svgText(RANGE_BAR.centre - bandHalf * scale, 45, fmt(read.bands["80"].low),
+                     `${bold} fill="${COLOUR.blue}"`),
+             svgText(RANGE_BAR.centre, 45, `Read ${fmt(read.price)}`, `${bold} fill="${COLOUR.ink}"`),
+             svgText(RANGE_BAR.centre + bandHalf * scale, 45, fmt(read.bands["80"].high),
+                     `${bold} fill="${COLOUR.blue}"`),
              svgText(labelX, 22, `±${fmt(rung)}`,
-                     `font-size="9.5" text-anchor="${labelFits ? "start" : "end"}" fill="${C.ink}"`));
+                     `font-size="9.5" text-anchor="${labelFits ? "start" : "end"}" fill="${COLOUR.ink}"`));
   el("range-bar").innerHTML = parts.join("");
 }
 
@@ -689,9 +724,13 @@ function optionsWord(read) {
 
 function newsCheck(read) {
   const block = range();
+  const covered = valueOf("does_calendar_cover_day");
   const next = block && block.releases && block.releases.length ? block.releases[0] : null;
   const dial = read.dials ? read.dials.release_window : null;
   const quiet = !next && (!dial || dial.raw === 1);
+  if (covered === 0 || covered === false) {
+    return { name: "Calendar Doesn't Cover Today", value: "—", good: false };
+  }
   const name = next ? `${esc(titleCase(next.name))} At ${clock(next.at)}`
              : quiet ? "No News Left Today" : "News In The Window";
   return { name, value: dial ? `×${fmt(dial.applied, 2)}` : "—", good: quiet };
@@ -721,43 +760,22 @@ function renderSightChecks(read) {
                share === null ? "—" : `${fmt(share * 100)}% At Today's Speed`, "");
 }
 
-function pushValue(name) {
-  const pct = (value) => (value === null ? null : `${fmt(value * 100)}%`);
-  const advancing = pct(valueOf("nyse_advancing_portion")), bullish = pct(valueOf("bullish_portion_of_sided_premium"));
-  const since = valueOf("move_points|since=prior_close");
-  const straight = valueOf("trend_straightness_ratio|window_minutes=30");
-  const qqq = valueOf("fund_change_from_prior_close_pct|symbol=QQQ");
-  const rsp = valueOf("fund_change_from_prior_close_pct|symbol=RSP");
-  const basisPoints = valueOf("ten_year_yield_change_basis_points");
-  const up = valueOf("mirai_claude_forecast_pct|horizon=30_minutes&side=up");
-  const down = valueOf("mirai_claude_forecast_pct|horizon=30_minutes&side=down");
-  switch (name) {
-    case "price_trend": return since === null ? null : `${fmt(since, 0, true)} Since Close`;
-    case "straightness": return straight === null ? null : `${fmt(straight, 2)} Straight`;
-    case "breadth": return advancing && `${advancing} Up`;
-    case "big_tech_vs_rest": return qqq === null || rsp === null ? null : `${fmt(qqq - rsp, 1, true)}%`;
-    case "options_buyers": return bullish && `${bullish} Bullish`;
-    case "yield_change": return basisPoints === null ? null : `${fmt(basisPoints, 1, true)} bp`;
-    case "mirai_claude": return up === null || down === null || !(up + down) ? null
-                                : `${fmt(up / (up + down) * 100)}% Up`;
-    default: return null;
-  }
-}
-
 function leanMeter(lean, width = METER.width) {
   const mid = width / 2;
-  const track = svgRect(0, 4, width, 4, 2, C.rule) + svgLine(mid, 1, mid, 11, C.faint, 1);
+  const track = svgRect(0, 4, width, 4, 2, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
   if (lean === null || lean === undefined) return track;
   const x = clamp(lean * width, 4, width - 4);
-  const colour = lean < 0.49 ? C.rust : lean > 0.51 ? C.blue : C.grey;
+  const tilt = lean - 0.5;
+  const colour = Math.abs(tilt) <= LEAN_DEAD_ZONE ? COLOUR.grey : tilt < 0 ? COLOUR.rust : COLOUR.blue;
   const fill = Math.abs(x - mid) > 0.5 ? svgRect(Math.min(x, mid), 4, Math.abs(x - mid), 4, 2, colour, 0.45) : "";
   return track + fill + `<circle cx="${x}" cy="6" r="4" fill="${colour}"/>`;
 }
 
-function directionWords(chance, text) {
-  if (chance === null || chance === undefined) return "—";
-  const words = !text || text === "coin flip until earned" ? "Coin Flip" : titleCase(text);
-  return `Up ${fmt(chance * 100)}% · ${words}`;
+/** The call in words: the engine's text once any trust is earned, Coin Flip while the applied trust is 0. */
+function directionWords(direction) {
+  if (!direction || direction.chance_up_if_moves === null || direction.chance_up_if_moves === undefined) return "—";
+  const words = direction.trust_applied === 0 || !direction.text ? "Coin Flip" : titleCase(direction.text);
+  return `Up ${fmt(direction.chance_up_if_moves * 100)}% · ${words}`;
 }
 
 function renderPush() {
@@ -770,7 +788,7 @@ function renderPush() {
   const failed = reasons().includes("push_failed");
   const rows = (push || []).map((entry) => {
     const entryWeight = entry.weight_by_channel ? entry.weight_by_channel[state.channel] : 0;
-    const value = entry.reason ? titleCase(entry.reason) : pushValue(entry.name) || entry.value;
+    const value = entry.reason ? titleCase(entry.reason) : entry.value;
     const label = PUSH_LABELS[entry.name] || titleCase(entry.name);
     return `<div class="push-row"><span>${esc(label)}${entryWeight ? ` · ${fmt(entryWeight, 2)}` : ""}</span>`
          + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true">${leanMeter(entry.lean_if_trusted)}</svg>`
@@ -781,8 +799,7 @@ function renderPush() {
   el("push-rows").classList.toggle("earned", Boolean(weight));
   el("push-call-label").textContent = weight ? `Counted At Weight ${fmt(weight, 2)} →`
                                              : "Not Counted Until Earned →";
-  el("push-call").textContent = directionWords(direction && direction.chance_up_if_moves,
-                                               direction && direction.text);
+  el("push-call").textContent = directionWords(direction);
 }
 
 function renderFeeds() {
@@ -795,7 +812,8 @@ function renderFeeds() {
   el("feeds-grid").innerHTML = names.map((name) => {
     const feed = feeds[name];
     const age = feed.age_s === null || feed.age_s === undefined ? "" : ago(feed.age_s);
-    const words = feed.status === "live" ? age || "Live" : `${titleCase(feed.status)}${age ? " · " + age : ""}`;
+    const standing = feed.status === "live" ? age || "Live" : `${titleCase(feed.status)}${age ? " · " + age : ""}`;
+    const words = feed.note ? `${standing} · ${feed.note}` : standing;
     return `<div class="feed"><span class="name"><i class="feed-dot ${esc(feed.status)}"></i>`
          + `${esc(FEED_LABELS[name] || titleCase(name))}</span><span class="age">${esc(words)}</span></div>`;
   }).join("");
@@ -803,12 +821,21 @@ function renderFeeds() {
   if (!login || !login.state) {
     el("login-line").textContent = "Schwab Login · —";
   } else if (login.state === "ok" && login.expires_at) {
-    const when = new Date(login.expires_at);
-    const day = `${when.toLocaleDateString([], { weekday: "short" })} ${String(when.getMonth() + 1).padStart(2, "0")}`
-              + `-${String(when.getDate()).padStart(2, "0")}`;
-    el("login-line").textContent = `Schwab Login Good Until ${day} · ${fmt(login.hours_left)} H Left`;
+    el("login-line").textContent = `Schwab Login Good Until ${dayWord(login.expires_at)} · ${fmt(login.hours_left)} `
+                                 + "H Left";
   } else {
     el("login-line").textContent = `Schwab Login ${titleCase(login.state)}`;
+  }
+  const nightly = state.feed && state.feed.nightly;
+  if (!nightly || !nightly.expected) {
+    el("nightly-line").textContent = "Nightly · —";
+    el("nightly-line").className = "faint-small";
+  } else {
+    const done = Boolean(nightly.done_for) && nightly.done_for >= nightly.expected;
+    el("nightly-line").textContent = done ? `Nightly Done For ${dayWord(nightly.expected)}`
+                                          : `Nightly Not Done For ${dayWord(nightly.expected)}`
+                                            + `${nightly.done_for ? ` · Last ${dayWord(nightly.done_for)}` : ""}`;
+    el("nightly-line").className = done ? "faint-small" : "faint-small outside";
   }
 }
 
@@ -817,7 +844,7 @@ function renderFeeds() {
 function renderSteps() {
   const read = explainedRead();
   const minutes = CHANNELS[state.channel];
-  const usable = read && read.status !== "blind" && half(read.bands, "80") !== null;
+  const usable = read && read.status !== "blind" && halfWidth(read.bands, "80") !== null;
   el("steps-sub").textContent = readLine(read, minutes);
   note("steps-note", usable ? "" : emptyReason());
   renderStepBars(usable ? read : null, minutes);
@@ -838,30 +865,35 @@ function renderStepBars(read, minutes) {
     el("steps-bars").innerHTML = "";
     return;
   }
-  const bandHalf = half(read.bands, "80"), averageHalf = half(read.bands, "average_80");
-  const scale = BAR.reach / bandHalf;
-  const edge = (reach) => (BAR.centre - reach * scale).toFixed(1);
-  const farEdge = (reach) => (BAR.centre + reach * scale).toFixed(1);
-  const rect = (reach, opacity) => svgRect(edge(reach), 8, (2 * reach * scale).toFixed(1), 14, 5, C.blue, opacity);
-  const centreLine = svgLine(BAR.centre, 5, BAR.centre, 25, C.ink, 1.6);
+  const bandHalf = halfWidth(read.bands, "80"), averageHalf = halfWidth(read.bands, "average_80");
+  const scale = RANGE_BAR.reach / bandHalf;
+  const edge = (reach) => (RANGE_BAR.centre - reach * scale).toFixed(1);
+  const farEdge = (reach) => (RANGE_BAR.centre + reach * scale).toFixed(1);
+  const rect = (reach, opacity) => svgRect(edge(reach), 8, (2 * reach * scale).toFixed(1), 14, 5, COLOUR.blue,
+                                           opacity);
+  const centreLine = svgLine(RANGE_BAR.centre, 5, RANGE_BAR.centre, 25, COLOUR.ink, 1.6);
   const funnel = (from, to) =>
-    `<path d="M${edge(from)} 0 L${edge(to)} 8 M${farEdge(from)} 0 L${farEdge(to)} 8" stroke="${C.sand}" `
+    `<path d="M${edge(from)} 0 L${edge(to)} 8 M${farEdge(from)} 0 L${farEdge(to)} 8" stroke="${COLOUR.sand}" `
     + `stroke-width="1" stroke-dasharray="2 2" fill="none"/>`;
-  const bar = (inner, height = 26) => `<svg viewBox="0 0 ${BAR.width} ${height}" aria-hidden="true">${inner}</svg>`;
-  const bold = `font-size="10" font-weight="700" text-anchor="middle" fill="${C.blue}"`;
+  const bar = (inner, height = 26) =>
+    `<svg viewBox="0 0 ${RANGE_BAR.width} ${height}" aria-hidden="true">${inner}</svg>`;
+  const bold = `font-size="10" font-weight="700" text-anchor="middle" fill="${COLOUR.blue}"`;
   const speed = read.speed, swing = read.swing, share = read.stays_inside_share, windowsCount = read.fit_windows;
   const neverSub = share === null ? "—"
     : windowsCount ? `${fmt(Math.round(share * windowsCount))} Of ${fmt(windowsCount)} Past Windows At Today's Speed`
     : `${fmt(share * 100)}% Of Past Windows At Today's Speed`;
   const rung = Number(read.rung_points);
+  const promised = bandPortion();
+  const bandName = promised === null ? "End Band" : `End Band · ${fmt(promised * 10)} In 10`;
   const dashedBox = Number.isFinite(rung) ? svgRect(edge(rung), 8, (2 * rung * scale).toFixed(1), 14, 5, "none", 1,
-                                                    `stroke="${C.ink}" stroke-width="1.3" stroke-dasharray="3 2"`) : "";
+                                                    `stroke="${COLOUR.ink}" stroke-width="1.3" stroke-dasharray="3 2"`)
+                                          : "";
   el("steps-bars").innerHTML =
     stepBar(1, "Speed", "today", fmt(speed, 2), "One Minute's Typical Move · 15-Min Memory",
             bar(rect(speed, 0.55) + centreLine))
     + stepBar(2, "Swing", "today", plusMinus(swing), `Over ${minutes} Minutes · ${fmt(speed, 2)} × √${minutes}`,
               bar(funnel(speed, swing) + rect(swing, 0.35) + centreLine))
-    + stepBar("3–4", `End Band · ${fmt(PROMISED_SHARE * 10)} In 10`, "history", plusMinus(bandHalf),
+    + stepBar("3–4", bandName, "history", plusMinus(bandHalf),
               `Stretched By Past Days · ${fmt(swing, 1)} × ${fmt(read.stretch, 2)} × ${fmt(dialsApplied(read), 2)} `
               + "Dials",
               bar(funnel(swing, bandHalf) + rect(bandHalf, 0.18) + centreLine
@@ -877,8 +909,10 @@ function renderStepBars(read, minutes) {
 function dialGauge(applied) {
   const angle = applied === null ? 0 : clamp((applied - 1) * 150, -90, 90) * Math.PI / 180;
   const x = (28 + 17 * Math.sin(angle)).toFixed(1), y = (28 - 17 * Math.cos(angle)).toFixed(1);
-  return `<path d="M8 28 A 20 20 0 0 1 48 28" fill="none" stroke="${C.rule}" stroke-width="5" stroke-linecap="round"/>`
-       + svgLine(28, 28, x, y, C.ink, 2, `stroke-linecap="round"`) + `<circle cx="28" cy="28" r="3" fill="${C.ink}"/>`;
+  return `<path d="M8 28 A 20 20 0 0 1 48 28" fill="none" stroke="${COLOUR.rule}" stroke-width="5" `
+       + `stroke-linecap="round"/>`
+       + svgLine(28, 28, x, y, COLOUR.ink, 2, `stroke-linecap="round"`) + `<circle cx="28" cy="28" r="3" `
+       + `fill="${COLOUR.ink}"/>`;
 }
 
 function stepCheck(number, name, kind, sub, svg, value) {
@@ -911,16 +945,17 @@ function renderStepChecks(read, minutes) {
   el("steps-checks").innerHTML =
     stepCheck(6, "Options", "check", `${fmt(read.straddle, 1)} × √(${fmt(used)} ÷ ${fmt(read.minutes_left)})`,
               `<svg viewBox="0 0 56 34" role="img" aria-label="Options swing next to tape swing">`
-              + svgRect(3, 7, (50 * (read.options_swing || 0) / most).toFixed(1), 8, 3, C.greenDeep, 0.55)
-              + svgRect(3, 19, (50 * (read.swing || 0) / most).toFixed(1), 8, 3, C.blue, 0.45) + `</svg>`,
+              + svgRect(3, 7, (50 * (read.options_swing || 0) / most).toFixed(1), 8, 3, COLOUR.greenDeep, 0.55)
+              + svgRect(3, 19, (50 * (read.swing || 0) / most).toFixed(1), 8, 3, COLOUR.blue, 0.45) + `</svg>`,
               `${plusMinus(read.options_swing)} ${options.mark}`)
     + stepCheck(7, "Dials", "earned", dialsLine(read),
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Dial at times ${fmt(applied, 2)}">`
                 + `${dialGauge(applied)}</svg>`, `×${fmt(applied, 2)}`)
     + stepCheck(8, "Direction", "earned", chance === null ? "—" : `50 + ${trust} × (Lean − 50)`,
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Direction meter"><g transform="translate(3,11)">`
-                + `${leanMeter(chance, METER.small)}</g>` + svgText(3, 32, "Down", `font-size="7" fill="${C.rust}"`)
-                + svgText(53, 32, "Up", `font-size="7" text-anchor="end" fill="${C.blue}"`) + `</svg>`,
+                + `${leanMeter(chance, METER.small)}</g>`
+                + svgText(3, 32, "Down", `font-size="7" fill="${COLOUR.rust}"`)
+                + svgText(53, 32, "Up", `font-size="7" text-anchor="end" fill="${COLOUR.blue}"`) + `</svg>`,
                 chance === null ? "—" : `Up ${fmt(chance * 100)}%`);
 }
 
@@ -930,7 +965,7 @@ function renderAnswer() {
   const between = band && band.half_width !== null ? `${fmt(band.low)} – ${fmt(band.high)}` : "—";
   el("answer").innerHTML =
     `<div><span>Ends Between</span><span>${between}</span></div>`
-    + `<div><span>Average Within</span><span>${plusMinus(read && half(read.bands, "average_80"))}</span></div>`
+    + `<div><span>Average Within</span><span>${plusMinus(read && halfWidth(read.bands, "average_80"))}</span></div>`
     + `<div><span>Direction</span><span>${chance === null ? "—" : `Up ${fmt(chance * 100)}%`}</span></div>`;
 }
 

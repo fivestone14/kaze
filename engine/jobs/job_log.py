@@ -18,15 +18,16 @@ def log_file(job):
 
 
 def write_line(job, line):
-    """Append one New York-stamped line to the job's log, rotating first when the file is from before today; one lock
-    serialises the threads of the phone's server, so a midnight rotation happens once."""
+    """Append one New York-stamped line to the job's log, rotating first when the file is from before today."""
+    # The day is the New York date, like every stamp in the file, whatever zone the box runs in; one lock serialises
+    # the threads of the phone's server, so a midnight rotation happens once.
     folder = paths.logs_folder()
     folder.mkdir(parents=True, exist_ok=True)
     path = log_file(job)
-    today = date.today()
+    today = session_clock.today_eastern()
     with WRITE_LOCK:
         if path.exists():
-            last_written = date.fromtimestamp(path.stat().st_mtime)
+            last_written = session_clock.to_eastern(session_clock.file_modified_at(path)).date()
             if last_written < today:
                 rotate(path, last_written)
                 prune_older(folder, today)

@@ -4,7 +4,7 @@ import itertools
 
 from engine import session_clock
 from engine.range import range_fit, range_read
-from engine.store import registry, store
+from engine.store import components, registry, store, store_queries
 
 SCOREBOARD_SESSIONS = 20
 CLIPPED_SLICE_WORD = {0: "unclipped", 1: "clipped"}
@@ -14,17 +14,17 @@ CLIPPED_SLICE_WORD = {0: "unclipped", 1: "clipped"}
 
 def window_minute_span(decision, day):
     """The first and last session minute a decision's window covers (12:36 to 13:06 covers minutes 186 to 215)."""
-    first = session_clock.session_minute(session_clock.parse_iso(decision["grade_window_starts_at"]), day)
-    last = session_clock.session_minute(session_clock.parse_iso(decision["grade_window_ends_at"]), day) - 1
+    first = session_clock.minute_of_session(session_clock.parse_iso(decision["grade_window_starts_at"]), day)
+    last = session_clock.minute_of_session(session_clock.parse_iso(decision["grade_window_ends_at"]), day) - 1
     return first, last
 
 
 def measure_window(conn, decision, day, series, known_at_by_minute, snapshot_rowid):
-    """Everything a window's outcome and grades are built from: the read's start price and bar, the bars' facts, the
-    signed moves, the minutes wanted and held, and the moment the window's last-arriving bar was known."""
+    """Everything a window's outcome and grades are built from: start price and bar, the bars' facts, the moves."""
+    # Plus the minutes wanted and held, and the moment the window's last-arriving bar was known.
     first, last = window_minute_span(decision, day)
     facts = range_fit.window_facts(*series, first, last)
-    start_price, start_bar_at = store.read_price_and_bar(conn, snapshot_rowid)
+    start_price, start_bar_at = store_queries.read_price_and_bar(conn, snapshot_rowid)
     held = [known_at_by_minute[minute] for minute in range(first, last + 1) if minute in known_at_by_minute]
     return {"start_price": start_price, "start_bar_at": start_bar_at, "facts": facts,
             "moves": signed_moves(start_price, facts), "minutes_wanted": last - first + 1,
@@ -65,23 +65,22 @@ def band_miss(move, half_width):
 # ---- Closing windows: one market_window outcome per read and horizon, one forecast_grade per decision ------------
 
 def close_windows(conn, day, cut_at, written_at, known_by_iso=None):
-    """Outcome and grades for every range decision window of the day ended by the cut whose bars are all held (any
-    window once the session is settled); returns (windows, grades)."""
+    """Outcome and grades for every range decision window of the day ended by the cut whose bars are all held."""
+    # Any window once the session is settled; returns (windows, grades).
     trade_date, cut_iso = day.isoformat(), session_clock.iso_utc(cut_at)
-    decisions = store.decisions_with_closed_windows(conn, trade_date, cut_iso, registry.RANGE_DECISION_KIND)
+    decisions = store_queries.decisions_with_closed_windows(conn, trade_date, cut_iso, components.RANGE_DECISION_KIND)
     if not decisions:
         return 0, 0
-    settled = cut_at >= session_clock.session_close(day, store.half_day_sessions(conn))
-    bars = store.session_bars(conn, trade_date, cut_iso, known_by_iso)
+    settled = cut_at >= session_clock.session_close(day, store_queries.half_day_sessions(conn))
+    bars = store_queries.session_bars(conn, trade_date, cut_iso, known_by_iso)
     series = range_fit.minute_series(bars, trade_date)
-    known_at_by_minute = {session_clock.session_minute(session_clock.parse_iso(bar["priced_at"]), day): bar["known_at"]
-                          for bar in bars}
+    known_at_by_minute = {session_clock.minute_of_session(session_clock.parse_iso(bar["priced_at"]), day):
+                          bar["known_at"] for bar in bars}
     written_iso = session_clock.iso_utc(written_at)
     windows = grades = 0
     for (snapshot_id, _), group in itertools.groupby(decisions, key=lambda d: (d["snapshot_id"], d["horizon_name"])):
         group = list(group)
-        snapshot_rowid = conn.execute("SELECT snapshot_rowid FROM collect_snapshots WHERE snapshot_id = ?",
-                                      (snapshot_id,)).fetchone()[0]
+        snapshot_rowid = store_queries.snapshot_rowid(conn, snapshot_id)
         measured = measure_window(conn, group[0], day, series, known_at_by_minute, snapshot_rowid)
         if window_status(measured)[0] != registry.LABEL_RESOLVED and not settled:
             continue
@@ -104,47 +103,38 @@ def resolved_at(decision, measured, written_iso):
     return written_iso
 
 
-def value_row_adder(outcome, rows):
-    """A closure that appends one rounded value row of the outcome, blank with the reason given when None."""
-    def add(measure_name, value, blank=None, subject_points=None, **subject):
-        """One value row of this outcome."""
-        rows.append(store.outcome_value_row(outcome, measure_name, store.rounded(value),
-                                            registry.subject_key(**subject), subject_points=subject_points,
-                                            blank_reason=blank))
-    return add
-
-
 def grade_start_rows(add, measured):
     """The grade start every outcome and grade carries: the read's price, its bar and the rule's name."""
-    add("grade_start_price_points", measured["start_price"], registry.NOT_APPLICABLE)
-    add("grade_start_bar_at", measured["start_bar_at"], registry.NOT_APPLICABLE)
-    add("grade_start_rule_name", registry.GRADE_START_RULE)
+    add("grade_start_price_points", measured["start_price"], blank=registry.NOT_APPLICABLE)
+    add("grade_start_bar_at", measured["start_bar_at"], blank=registry.NOT_APPLICABLE)
+    add("grade_start_rule_name", components.GRADE_START_RULE)
 
 
 def window_outcome_with_values(decision, measured, written_iso):
     """The market_window outcome of a decision's window with its facts, blank with the reason where unmeasurable."""
     status, reason = window_status(measured)
-    window = store.outcome_row(registry.MARKET_WINDOW_KIND, decision, registry.WINDOW_RULE, written_iso,
+    window = store.outcome_row(registry.MARKET_WINDOW_KIND, decision, components.WINDOW_RULE, written_iso,
                                resolved_at(decision, measured, written_iso), status, reason)
     rows = []
-    add = value_row_adder(window, rows)
+    add = store.row_adder(store.outcome_value_row, window, rows)
     facts, moves = measured["facts"], measured["moves"]
     no_move = registry.BARS_MISSING if facts is None else registry.NOT_APPLICABLE
     grade_start_rows(add, measured)
     for side in registry.WINDOW_SIDES:
-        add(registry.WINDOW_PRICE_MEASURE[side], facts and facts[side], registry.BARS_MISSING)
-        add(registry.WINDOW_MOVE_MEASURE[side], moves and moves[side], no_move)
-    add("minutes_covered_count", facts and facts["minutes"], registry.BARS_MISSING)
-    for rung in sorted(set(registry.RUNG_POINTS.values())):
-        add("stayed_inside_rung", stayed_inside(moves, rung), no_move, subject_points=float(rung), rung_points=rung)
+        add(registry.WINDOW_PRICE_MEASURE[side], facts and facts[side], blank=registry.BARS_MISSING)
+        add(registry.WINDOW_MOVE_MEASURE[side], moves and moves[side], blank=no_move)
+    add("minutes_covered_count", facts and facts["minutes"], blank=registry.BARS_MISSING)
+    for rung in sorted(set(components.RUNG_POINTS.values())):
+        add("stayed_inside_rung", stayed_inside(moves, rung), registry.subject_key(rung_points=rung), no_move,
+            subject_points=float(rung))
     return window, rows
 
 
 def decision_bands(conn, decision):
     """A decision's bands as {band: {half_width, low, high}} from its value rows, and the blank reason if unformed."""
-    bands = {band: dict.fromkeys(range_read.BAND_EDGES) for band in registry.BAND_PRICE_MEASURE}
+    bands = {band: dict.fromkeys(range_read.BAND_FIELDS) for band in components.BAND_PRICE_MEASURE}
     blank = None
-    for row in store.decision_values(conn, decision["decision_rowid"]):
+    for row in store_queries.decision_values(conn, decision["decision_rowid"]):
         subject = registry.subject_parts(row["subject_key"])
         if row["measure_name"] == "band_half_width_points":
             bands[subject["band"]]["half_width"] = row["value_number"]
@@ -162,29 +152,30 @@ def grade_with_values(conn, decision, window, measured, written_iso):
     status, reason = window["label_status"], window["label_status_reason"]
     if status in registry.LABELS_THAT_COUNT and band_blank is not None:
         status, reason = registry.LABEL_UNPRICEABLE, decision["decision_status_reason"]
-    grade = store.outcome_row(registry.FORECAST_GRADE_KIND, decision, registry.GRADE_RULE, written_iso,
+    grade = store.outcome_row(registry.FORECAST_GRADE_KIND, decision, components.GRADE_RULE, written_iso,
                               window["label_resolved_at"], status, reason, judged_decision_id=decision["decision_id"],
                               market_outcome_id=window["outcome_id"],
                               graded_price_measure=decision["graded_price_measure"])
     rows = []
-    add = value_row_adder(grade, rows)
+    add = store.row_adder(store.outcome_value_row, grade, rows)
     moves = measured["moves"]
     blank = registry.BARS_MISSING if measured["facts"] is None else registry.NOT_APPLICABLE if moves is None \
         else band_blank
     grade_start_rows(add, measured)
-    for band, side in ((registry.BAND, "end"), (registry.AVERAGE_BAND, "average")):
+    for band, side in ((components.BAND, "end"), (components.AVERAGE_BAND, "average")):
         half = bands[band]["half_width"]
         move = moves[side] if moves and half is not None else None
         inside = None if move is None else abs(move) <= half
-        add("was_inside_band", inside, blank, band=band)
-        add("band_miss_points", None if inside is None else band_miss(move, half), blank, band=band)
-    rung = registry.RUNG_POINTS[decision["horizon_name"]]
-    add("stayed_inside_rung", None if band_blank else stayed_inside(moves, rung), blank, subject_points=float(rung),
-        rung_points=rung)
-    half = bands[registry.BAND]["half_width"]
+        add("was_inside_band", inside, registry.subject_key(band=band), blank)
+        add("band_miss_points", None if inside is None else band_miss(move, half), registry.subject_key(band=band),
+            blank)
+    rung = components.RUNG_POINTS[decision["horizon_name"]]
+    add("stayed_inside_rung", None if band_blank else stayed_inside(moves, rung),
+        registry.subject_key(rung_points=rung), blank, subject_points=float(rung))
+    half = bands[components.BAND]["half_width"]
     for band_side, side, sign in zip(registry.BAND_SIDES, ("high", "low"), (1, -1)):
         used = max(0.0, sign * moves[side]) / half if moves and half else None
-        add("band_used_ratio", used, blank, band=registry.BAND, side=band_side)
+        add("band_used_ratio", used, registry.subject_key(band=components.BAND, side=band_side), blank)
     return grade, rows
 
 
@@ -192,25 +183,27 @@ def grade_with_values(conn, decision, window, measured, written_iso):
 
 def scoreboard_lines(conn, day=None):
     """The three grades as yes/graded per session (or one), run kind, channel, variant and slice, then 20 pooled."""
-    sessions = store.graded_sessions(conn, registry.GRADE_RULE)
+    sessions = store_queries.graded_sessions(conn, components.GRADE_RULE)
     last = day if day else sessions[-1] if sessions else None
     pooled = [session for session in sessions if session <= last][-SCOREBOARD_SESSIONS:]
     if not pooled:
         return [f"no grades stored for {last} or before" if last else "no grades stored yet"]
     first = last if day else sessions[0]
-    rule = (f"{registry.GRADE_RULE[0]}@{registry.GRADE_RULE[1]}, grade start "
-            f"{registry.GRADE_START_RULE}@{registry.GRADE_START_RULE_VERSION}")
+    rule = (f"{components.GRADE_RULE[0]}@{components.GRADE_RULE[1]}, grade start "
+            f"{components.GRADE_START_RULE}@{components.GRADE_START_RULE_VERSION}")
     lines = [f"scoreboard ({rule}): ends inside, average inside, never left, as yes/graded",
-             *score_lines(store.grade_counts(conn, first, last, registry.GRADE_RULE))]
+             *score_lines(store_queries.grade_counts(conn, first, last, components.GRADE_RULE))]
     lines.append(f"last {len(pooled)} graded sessions ({pooled[0]} to {last}) pooled:")
-    lines.extend(score_lines(store.grade_counts(conn, pooled[0], last, registry.GRADE_RULE, by_session=False)))
+    lines.extend(score_lines(store_queries.grade_counts(conn, pooled[0], last, components.GRADE_RULE,
+                                                        by_session=False)))
     return lines
 
 
 def score_lines(rows):
     """One line per count row: session, run kind, channel, variant, slice, then yes/graded (share) per grade word."""
     rows = sorted(rows, key=lambda row: (row["trade_date"], row["run_kind"],
-                                         registry.HORIZON_MINUTES[row["horizon_name"]], row["variant"], row["clipped"]))
+                                         components.HORIZON_MINUTES[row["horizon_name"]], row["variant"],
+                                         row["clipped"]))
     lines = []
     for row in rows:
         counts = "  ".join(f"{word} {row[word]}/{row[word + '_graded']}{share_text(row[word], row[word + '_graded'])}"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Blocks a push if any commit in history holds a secret or personal detail.
+# Blocks a push if any commit in history holds a secret (gitleaks) or the working tree holds a personal detail (grep).
 set -e
 gitleaks git --redact --no-banner
 if git grep -nIE '/Users/|@gmail\.com|Bearer [A-Za-z0-9]|api[_-]?key *=' -- ':!checks/pre-push' ; then

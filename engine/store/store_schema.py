@@ -2,9 +2,9 @@
 # registry's word lists, the indexes, the numbered schema steps and the open-time check that a store matches the code.
 # Header tables (snapshots, decisions, outcomes) carry the design's text ids; the long value tables hang off them by
 # integer rowid and keep one unique index on the design's own grain.
-from engine.store import registry
+from engine.store import components, registry
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -27,25 +27,26 @@ TABLE_COLUMNS_SQL = {
     blank_means_text TEXT NOT NULL, max_carry_forward_seconds REAL, coverage_twin_measure_name TEXT,
     available_since_trade_date TEXT, available_from_minutes_after_open REAL, defined_at TEXT NOT NULL,
     PRIMARY KEY (measure_name, measure_version)""",
-    "registry_components": """
+    "registry_components": f"""
     component_kind TEXT NOT NULL, component_name TEXT NOT NULL, component_version TEXT NOT NULL,
-    revision_number INTEGER NOT NULL, plain_meaning_text TEXT NOT NULL, signal_lane TEXT NOT NULL,
+    revision_number INTEGER NOT NULL, plain_meaning_text TEXT NOT NULL,
     parameters_json_text TEXT NOT NULL, parameters_sha256 TEXT NOT NULL,
-    starting_trust_weight_portion REAL NOT NULL, evidence_status TEXT NOT NULL, approval_status TEXT NOT NULL,
-    storage_scope TEXT NOT NULL, released_at TEXT NOT NULL,
+    starting_trust_weight_portion REAL NOT NULL,
+    storage_scope TEXT NOT NULL CHECK (storage_scope IN ({check_list(registry.STORAGE_SCOPES)})),
+    released_at TEXT NOT NULL,
     PRIMARY KEY (component_kind, component_name, component_version, revision_number)""",
     "collect_snapshots": f"""
     snapshot_rowid INTEGER PRIMARY KEY, snapshot_id TEXT NOT NULL UNIQUE, trade_date TEXT NOT NULL,
     snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ({check_list(registry.SNAPSHOT_KINDS)})),
     read_id TEXT, read_lane TEXT, read_lane_cadence_minutes REAL, scheduled_slot_eastern TEXT,
     slot_status TEXT NOT NULL CHECK (slot_status IN ({check_list(registry.SLOT_STATUSES)})), slot_lateness_minutes REAL,
-    market_moment_id TEXT NOT NULL, is_training_grid_read INTEGER NOT NULL, read_moment_set_by TEXT NOT NULL,
+    is_training_grid_read INTEGER NOT NULL, read_moment_set_by TEXT NOT NULL,
     cut_at TEXT NOT NULL, newest_input_market_at TEXT, known_at TEXT NOT NULL,
     known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
     row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     build_attempt_number INTEGER NOT NULL, builder_name TEXT NOT NULL, builder_version TEXT NOT NULL,
     builder_code_commit TEXT, was_code_tree_dirty INTEGER, component_versions_json_text TEXT NOT NULL,
-    source_files_json_text TEXT, build_started_at TEXT, build_seconds REAL, snapshot_content_sha256 TEXT,
+    source_files_json_text TEXT, build_seconds REAL, snapshot_content_sha256 TEXT,
     feeds_not_ok_count INTEGER, blank_values_count INTEGER,
     snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ({check_list(registry.SNAPSHOT_STATUSES)})),
     snapshot_status_reason TEXT, written_at TEXT NOT NULL,
@@ -68,8 +69,7 @@ TABLE_COLUMNS_SQL = {
     known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
     row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})), value_origin TEXT NOT NULL,
     source_feed_name TEXT NOT NULL, feed_status TEXT NOT NULL, quote_unit TEXT NOT NULL,
-    open_in_quote_units REAL, high_in_quote_units REAL, low_in_quote_units REAL, close_in_quote_units REAL,
-    volume_count INTEGER, quote_status TEXT NOT NULL, blank_reasons_text TEXT""",
+    open_in_quote_units REAL, high_in_quote_units REAL, low_in_quote_units REAL, close_in_quote_units REAL""",
     "collect_calendar_and_events": f"""
     fact_record_id TEXT PRIMARY KEY,
     fact_kind TEXT NOT NULL CHECK (fact_kind IN ({check_list(registry.FACT_KINDS)})),
@@ -81,9 +81,9 @@ TABLE_COLUMNS_SQL = {
     decision_rowid INTEGER PRIMARY KEY, decision_id TEXT NOT NULL UNIQUE, trade_date TEXT NOT NULL,
     storage_scope TEXT NOT NULL CHECK (storage_scope IN ({check_list(registry.STORAGE_SCOPES)})),
     decision_kind TEXT NOT NULL,
-    parent_decision_id TEXT REFERENCES reads_decisions (decision_id), input_decision_ids_text TEXT,
+    parent_decision_id TEXT REFERENCES reads_decisions (decision_id),
     snapshot_id TEXT NOT NULL REFERENCES collect_snapshots (snapshot_id), read_id TEXT, cut_at TEXT NOT NULL,
-    features_cutoff_at TEXT NOT NULL, known_at TEXT NOT NULL,
+    known_at TEXT NOT NULL,
     row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     run_kind TEXT NOT NULL CHECK (run_kind IN ({check_list(registry.RUN_KINDS)})),
     variant_name TEXT, producer_kind TEXT NOT NULL, producer_name TEXT NOT NULL, producer_version TEXT NOT NULL,
@@ -91,7 +91,7 @@ TABLE_COLUMNS_SQL = {
     grade_start_rule_name TEXT, grade_start_rule_version TEXT, grade_window_starts_at TEXT, grade_window_ends_at TEXT,
     subject_key TEXT NOT NULL, revision_number INTEGER NOT NULL,
     decision_status TEXT NOT NULL CHECK (decision_status IN ({check_list(registry.DECISION_STATUSES)})),
-    decision_status_reason TEXT, decision_word TEXT, written_at TEXT NOT NULL""",
+    decision_status_reason TEXT, written_at TEXT NOT NULL""",
     "reads_decision_values": f"""
     decision_value_rowid INTEGER PRIMARY KEY,
     decision_rowid INTEGER NOT NULL REFERENCES reads_decisions (decision_rowid),
@@ -124,19 +124,19 @@ TABLE_COLUMNS_SQL = {
     {ONE_VALUE_OR_BLANK_SQL}""",
     "results_evaluations": f"""
     evaluation_rowid INTEGER PRIMARY KEY, evaluation_row_id TEXT NOT NULL UNIQUE, evaluation_id TEXT NOT NULL,
-    evaluation_kind TEXT NOT NULL CHECK (evaluation_kind IN ({check_list(registry.EVALUATION_KINDS)})),
+    evaluation_kind TEXT NOT NULL CHECK (evaluation_kind IN ({check_list(components.EVALUATION_KINDS)})),
     trade_date TEXT NOT NULL,
-    evaluated_kind TEXT NOT NULL CHECK (evaluated_kind IN ({check_list(registry.EVALUATED_KINDS)})),
+    evaluated_kind TEXT NOT NULL CHECK (evaluated_kind IN ({check_list(components.EVALUATED_KINDS)})),
     evaluated_name TEXT NOT NULL, evaluated_version TEXT NOT NULL, judge_name TEXT NOT NULL,
     judge_version TEXT NOT NULL, signal_lane TEXT NOT NULL CHECK (signal_lane IN ({check_list(registry.LANES)})),
     overlap_group_name TEXT, horizon_name TEXT NOT NULL, graded_price_measure TEXT NOT NULL,
     slice_key TEXT NOT NULL, metric_name TEXT NOT NULL, metric_value REAL,
-    metric_text TEXT CHECK (metric_text IS NULL OR metric_text IN ({check_list(registry.VERDICTS)})),
+    metric_text TEXT CHECK (metric_text IS NULL OR metric_text IN ({check_list(components.VERDICTS)})),
     blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
     metric_interval_low REAL, metric_interval_high REAL,
     interval_method TEXT
-      CHECK (interval_method IS NULL OR interval_method IN ({check_list(registry.INTERVAL_METHODS)})),
-    baseline_name TEXT NOT NULL CHECK (baseline_name IN ({check_list(registry.BASELINES)})),
+      CHECK (interval_method IS NULL OR interval_method IN ({check_list(components.INTERVAL_METHODS)})),
+    baseline_name TEXT NOT NULL CHECK (baseline_name IN ({check_list(components.BASELINES)})),
     baseline_metric_value REAL, sessions_count INTEGER NOT NULL, independent_windows_count INTEGER NOT NULL,
     rows_count INTEGER NOT NULL, live_frozen_rows_count INTEGER NOT NULL, data_from_trade_date TEXT,
     data_through_trade_date TEXT NOT NULL, applies_from_at TEXT NOT NULL, was_pre_registered INTEGER NOT NULL,
@@ -175,11 +175,14 @@ VALUE_TABLE_PARENTS = {
     "reads_decision_values": ("reads_decisions", "decision_id", "decision_rowid"),
     "results_outcome_values": ("results_outcomes", "outcome_id", "outcome_rowid"),
 }
-PHASE_1_TABLES = ("registry_measures", "registry_components", "collect_snapshots", "collect_observations",
-                  "collect_market_prices", "collect_calendar_and_events")
-PHASE_2_TABLES = ("reads_decisions", "reads_decision_values")
-PHASE_3_TABLES = ("results_outcomes", "results_outcome_values")
-PHASE_4_TABLES = ("results_evaluations",)
+# The tables by pillar: the two registries with the collect pillar, the reads pillar, the results pillar's outcomes
+# and its ledger.
+REGISTRY_AND_COLLECT_TABLES = ("registry_measures", "registry_components", "collect_snapshots", "collect_observations",
+                               "collect_market_prices", "collect_calendar_and_events")
+READS_TABLES = ("reads_decisions", "reads_decision_values")
+RESULTS_TABLES = ("results_outcomes", "results_outcome_values")
+LEDGER_TABLES = ("results_evaluations",)
+ALL_TABLES = REGISTRY_AND_COLLECT_TABLES + READS_TABLES + RESULTS_TABLES + LEDGER_TABLES
 
 
 def create_table_sql(table):
@@ -205,8 +208,8 @@ def table_columns(conn, table):
 
 
 def rebuild_table(conn, table, parent=None):
-    """Recreate a table with the code's text, keeping the shared columns' rows (joined to the parent's rowid when a
-    value table moves from the parent's text id to its rowid) and its children; no-op when the text is the same."""
+    """Recreate a table with the code's text, keeping the shared columns' rows; a no-op when the text is the same."""
+    # A value table moving from its parent's text id to the parent's rowid is joined to the parent on the way.
     stored = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
     if stored is not None and stored["sql"] == create_table_sql(table):
         return
@@ -226,58 +229,60 @@ def rebuild_table(conn, table, parent=None):
     create_indexes(conn, table)
 
 
+def rebuild_tables(conn, tables):
+    """Bring each table to the code's text, rows kept (the ones already at it are left alone)."""
+    for table in tables:
+        rebuild_table(conn, table, VALUE_TABLE_PARENTS.get(table))
+
+
 def schema_step_1(conn):
-    """Phase 1: the registry and the COLLECT pillar."""
-    for table in PHASE_1_TABLES:
+    """The registry and collect tables."""
+    for table in REGISTRY_AND_COLLECT_TABLES:
         create_table(conn, table)
 
 
 def schema_step_2(conn):
-    """Phase 2: the READS pillar's decision tables; the spine rebuilt so a nightly_history_fit cut is allowed."""
+    """The reads tables; the snapshots table rebuilt so a nightly_history_fit cut is allowed."""
     rebuild_table(conn, "collect_snapshots")
-    for table in PHASE_2_TABLES:
+    for table in READS_TABLES:
         create_table(conn, table)
 
 
 def schema_step_3(conn):
-    """Phase 2 fix round: the tables so far brought to the code's text (the spine gains the thin status), rows kept."""
-    for table in PHASE_1_TABLES + PHASE_2_TABLES:
-        rebuild_table(conn, table)
+    """The tables so far brought to the code's text (the snapshots table gains the thin status), rows kept."""
+    rebuild_tables(conn, REGISTRY_AND_COLLECT_TABLES + READS_TABLES)
 
 
 def schema_step_4(conn):
-    """Phase 3: the RESULTS pillar's outcome tables (what happened in each window and how each decision graded)."""
-    for table in PHASE_3_TABLES:
+    """The results tables: what happened in each window and how each decision graded."""
+    for table in RESULTS_TABLES:
         create_table(conn, table)
 
 
 def schema_step_5(conn):
-    """Phase 3 fix round: rowid keys on the three value tables, the grade-start rule's name beside its version on
-    decisions and outcomes (and in the outcome ids), the renamed grade words, every table at the code's text."""
-    start_rule = f"{registry.GRADE_START_RULE}@{registry.GRADE_START_RULE_VERSION}"
+    """Rowid keys on the three value tables, the grade-start rule's name beside its version, the renamed grade words."""
+    start_rule = f"{components.GRADE_START_RULE}@{components.GRADE_START_RULE_VERSION}"
     for table in ("reads_decisions", "results_outcomes"):
         if "grade_start_rule_name" not in table_columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN grade_start_rule_name TEXT")
         conn.execute(f"UPDATE {table} SET grade_start_rule_name = grade_start_rule_version, "
                      "grade_start_rule_version = ? WHERE grade_start_rule_version = ?",
-                     (registry.GRADE_START_RULE_VERSION, registry.GRADE_START_RULE))
+                     (components.GRADE_START_RULE_VERSION, components.GRADE_START_RULE))
     if "outcome_id" in table_columns(conn, "results_outcome_values"):
         conn.execute("UPDATE results_outcomes SET outcome_id = replace(outcome_id, ?, ?), "
                      "market_outcome_id = replace(market_outcome_id, ?, ?)",
-                     (f"|{registry.GRADE_START_RULE}|", f"|{start_rule}|") * 2)
+                     (f"|{components.GRADE_START_RULE}|", f"|{start_rule}|") * 2)
         conn.execute("UPDATE results_outcome_values SET outcome_id = replace(outcome_id, ?, ?)",
-                     (f"|{registry.GRADE_START_RULE}|", f"|{start_rule}|"))
+                     (f"|{components.GRADE_START_RULE}|", f"|{start_rule}|"))
         conn.execute("UPDATE results_outcome_values SET measure_name = 'stayed_inside_rung', "
                      "value_bool = 1 - value_bool WHERE measure_name = 'did_leave_rung'")
         conn.execute("UPDATE results_outcome_values SET measure_name = 'band_used_ratio' "
                      "WHERE measure_name = 'band_used_portion'")
-    for table in PHASE_1_TABLES + PHASE_2_TABLES + PHASE_3_TABLES:
-        rebuild_table(conn, table, VALUE_TABLE_PARENTS.get(table))
+    rebuild_tables(conn, REGISTRY_AND_COLLECT_TABLES + READS_TABLES + RESULTS_TABLES)
 
 
 def schema_step_6(conn):
-    """Phase 3 fix round: rebuilt outcomes with bars re-stamped with the moment their last-arriving bar was known
-    (the earliest stored copy of each minute), the rule the grader has written since; live rows keep their write."""
+    """Rebuilt outcomes re-stamped with the moment their last-arriving bar was known; live rows keep their write."""
     conn.execute(
         "UPDATE results_outcomes SET label_resolved_at = ("
         " SELECT MAX(first_known) FROM (SELECT MIN(p.known_at) AS first_known FROM collect_market_prices p"
@@ -292,27 +297,32 @@ def schema_step_6(conn):
 
 
 def schema_step_7(conn):
-    """Phase 4: the trust ledger (results_evaluations); the fast-over-slow dial takes its name, acceleration."""
-    for table in PHASE_4_TABLES:
+    """The trust ledger table; the stored fast-over-slow dial takes its name, acceleration."""
+    for table in LEDGER_TABLES:
         create_table(conn, table)
     conn.execute("UPDATE reads_decision_values SET subject_key = ? WHERE subject_key = ?",
-                 (registry.subject_key(adjustment=registry.ACCELERATION_DIAL), "adjustment=fast_over_slow"))
+                 (registry.subject_key(adjustment=components.ACCELERATION_DIAL), "adjustment=fast_over_slow"))
 
 
 def schema_step_8(conn):
-    """Phase 4 fix round: the ledger table at the code's text (the verdict list gains the hold word), rows kept."""
-    for table in PHASE_4_TABLES:
-        rebuild_table(conn, table)
+    """The ledger table at the code's text (the verdict list grew: held, then held_down), rows kept."""
+    rebuild_tables(conn, LEDGER_TABLES)
 
 
-def schema_step_9(conn):
-    """Phase 4 last round: the ledger table at the code's text (the verdict list gains held_down), rows kept."""
-    for table in PHASE_4_TABLES:
-        rebuild_table(conn, table)
+def schema_step_10(conn):
+    """Columns and words nothing writes dropped, the stretch and acceleration measures renamed, every table rebuilt."""
+    # The headline coverage measure could never be filled (its poller leaves no stamps); its blank rows go with it.
+    conn.execute("DELETE FROM collect_observations WHERE measure_name = 'feed_coverage_last_60_minutes_portion'")
+    for table in ("collect_observations", "reads_decision_values"):
+        conn.execute(f"UPDATE {table} SET measure_name = 'stretch_multiplier' WHERE measure_name = 'band_multiplier'")
+    conn.execute("UPDATE collect_observations SET measure_name = ? WHERE measure_name = 'speed_fast_over_slow_ratio'",
+                 (components.ACCELERATION_MEASURE,))
+    rebuild_tables(conn, ALL_TABLES)
 
 
+# Step 9 repeated step 8 for the second verdict word; both numbers stay so a stored version 8 still upgrades.
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
-                6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_9}
+                6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10}
 
 
 def upgrade(conn):

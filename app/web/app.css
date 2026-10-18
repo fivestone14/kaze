@@ -61,7 +61,7 @@ main {
 .brand { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--faint); }
 .clock { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint); }
 .clock-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
-.clock-dot.late, .clock-dot.failed { background: var(--rust); }
+.clock-dot.late, .clock-dot.failed, .clock-dot.no_read_today { background: var(--rust); }
 .clock-dot.closed, .clock-dot.none { background: var(--sand); }
 .price-row { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px; }
 .price { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
@@ -242,7 +242,14 @@ main {
 }
 .step-check .text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .step-check .name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; }
-.step-check .sub { font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.step-check .sub {
+  font-size: 10.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .step-check svg { width: 56px; height: 34px; display: block; }
 .step-check .value { font-size: 13px; font-weight: 700; text-align: right; }
 .answer {

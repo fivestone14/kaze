@@ -1,36 +1,37 @@
-# Writes the small JSON file the phone reads after every live read: the snapshot's values, each feed's status (live,
-# partial or blind) and age, the Schwab login expiry, the session's clock, the range forecast copied whole and the
-# windows block (the live window per channel with its read's own chain, today's finished windows with their grades,
-# the score); a failed job writes a failed document so the phone never keeps an old file in silence.
+# Writes the small JSON file the phone reads after every live read: the read's status and values, each feed's status
+# (live, partial or blind) with its age and any note, the Schwab login, the session's clock, the nightly's standing,
+# the range block (the phone's part of the forecast) and the windows block (the live window per channel with its
+# read's own chain, today's finished windows with their grades, the score). The keys written here are the phone's
+# whole contract (docs/data_map.md, "The phone feed"); a failed job writes a failed document so the phone never keeps
+# an old file in silence.
 import json
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from engine import paths, session_clock
 from engine.collect import mirai_files
 from engine.grade import grade
 from engine.range import range_fit
-from engine.store import registry, store
+from engine.store import components, registry, store, store_queries
 
-PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "frozen_feed": "partial",
-                              "stand_in": "partial", "missing": "blind", "market_closed": "blind"}
+PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "missing": "blind"}
+PHONE_LIVE, PHONE_PARTIAL, PHONE_BLIND = "live", "partial", "blind"
+CALENDAR_FEED = "event_calendar"
 LOGIN_FIELD_SHORT_NAMES = {"login_state": "state", "login_hours_until_expiry": "hours_left",
                            "login_expires_at": "expires_at"}
 WINDOWS, CURRENT, FINISHED, SCORE = "windows", "current", "finished", "score"
 FAILED = "failed"
-ENDS_INSIDE, AVERAGE_INSIDE, NEVER_LEFT = registry.GRADE_WORDS
-
-
-def split_values_and_blanks(observations):
-    """{key: value} and {key: blank reason} over a read's observations, keyed the store's one way."""
-    values, blanks = {}, {}
-    for observation in observations:
-        value = store.observation_value(observation)
-        if value is None:
-            blanks[store.value_key(observation)] = observation["blank_reason"]
-        else:
-            values[store.value_key(observation)] = value
-    return values, blanks
+# The forecast keys the phone reads, at the top of the range block, per channel and per push reading.
+RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases")
+CHANNEL_KEYS = ("swing", "stretch", "average_stretch", "fit_sessions", "fit_windows", "rung_points",
+                "stays_inside_share", "options_swing", "options_check", "clipped", "ends_at", "dials",
+                "dials_product", "bands", "status", "reason")
+DIRECTION_KEYS = ("chance_up_if_moves", "trust_applied", "text")
+PUSH_KEYS = ("name", "value", "lean_if_trusted", "reason", "weight_by_channel")
+# The finished-window facts the Read page draws, as the window's outcome values name them.
+FINISHED_FACTS = {"price": "grade_start_price_points", "end": registry.WINDOW_PRICE_MEASURE["end"],
+                  "high": registry.WINDOW_PRICE_MEASURE["high"], "low": registry.WINDOW_PRICE_MEASURE["low"],
+                  "end_move": registry.WINDOW_MOVE_MEASURE["end"]}
 
 
 def for_phone(value):
@@ -54,45 +55,104 @@ def write_document(document):
     return path
 
 
-def session_block(day, moment):
-    """The session's clock for the phone: when this session opens and closes, the next read's cut after the moment
-    (None after the last) and the next session's open, so the phone can tell closed from late."""
-    _, half_days = mirai_files.session_calendar()
+def session_block(day, half_days):
+    """The session's clock for the phone: when this session closes and the next one opens, so closed reads as closed."""
+    # Past the holiday list's horizon the next open is unknown and left null rather than crashing the feed.
     trading = session_clock.is_trading_day(day)
-    slots = session_clock.day_slots(day, half_days) if trading else []
-    later = [session_clock.cut_for_slot(day, slot) for slot in slots if session_clock.cut_for_slot(day, slot) > moment]
-    return for_phone({
-        "trade_date": day.isoformat(),
-        "opens_at": session_clock.session_open(day) if trading else None,
-        "closes_at": session_clock.session_close(day, half_days) if trading else None,
-        "next_read_at": later[0] if later else None,
-        "next_session_opens_at": session_clock.session_open(session_clock.next_trading_day(day)),
-    })
+    try:
+        next_open = session_clock.session_open(session_clock.next_trading_day(day))
+    except ValueError:
+        next_open = None
+    return for_phone({"closes_at": session_clock.session_close(day, half_days) if trading else None,
+                      "next_session_opens_at": next_open})
 
 
-def write_live_feed(snapshot, observations, feed_states, forecast):
-    """Write latest.json from a snapshot's observations, feed states and forecast (None when the range step failed)."""
-    values, blanks = split_values_and_blanks(observations)
+def nightly_block(done_for, day):
+    """The nightly's standing at a read: the session it last finished and the one it should have finished by now."""
+    expected = session_clock.latest_trading_day(day - timedelta(days=1))
+    return {"done_for": done_for, "expected": expected.isoformat()}
+
+
+def horizon_warnings(calendar, day):
+    """The plain phrases for a calendar or holiday list about to run out (or run out) on a day, else an empty list."""
+    phrases = []
+    if calendar is not None:
+        covers_through = mirai_files.calendar_covers_through(calendar)
+        days_left = (covers_through - day).days
+        if days_left < 0:
+            phrases.append(f"Mirai's event calendar ended {covers_through}: events, releases and half days unknown")
+        elif days_left <= mirai_files.CALENDAR_WARNING_DAYS:
+            phrases.append(f"Mirai's event calendar covers through {covers_through} ({days_left} days left)")
+    holidays = session_clock.holiday_horizon_warning(day)
+    if holidays:
+        phrases.append(holidays)
+    return phrases
+
+
+def calendar_feed_status(calendar, day, collected_status):
+    """The calendar feed's phone status and note on a day: blind past the calendar's horizon, partial near either."""
+    if calendar is None:
+        return collected_status, None
+    covers_through = mirai_files.calendar_covers_through(calendar)
+    days_left = (covers_through - day).days
+    notes, status = [], collected_status
+    if days_left < 0:
+        status, notes = PHONE_BLIND, [f"Calendar Ended {covers_through}"]
+    elif days_left <= mirai_files.CALENDAR_WARNING_DAYS:
+        status = PHONE_PARTIAL if status == PHONE_LIVE else status
+        notes.append(f"Calendar Ends {covers_through}")
+    if session_clock.holiday_horizon_warning(day):
+        status = PHONE_PARTIAL if status == PHONE_LIVE else status
+        notes.append(f"Holiday List Ends {session_clock.HOLIDAYS_LISTED_THROUGH}")
+    return status, " · ".join(notes) or None
+
+
+def feeds_block(feed_states, calendar, day):
+    """Each feed's phone status, age and note; the calendar feed also warns about the two horizons."""
+    feeds = {name: {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"], "note": None}
+             for name, state in feed_states.items()}
+    if CALENDAR_FEED in feeds:
+        status, note = calendar_feed_status(calendar, day, feeds[CALENDAR_FEED]["status"])
+        feeds[CALENDAR_FEED].update(status=status, note=note)
+    return feeds
+
+
+def range_block(forecast):
+    """The phone's part of the forecast: the keys the screens read, nothing the engine keeps for itself."""
+    if forecast is None:
+        return None
+    block = {key: forecast[key] for key in RANGE_KEYS}
+    block["band_portion"] = components.BAND_PORTION
+    block["push"] = [{key: entry[key] for key in PUSH_KEYS} for entry in forecast["push"]]
+    block["channels"] = {}
+    for name, channel in forecast["channels"].items():
+        picked = {key: channel[key] for key in CHANNEL_KEYS}
+        picked["direction"] = {key: channel["direction"][key] for key in DIRECTION_KEYS}
+        block["channels"][name] = picked
+    if WINDOWS in forecast:
+        block[WINDOWS] = forecast[WINDOWS]
+    return for_phone(block)
+
+
+def write_live_feed(snapshot, observations, feed_states, forecast, calendar, half_days, nightly_done):
+    """Write latest.json from a read's observations, feed states and forecast (None when the range step failed)."""
+    values = store.values_by_key(observations)
     login = {short: values.pop(f"{name}|login=schwab", None) for name, short in LOGIN_FIELD_SHORT_NAMES.items()}
-    cut_at = session_clock.parse_iso(snapshot["cut_at"])
+    day = date.fromisoformat(snapshot["trade_date"])
     return write_document({
-        "read_id": snapshot["read_id"], "lane": snapshot["read_lane"], "slot": snapshot["scheduled_slot_eastern"],
-        "origin": snapshot["row_origin"], "status": snapshot["snapshot_status"],
-        "status_reason": snapshot["snapshot_status_reason"],
+        "status": snapshot["snapshot_status"], "status_reason": snapshot["snapshot_status_reason"],
         "cut_at": session_clock.iso_eastern(session_clock.parse_iso(snapshot["cut_at"])),
-        "known_at": session_clock.iso_eastern(session_clock.parse_iso(snapshot["known_at"])),
-        "feeds": {name: {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"]}
-                  for name, state in feed_states.items()},
-        "login": login, "session": session_block(date.fromisoformat(snapshot["trade_date"]), cut_at),
-        "range": for_phone(forecast), "values": values, "blanks": blanks,
+        "feeds": feeds_block(feed_states, calendar, day), "login": login,
+        "session": session_block(day, half_days), "nightly": nightly_block(nightly_done, day),
+        "range": range_block(forecast), "values": values,
     })
 
 
-def write_failed_feed(reason):
+def write_failed_feed(reason, half_days):
     """Write a latest.json that says the live read failed, with the reason, the moment and the session's clock."""
     now = session_clock.now_utc()
     return write_document({"status": FAILED, "status_reason": reason, "failed_at": session_clock.iso_eastern(now),
-                           "session": session_block(session_clock.to_eastern(now).date(), now)})
+                           "session": session_block(session_clock.to_eastern(now).date(), half_days)})
 
 
 def failed_windows_block(failure):
@@ -105,95 +165,94 @@ def failed_windows_block(failure):
 def windows_block(conn, day, cut_at, known_by_iso):
     """The windows block of the phone's range feed, built from the store after the read and its grades are written."""
     trade_date, cut_iso = day.isoformat(), session_clock.iso_utc(cut_at)
-    bars = store.session_bars(conn, trade_date, cut_iso, known_by_iso)
+    bars = store_queries.session_bars(conn, trade_date, cut_iso, known_by_iso)
     series = range_fit.minute_series(bars, trade_date)
     live = bars[-1]["close"] if bars else None
     current = {name: live_window(conn, day, cut_at, name, minutes, series, live)
-               for name, minutes in registry.HORIZON_MINUTES.items()}
-    finished = {name: finished_windows(conn, trade_date, name, lane_of_live_window(minutes))
-                for name, minutes in registry.HORIZON_MINUTES.items()}
+               for name, minutes in components.HORIZON_MINUTES.items()}
+    finished = {name: finished_windows(conn, trade_date, name, lane_for_channel(minutes))
+                for name, minutes in components.HORIZON_MINUTES.items()}
     return {CURRENT: current, FINISHED: finished,
             SCORE: {name: score_counts(entries) for name, entries in finished.items()}}
 
 
-def lane_of_live_window(minutes):
+def lane_for_channel(minutes):
     """The lane a channel follows: the headline lane (:05 and :35 reads) from 30 minutes up, every read for 5."""
     return session_clock.LANE_HEADLINE if minutes >= session_clock.READ_LANES[session_clock.LANE_HEADLINE] else None
 
 
 def live_window(conn, day, cut_at, channel, minutes, series, live):
-    """The channel's newest window at the cut: its read, bands, the bars held so far measured the grade's way, the
-    moves from the read price, and the three grade words so far; ended once the cut has passed the window's end."""
+    """The channel's newest window at the cut: its read, bands, the bars held so far measured the grade's way."""
+    # With the moves from the read price and whether the running average sits inside its band; ended once the cut has
+    # passed the window's end.
     cut_iso = session_clock.iso_utc(cut_at)
-    read = store.newest_live_read(conn, day.isoformat(), cut_iso, lane_of_live_window(minutes))
-    decisions = store.decisions_of_read(conn, read["snapshot_id"], registry.RANGE_DECISION_KIND, channel) \
+    read = store_queries.newest_live_read(conn, day.isoformat(), cut_iso, lane_for_channel(minutes))
+    decisions = store_queries.decisions_of_read(conn, read["snapshot_id"], components.RANGE_DECISION_KIND, channel) \
         if read else ()
     if not decisions:
         return None
     base = decisions[0]
     bands = grade.decision_bands(conn, base)[0]
-    owner_rule = grade.decision_bands(conn, decisions[1])[0] if len(decisions) > 1 else None
-    price = store.read_price_and_bar(conn, read["snapshot_rowid"])[0]
+    price = store_queries.read_price_and_bar(conn, read["snapshot_rowid"])[0]
     first, last = grade.window_minute_span(base, day)
     last_held = min(last, series[0].size - 1)
     facts = range_fit.window_facts(*series, first, last_held) if last_held >= first else None
     moves = grade.signed_moves(price, facts)
-    rung = registry.RUNG_POINTS[channel]
+    rung = components.RUNG_POINTS[channel]
     move = None if live is None or price is None else live - price
     return {
-        "read_id": read["read_id"], "read_at": session_clock.parse_iso(read["cut_at"]), "price": price,
+        "read_at": session_clock.parse_iso(read["cut_at"]), "price": price,
         "chain": read_chain(conn, read, base, channel, rung),
         "window_from": session_clock.parse_iso(base["grade_window_starts_at"]),
-        "ends_at": session_clock.parse_iso(base["grade_window_ends_at"]), "horizon_minutes": minutes,
+        "ends_at": session_clock.parse_iso(base["grade_window_ends_at"]),
         "ended": cut_iso >= base["grade_window_ends_at"],
         "clipped": base["decision_status"] == registry.DECISION_CLIPPED, "status": base["decision_status"],
-        "reason": base["decision_status_reason"], "rung_points": rung, "bands": bands, "owner_rule_bands": owner_rule,
+        "reason": base["decision_status_reason"], "rung_points": rung, "bands": bands,
         "minutes_held": facts["minutes"] if facts else 0,
-        "now": {"price": live, "move": move, "average": facts and facts["average"],
-                "average_move": moves and moves["average"], "high": facts and facts["high"],
-                "low": facts and facts["low"], **farthest_moves(moves)},
-        "so_far": {ENDS_INSIDE: inside_half(move, bands[registry.BAND]["half_width"]),
-                   AVERAGE_INSIDE: inside_half(moves and moves["average"], bands[registry.AVERAGE_BAND]["half_width"]),
-                   NEVER_LEFT: grade.stayed_inside(moves, rung)},
+        "now": {"move": move, "average_move": moves and moves["average"], **farthest_moves(moves)},
+        "average_inside": inside_half(moves and moves["average"], bands[components.AVERAGE_BAND]["half_width"]),
     }
 
 
 def read_chain(conn, read, decision, channel, rung):
-    """How the live window's own read worked its band out, read back from that read's stored values so Sight and
-    Steps explain the same read the Read page shows: speeds, swing, stretches, fit, rung share, each dial and their
-    product, the options check and the direction call."""
-    rows = store.decision_values(conn, decision["decision_rowid"])
+    """How the live window's own read worked its band out, read back from that read's stored values."""
+    # So Sight and Steps explain the same read the Read page shows: speeds, swing, stretches, fit, rung share, each
+    # dial and their product, the options check and the direction call.
+    rows = store_queries.decision_values(conn, decision["decision_rowid"])
     values = store.values_by_key(rows)
-    seen = store.values_by_key(store.snapshot_observations(conn, read["snapshot_rowid"]))
+    seen = store.values_by_key(store_queries.snapshot_observations(conn, read["snapshot_rowid"]))
     horizon = registry.subject_key(horizon=channel)
-    dials = {dial: {} for dial in registry.WIDTH_DIALS + (registry.ALL_DIALS,)}
+    dials = {dial: {} for dial in components.WIDTH_DIALS + (components.ALL_DIALS,)}
     for row in rows:
         if row["measure_name"] == "width_multiplier":
-            dials[registry.subject_parts(row["subject_key"])["adjustment"]][row["value_role"]] = row["value_number"]
-    dials_product = dials.pop(registry.ALL_DIALS)
+            dial = dials[registry.subject_parts(row["subject_key"])["adjustment"]]
+            dial[row["value_role"]] = row["value_number"]
+            if row["value_role"] == registry.APPLIED_ROLE:
+                dial["weight"] = row["trust_weight_applied_portion"]
+    dials_product = dials.pop(components.ALL_DIALS)
     direction = next((row for row in rows if row["measure_name"] == "chance_up_if_moves_probability"), None)
-    end_band = registry.subject_key(band=registry.BAND, horizon=channel)
-    average_band = registry.subject_key(band=registry.AVERAGE_BAND, horizon=channel)
+    end_band = registry.subject_key(band=components.BAND, horizon=channel)
+    average_band = registry.subject_key(band=components.AVERAGE_BAND, horizon=channel)
     return {
         "speed": values.get("today_typical_1_minute_move_points"),
         "speed_fast": seen.get("speed_fast_5_minute_half_life_points"),
         "speed_slow": seen.get("speed_slow_30_minute_half_life_points"),
-        "swing": values.get(f"typical_swing_points|{horizon}"),
-        "stretch": values.get(f"band_multiplier|{end_band}"),
-        "average_stretch": values.get(f"band_multiplier|{average_band}"),
-        "fit_sessions": values.get(f"fit_sessions_count|{horizon}"),
-        "fit_windows": values.get(f"fit_windows_count|{horizon}"),
-        "stays_inside_share": values.get(
-            f"chance_stays_inside_rung_probability|{registry.subject_key(horizon=channel, rung_points=rung)}"),
+        "swing": values.get(store.value_key_for("typical_swing_points", horizon)),
+        "stretch": values.get(store.value_key_for("stretch_multiplier", end_band)),
+        "average_stretch": values.get(store.value_key_for("stretch_multiplier", average_band)),
+        "fit_sessions": values.get(store.value_key_for("fit_sessions_count", horizon)),
+        "fit_windows": values.get(store.value_key_for("fit_windows_count", horizon)),
+        "stays_inside_share": values.get(store.value_key_for(
+            "chance_stays_inside_rung_probability", registry.subject_key(horizon=channel, rung_points=rung))),
         "dials": {dial: {registry.RAW_ROLE: setting.get(registry.RAW_ROLE),
-                         registry.APPLIED_ROLE: setting.get(registry.APPLIED_ROLE)} for dial, setting in dials.items()},
+                         registry.APPLIED_ROLE: setting.get(registry.APPLIED_ROLE), "weight": setting.get("weight")}
+                  for dial, setting in dials.items()},
         "dials_product": {registry.RAW_ROLE: dials_product.get(registry.RAW_ROLE),
                           registry.APPLIED_ROLE: dials_product.get(registry.APPLIED_ROLE)},
         "straddle": seen.get("same_day_straddle_mid_points"),
         "minutes_left": seen.get("minutes_until_session_close"),
-        "options_swing": seen.get(f"options_implied_swing_points|{horizon}"),
-        "options_over_tape": seen.get(f"options_over_tape_swing_ratio|{horizon}"),
-        "options_check": values.get(f"options_vs_tape_check_word|{horizon}"),
+        "options_swing": seen.get(store.value_key_for("options_implied_swing_points", horizon)),
+        "options_check": values.get(store.value_key_for("options_vs_tape_check_word", horizon)),
         "chance_up_if_moves": direction and direction["value_number"],
         "trust_applied": direction and direction["trust_weight_applied_portion"],
     }
@@ -214,29 +273,22 @@ def inside_half(move, half_width):
 def finished_windows(conn, trade_date, channel, read_lane):
     """Today's closed windows of a channel from the lane it follows, newest first, each with its base grade."""
     entries = []
-    rung = registry.subject_key(rung_points=registry.RUNG_POINTS[channel])
-    for window in store.lane_windows_with_grades(conn, trade_date, channel, read_lane, registry.GRADE_RULE):
-        facts = store.values_by_key(store.outcome_values(conn, window["outcome_rowid"]))
-        graded = store.values_by_key(store.outcome_values(conn, window["grade_rowid"])) if window["grade_rowid"] else {}
+    rung = registry.subject_key(rung_points=components.RUNG_POINTS[channel])
+    for window in store_queries.lane_windows_with_grades(conn, trade_date, channel, read_lane, components.GRADE_RULE):
+        facts = store.values_by_key(store_queries.outcome_values(conn, window["outcome_rowid"]))
+        graded = store.values_by_key(store_queries.outcome_values(conn, window["grade_rowid"])) \
+            if window["grade_rowid"] else {}
         bands = grade.decision_bands(conn, {"decision_rowid": window["graded_decision_rowid"]})[0] \
             if window["graded_decision_rowid"] else None
         moves = {side: facts.get(registry.WINDOW_MOVE_MEASURE[side]) for side in registry.WINDOW_SIDES}
-        minutes = facts.get("minutes_covered_count")
         entries.append({
-            "read_id": window["read_id"], "read_at": session_clock.parse_iso(window["read_cut_at"]),
-            "price": facts.get("grade_start_price_points"),
+            "read_at": session_clock.parse_iso(window["read_cut_at"]),
             "window_from": session_clock.parse_iso(window["window_starts_at"]),
-            "ends_at": session_clock.parse_iso(window["window_ends_at"]), "clipped": bool(window["was_window_clipped"]),
-            "minutes_held": None if minutes is None else int(minutes), "status": window["label_status"],
-            "half_width": bands and bands[registry.BAND]["half_width"],
-            "average_half_width": bands and bands[registry.AVERAGE_BAND]["half_width"],
-            **{side: facts.get(registry.WINDOW_PRICE_MEASURE[side]) for side in registry.WINDOW_SIDES},
-            **{f"{side}_move": moves[side] for side in registry.WINDOW_SIDES},
+            "ends_at": session_clock.parse_iso(window["window_ends_at"]), "status": window["label_status"],
+            "half_width": bands and bands[components.BAND]["half_width"],
+            **{key: facts.get(measure) for key, measure in FINISHED_FACTS.items()},
             **farthest_moves(moves if moves["high"] is not None else None),
             "grades": {word: grade_word_value(graded, word, rung) for word in registry.GRADE_WORDS},
-            "band_used": {side: graded.get(store.value_key({"measure_name": "band_used_ratio", "subject_key":
-                                                            registry.subject_key(band=registry.BAND, side=side)}))
-                          for side in registry.BAND_SIDES},
         })
     return entries
 
@@ -245,7 +297,7 @@ def grade_word_value(graded, word, rung_subject):
     """A grade word as True / False from the grade's values (None when ungraded), read the registry's one way."""
     measure_name, band, yes = registry.GRADE_WORD_MEASURE[word]
     subject = registry.subject_key(band=band) if band else rung_subject
-    stored = graded.get(store.value_key({"measure_name": measure_name, "subject_key": subject}))
+    stored = graded.get(store.value_key_for(measure_name, subject))
     return None if stored is None else stored == yes
 
 

@@ -1,5 +1,7 @@
-# Every path Kaze touches, taken from the two variables in .env: where Mirai's files are and where Kaze's data goes.
-# Importing this file reads .env and raises when it is missing, on purpose: nothing runs without the two paths.
+# Every path Kaze touches, from the keys in .env: where Mirai's files are (KAZE_MIRAI_HOME), where Kaze's data goes
+# (KAZE_DATA), where the nightly puts its backups (KAZE_BACKUP_DIR, optional; checked by the nightly alone, so a
+# missing cloud folder never stops a read) and the phone server's port and token. Importing this file reads .env and
+# raises when it is missing, on purpose: nothing runs without the two folders.
 import os
 from pathlib import Path
 
@@ -7,13 +9,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".env"
 REQUIRED_KEYS = ("KAZE_MIRAI_HOME", "KAZE_DATA")
 BACKUP_KEY = "KAZE_BACKUP_DIR"
+# Mirai's files as the feeds name them: templates under Mirai's data folder ({day} is the session), the auth watch's
+# log beside them, and the event calendar under Mirai's settings folder. mirai_files.py reads them; registry.py lists
+# them on the feed rows.
+MIRAI_FILES = {
+    "spx_bars": "market/spx_price_bars_by_minute/{day}.jsonl",
+    "watchlist_quotes": "market/watchlist_quotes_by_minute/{day}.jsonl",
+    "options_scan": "spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl",
+    "options_tape": "market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl",
+    "futures_bars": "market/futures_price_bars_by_minute/{day}.jsonl",
+    "claude_forecast": "spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl",
+    "news_headlines": "market/news_headlines_by_article/{day}.jsonl",
+    "schwab_login": "operations/logs/auth_watch_output_log.txt",
+}
+EVENT_CALENDAR_FILE = "market_event_calendar_by_event.json"
 
 
 def read_env_file(path=ENV_FILE):
-    """Read KEY=VALUE lines from the .env file into a dict, skipping blanks and comments."""
+    """Read KEY=VALUE lines from the .env file into a dict, skipping blanks and comments; refuse missing folders."""
     values = {}
     if not path.exists():
-        raise SystemExit(f"kaze: {path} is missing; copy .env.example to .env and fill in the two paths")
+        raise SystemExit(f"kaze: {path} is missing; copy .env.example to .env and fill it in")
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -23,7 +39,7 @@ def read_env_file(path=ENV_FILE):
     missing = [key for key in REQUIRED_KEYS if not values.get(key)]
     if missing:
         raise SystemExit(f"kaze: {path} lacks {', '.join(missing)}")
-    for key in REQUIRED_KEYS + ((BACKUP_KEY,) if values.get(BACKUP_KEY) else ()):
+    for key in REQUIRED_KEYS:
         if not Path(values[key]).is_dir():
             raise SystemExit(f"kaze: {key}={values[key]} in {path} is not a folder that exists")
     return values
@@ -61,8 +77,13 @@ def logs_folder():
 
 
 def backup_folder():
-    """Where the nightly puts its dated copies of the store: KAZE_BACKUP_DIR, or backups/ beside the store if unset."""
-    return BACKUP_DIR if BACKUP_DIR is not None else KAZE_DATA / "backups"
+    """Where the nightly puts its dated copies of the store: KAZE_BACKUP_DIR, else the folder beside the store."""
+    return BACKUP_DIR if BACKUP_DIR is not None else backup_folder_beside_store()
+
+
+def backup_folder_beside_store():
+    """The backup folder on the store's own disk: the default, and the fallback for a night the set folder is gone."""
+    return KAZE_DATA / "backups"
 
 
 def backup_work_folder():
