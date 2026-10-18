@@ -23,6 +23,7 @@ STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
 GAP_MARKERS_FOR_EMPTY_WINDOW = TAPE_WINDOW_MINUTES
 MISSING_FEED_STATE = {"status": "missing", "age": None, "market_at": None, "received_at": None}
+UNNOTED_FEED_STATE = {"status": None, "age": None, "market_at": None, "received_at": None}
 SOURCE_FILES = {"spx_bars": mirai_files.SPX_BARS, "watchlist_quotes": mirai_files.WATCHLIST_QUOTES,
                 "options_scan": mirai_files.OPTIONS_SCANS, "options_tape": mirai_files.OPTIONS_TAPE,
                 "claude_forecast": mirai_files.CLAUDE_FORECASTS, "news_headlines": mirai_files.HEADLINES}
@@ -55,7 +56,7 @@ class ReadBuilder:
     def add_observation(self, measure_name, value, blank=None, source=None, subject_points=None, **subject):
         """Add one observation stamped with its feed's state; None is blank with the reason given, else the feed's."""
         source = source or registry.MEASURES_BY_NAME[measure_name]["source_feed_name"]
-        state = self.feed_states.get(source, MISSING_FEED_STATE) if source else dict(MISSING_FEED_STATE, status=None)
+        state = self.feed_states.get(source, UNNOTED_FEED_STATE)
         if value is None and blank is None:
             blank = "feed_stale" if state["status"] in ("stale", "late") else "feed_missing"
         self.observations.append(store.observation_row(
