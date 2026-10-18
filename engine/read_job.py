@@ -1,11 +1,12 @@
-# The entry point launchd runs: a live read every 5 minutes (collect, store, live feed) and the nightly check; by hand
-# it rebuilds one moment, a whole session, or every session's bars. Outside market hours a live run writes one log line.
+# The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, live feed) and the nightly
+# (fits, rebuild, parity); by hand it rebuilds a moment or a session, backfills bars, or prints the range pass test.
 import argparse
 import sys
 import traceback
 from datetime import date, timedelta
 
-from engine import collect, job_log, live_feed, mirai_files, paths, registry, session_clock, store
+from engine import collect, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry, session_clock
+from engine import store
 
 BAR_WAIT_SECONDS = 100
 BAR_POLL_SECONDS = 5
@@ -20,11 +21,12 @@ def main():
     parser.add_argument("--rebuild-day", metavar="YYYY-MM-DD", help="rebuild every 5-minute read of a session")
     parser.add_argument("--backfill-bars", action="store_true", help="load every available session's SPX bars")
     parser.add_argument("--nightly", action="store_true",
-                        help="missed slots, closing bars, rebuild, parity, health line")
+                        help="missed slots, closing bars, history fits, rebuild, parity, health line")
     parser.add_argument("--nightly-if-due", action="store_true", help="the nightly, only in the 17:00 New York hour")
+    parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
-    if args.at or args.rebuild_day or args.backfill_bars:
+    if args.at or args.rebuild_day or args.backfill_bars or args.pass_test:
         job = JOB_REBUILD
     try:
         if args.nightly_if_due:
@@ -37,6 +39,8 @@ def main():
             run_rebuild_day(date.fromisoformat(args.rebuild_day))
         elif args.backfill_bars:
             run_backfill_bars()
+        elif args.pass_test:
+            run_pass_test()
         else:
             run_live()
     except Exception:
@@ -68,15 +72,32 @@ def run_live():
     snapshot, observations, bars, feed_states = collect.build_read(
         conn, cut_at, "live_frozen", written_at, slot, slot_status, calendar, half_days,
         login=mirai_files.read_login_state(), bar_arrived=bar_arrived)
-    store.write_snapshot(conn, snapshot, observations)
-    new_bars = store.write_bars(conn, bars)
-    live_feed.write_live_feed(snapshot, observations, feed_states)
+    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at)
+    live_feed.write_live_feed(snapshot, observations, feed_states, forecast)
     reason = f", {snapshot['snapshot_status_reason']}" if snapshot["snapshot_status_reason"] else ""
     build = f"{snapshot['row_origin']} b{snapshot['build_attempt_number']}"
     log(JOB_READ, f"live read {slot} ({snapshot['read_lane']}, {build}) "
                   f"cut {session_clock.iso_eastern(cut_at)}: {len(observations)} observations, {new_bars} new bars, "
-                  f"status {snapshot['snapshot_status']}{reason}, "
+                  f"status {snapshot['snapshot_status']}{reason}, {band_summary(forecast)}, "
                   f"built in {snapshot['build_seconds']} s")
+
+
+def write_read(conn, snapshot, observations, bars, cut_at):
+    """Store a built read: its bars, then the range readings with the snapshot, then the range decisions."""
+    new_bars = store.write_bars(conn, bars)
+    forecast = range_read.forecast_read(conn, snapshot, observations, cut_at)
+    observations.extend(range_read.reading_rows(snapshot, forecast))
+    store.write_snapshot(conn, snapshot, observations)
+    store.write_decisions(conn, *range_read.decision_rows(snapshot, forecast))
+    return forecast, new_bars
+
+
+def band_summary(forecast):
+    """The 30-minute band in one phrase for a log line."""
+    channel = forecast["channels"]["30_minutes"]
+    if channel["half"] is None:
+        return f"30-min band {channel['status']} ({channel['reason']})"
+    return f"30-min band {channel['lo']:.2f} to {channel['hi']:.2f} (half {channel['half']:.4f}, {channel['status']})"
 
 
 def wait_for_bar(day, cut_at):
@@ -93,12 +114,12 @@ def wait_for_bar(day, cut_at):
 
 
 def rebuild_read(conn, cut_at, slot, calendar, half_days):
-    """Rebuild one read at a cut (history_rebuilt) and write it with its bars; returns snapshot, size and new bars."""
+    """Rebuild one read at a cut (history_rebuilt) with its bars and forecast; returns snapshot, forecast, new bars."""
     snapshot, observations, bars, _ = collect.build_read(
         conn, cut_at, "history_rebuilt", session_clock.now_utc(), slot, "made" if slot else "not_scheduled", calendar,
         half_days)
-    store.write_snapshot(conn, snapshot, observations)
-    return snapshot, len(observations), store.write_bars(conn, bars)
+    forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at)
+    return snapshot, forecast, new_bars
 
 
 def run_rebuild_moment(cut_at):
@@ -109,9 +130,9 @@ def run_rebuild_moment(cut_at):
         return
     calendar, half_days = mirai_files.session_calendar()
     conn = store.open_store()
-    snapshot, count, new_bars = rebuild_read(conn, cut_at, session_clock.slot_for_cut(cut_at), calendar, half_days)
-    log(JOB_REBUILD, f"rebuilt read at {session_clock.iso_eastern(cut_at)}: {count} observations, {new_bars} new bars, "
-                     f"status {snapshot['snapshot_status']}, id {snapshot['snapshot_id']}")
+    snapshot, forecast, new_bars = rebuild_read(conn, cut_at, session_clock.slot_for_cut(cut_at), calendar, half_days)
+    log(JOB_REBUILD, f"rebuilt read at {session_clock.iso_eastern(cut_at)}: {new_bars} new bars, "
+                     f"status {snapshot['snapshot_status']}, {band_summary(forecast)}, id {snapshot['snapshot_id']}")
 
 
 def run_rebuild_day(day):
@@ -129,7 +150,7 @@ def rebuild_session(conn, day, calendar, half_days):
     """Every slot of a session as history_rebuilt rows plus the session's bars; returns the read and new-bar counts."""
     reads, bars_total = 0, 0
     for slot in session_clock.day_slots(day, half_days):
-        _, _, new_bars = rebuild_read(conn, session_clock.cut_for_slot(day, slot), slot, calendar, half_days)
+        new_bars = rebuild_read(conn, session_clock.cut_for_slot(day, slot), slot, calendar, half_days)[2]
         reads += 1
         bars_total += new_bars
     bars_total += write_session_bars(conn, day, "history_rebuilt", half_days, session_clock.now_utc())
@@ -170,7 +191,7 @@ def run_nightly_if_due():
 
 
 def run_nightly():
-    """Mark missed slots (on the session's own day), store closing bars, rebuild, compare with live, log one line."""
+    """Missed slots (on the session's own day), closing bars, history fits, rebuild, parity with live, one log line."""
     conn = store.open_store()
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
@@ -179,6 +200,8 @@ def run_nightly():
     missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
     live_reads = store.live_reads_count(conn, today.isoformat())
     closing_bars = write_session_bars(conn, today, "live_frozen", half_days, written_at) if live_reads else 0
+    next_session = session_clock.next_trading_day(today)
+    fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
     summaries = []
     for day in store.days_with_live_and_rebuilt_reads(conn):
@@ -193,9 +216,19 @@ def run_nightly():
                              f"rebuilt {store.parity_side_value(mismatch, 'rebuilt')}")
     live_bars = store.bar_count(conn, today.isoformat(), "live_frozen")
     parity = "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
+    fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'not possible'}"
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
                      f"{rebuilt_reads} reads rebuilt, "
-                     f"{live_bars} live bars ({closing_bars} added at the close); parity: {parity}")
+                     f"{live_bars} live bars ({closing_bars} added at the close); {fits}; parity: {parity}")
+
+
+def run_pass_test():
+    """Print the Phase 2 pass test: band coverage walk-forward at the 60-session lookback, then 20 for information."""
+    conn = store.open_store()
+    for lookback, heading in ((registry.FIT_LOOKBACK_SESSIONS, "Pass test"),
+                              (range_fit.INFORMATION_LOOKBACK_SESSIONS, "For information only")):
+        print("\n".join(range_fit.pass_test_lines(conn, lookback, heading)))
+        print()
 
 
 def write_missed_slots(conn, day, half_days, written_at):

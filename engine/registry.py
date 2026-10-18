@@ -1,6 +1,6 @@
 # The registry: every measure Kaze may store (name, meaning, unit, lane, fact group, subjects, source feed, blank rule),
-# every component (feeds, the login, the collector, the read lanes) and the fixed word lists. The store writer refuses
-# anything not listed here.
+# every component (feeds, the login, the collector, the range engine with its recipe's numbers, the read lanes) and the
+# fixed word lists. The store writer refuses anything not listed here.
 import hashlib
 import json
 from collections import defaultdict
@@ -24,7 +24,7 @@ VALUE_COLUMN_FOR_TYPE = {"number": "value_number", "whole_number": "value_number
                          "moment": "value_at", "date": "value_at"}
 FEED_STATUSES = ("ok", "late", "stale", "frozen_feed", "market_closed", "missing", "stand_in")
 ROW_ORIGINS = ("live_frozen", "live_rebuilt", "history_rebuilt")
-SNAPSHOT_KINDS = ("read", "nightly_check")
+SNAPSHOT_KINDS = ("read", "nightly_check", "nightly_history_fit")
 SNAPSHOT_STATUSES = ("built", "blind", "missed")
 SLOT_STATUSES = ("made", "late", "missed", "not_scheduled")
 KNOWN_AT_RULES = ("written_at", BAR_ARRIVAL_RULE, "file_modified_at")
@@ -66,6 +66,42 @@ FEEDS_WITH_LINE_COUNTS = ("spx_bars", "watchlist_quotes", "options_scan", "optio
 LOGIN_NAMES = ("schwab",)
 CONSUMERS = {"range_engine": ("spx_bars", "watchlist_quotes")}
 
+# The range engine's recipe: the one home for its fixed numbers, read by the fit, the read and its component row.
+RANGE_ENGINE_NAME = "range_engine"
+RANGE_ENGINE_VERSION = "1"
+SPEED_HALF_LIFE_MINUTES = 15
+FAST_SPEED_HALF_LIFE_MINUTES = 5
+SLOW_SPEED_HALF_LIFE_MINUTES = 30
+HORIZON_MINUTES = {"5_minutes": 5, "30_minutes": 30, "60_minutes": 60}
+LEG_WINDOW_MINUTES = (15, 30, 60)
+RUNG_POINTS = {"5_minutes": 5, "30_minutes": 10, "60_minutes": 15}
+BAND_PORTION = 0.8
+END_BAND = "80"
+AVERAGE_BAND = "average_80"
+BAND_PRICE_MEASURE = {END_BAND: "end_price", AVERAGE_BAND: "average_price"}
+GRADE_START_RULE = "at_read"
+FIT_LOOKBACK_SESSIONS = 60
+FIT_MIN_BARS_PER_SESSION = 380
+FIT_FIRST_WINDOW_MINUTE = 30
+FIT_WINDOW_STEP_MINUTES = 5
+STRETCH_RECIPE = {band: f"speed_half_life_{SPEED_HALF_LIFE_MINUTES}_close_changes|{GRADE_START_RULE}|{price}"
+                  f"|every_{FIT_WINDOW_STEP_MINUTES}_minutes_from_{FIT_FIRST_WINDOW_MINUTE}"
+                  for band, price in BAND_PRICE_MEASURE.items()}
+FED_DECISION_EVENT_KINDS = ("FOMC",)
+FED_OWNER_RULE_MULTIPLIER = 2.6
+OWNER_RULE_VARIANT = "owner_rule"
+WIDTH_DIALS = ("fed_window", "acceleration")
+DIRECTION_UNTIL_EARNED = 0.5
+RANGE_RECIPE_PARAMETERS = {
+    "speed_half_life_minutes": SPEED_HALF_LIFE_MINUTES, "fast_half_life_minutes": FAST_SPEED_HALF_LIFE_MINUTES,
+    "slow_half_life_minutes": SLOW_SPEED_HALF_LIFE_MINUTES, "horizon_minutes": HORIZON_MINUTES,
+    "rung_points": RUNG_POINTS, "band_portion": BAND_PORTION, "grade_start_rule": GRADE_START_RULE,
+    "fit_lookback_sessions": FIT_LOOKBACK_SESSIONS, "fit_min_bars_per_session": FIT_MIN_BARS_PER_SESSION,
+    "fit_first_window_minute": FIT_FIRST_WINDOW_MINUTE, "fit_window_step_minutes": FIT_WINDOW_STEP_MINUTES,
+    "stretch_recipe": STRETCH_RECIPE, "fed_owner_rule_multiplier": FED_OWNER_RULE_MULTIPLIER,
+    "width_dials": WIDTH_DIALS, "direction_until_earned": DIRECTION_UNTIL_EARNED,
+}
+
 
 def measure_row(name, meaning, unit, value_type, lane=None, group=None, subjects="whole", feed=None,
                 blank="never blank in session", table="collect_observations", pillar="collect", words=None, low=None,
@@ -88,6 +124,13 @@ def measure_row(name, meaning, unit, value_type, lane=None, group=None, subjects
 
 PUSH_LANE_DEFAULTS = dict(lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0)
 NOT_WRITTEN_YET = dict(written_since=None)
+# Phase 2 rows are written from the first live range read (2026-10-19); rebuilt rows exist from the first session.
+RANGE_WRITTEN_SINCE = dict(written_since="2026-10-19")
+DECISION_VALUE = dict(table="reads_decision_values", pillar="reads", **RANGE_WRITTEN_SINCE)
+# A measure born on the snapshot (or the fit) and copied onto every decision that used it.
+BOTH_TABLES = "collect_observations|reads_decision_values"
+FIT_BLANK = "too_few_sessions when no prior session had a full day of bars"
+NO_SPEED = "not_formed_yet before the session's second bar"
 POINTS_RANGE = dict(low=1000, high=20000)
 SCAN_MISSING = "feed_missing when no native scan has landed today"
 BARS_MISSING = "feed_missing when no bar has landed today"
@@ -266,71 +309,83 @@ MEASURES = [
     measure_row("tolerated_mismatches_count",
                 "tape and scan values that differed, tolerated because those files land late",
                 "count", "whole_number", "health", "rebuild_parity", low=0),
-    # Phase 2: speed, swing, legs (written by the range engine)
+    # Phase 2: today's speed, swings, legs and the options check, written on the read's snapshot by the range engine
     measure_row("today_typical_1_minute_move_points",
                 "recency-weighted mean absolute 1-minute close change, half-life 15 minutes", "points", "number",
-                "pull", "spx_speed", feed="spx_bars", available_from=2, low=0, **NOT_WRITTEN_YET),
+                "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0, table=BOTH_TABLES,
+                **RANGE_WRITTEN_SINCE),
     measure_row("speed_fast_5_minute_half_life_points", "the same speed with a 5-minute half-life", "points", "number",
-                "pull", "spx_speed", feed="spx_bars", available_from=2, low=0, **NOT_WRITTEN_YET),
+                "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0, **RANGE_WRITTEN_SINCE),
     measure_row("speed_slow_30_minute_half_life_points", "the same speed with a 30-minute half-life", "points",
-                "number", "pull", "spx_speed", feed="spx_bars", available_from=2, low=0, **NOT_WRITTEN_YET),
+                "number", "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0,
+                **RANGE_WRITTEN_SINCE),
     measure_row("speed_fast_over_slow_ratio", "fast speed over slow speed; above 1 means the pace is picking up",
-                "ratio", "number", "pull", "spx_acceleration", feed="spx_bars", available_from=2, low=0,
-                **NOT_WRITTEN_YET),
+                "ratio", "number", "pull", "spx_acceleration", feed="spx_bars",
+                blank=NO_SPEED + "; no_activity when the slow speed is 0", available_from=2, low=0,
+                **RANGE_WRITTEN_SINCE),
     measure_row("typical_swing_points", "speed times the square root of the horizon's minutes", "points", "number",
-                "pull", "spx_speed", subjects="horizon", feed="spx_bars", available_from=2, low=0, **NOT_WRITTEN_YET),
+                "pull", "spx_speed", subjects="horizon", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0,
+                table=BOTH_TABLES, **RANGE_WRITTEN_SINCE),
     measure_row("options_implied_swing_points", "straddle left scaled by the square root of horizon over minutes left",
-                "points", "number", "pull", "options_premium_size", subjects="horizon", feed="options_scan", low=0,
-                **NOT_WRITTEN_YET),
+                "points", "number", "pull", "options_premium_size", subjects="horizon", feed="options_scan",
+                blank="not_priceable when the read has no straddle", low=0, **RANGE_WRITTEN_SINCE),
+    measure_row("options_over_tape_swing_ratio", "options-implied swing over the tape swing; a check, never added in",
+                "ratio", "number", "pull", "options_vs_tape_check", subjects="horizon", feed="options_scan",
+                blank="not_priceable when either swing is missing", low=0, **RANGE_WRITTEN_SINCE),
     measure_row("up_legs_points", "sum of the window's rising 1-minute changes", "points", "number", group="path_legs",
-                subjects="window_minutes", feed="spx_bars", low=0, lane="push", overlap="direction_all_sources",
-                leans="leans_up", neutral=0.0, **NOT_WRITTEN_YET),
+                subjects="window_minutes", feed="spx_bars", blank="not_formed_yet until the window has formed", low=0,
+                lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0, **RANGE_WRITTEN_SINCE),
     measure_row("down_legs_points", "sum of the window's falling 1-minute changes, as a positive number", "points",
-                "number", group="path_legs", subjects="window_minutes", feed="spx_bars", low=0, lane="push",
-                overlap="direction_all_sources", leans="leans_down", neutral=0.0, **NOT_WRITTEN_YET),
+                "number", group="path_legs", subjects="window_minutes", feed="spx_bars",
+                blank="not_formed_yet until the window has formed", low=0, lane="push",
+                overlap="direction_all_sources", leans="leans_down", neutral=0.0, **RANGE_WRITTEN_SINCE),
     measure_row("trend_straightness_ratio",
                 "net move over total path in the window; 1 is one way, 0 is pure back-and-forth", "ratio", "number",
-                group="path_straightness", subjects="window_minutes", feed="spx_bars", low=0, high=1, lane="push",
-                overlap="direction_all_sources", leans="no_direction", neutral=0.0, **NOT_WRITTEN_YET),
-    # Phase 2: history fits (nightly_history_fit cuts)
+                group="path_straightness", subjects="window_minutes", feed="spx_bars",
+                blank="not_formed_yet until the window has formed; no_activity when the path is 0", low=0, high=1,
+                lane="push", overlap="direction_all_sources", leans="no_direction", neutral=0.0, **RANGE_WRITTEN_SINCE),
+    # Phase 2: history fits, written at nightly_history_fit cuts and copied onto the decisions that used them
     measure_row("band_multiplier", "swings that cover the band's share of past window endings on the same recipe",
                 "multiplier", "number", "pull", "band_stretch", subjects="band|horizon", history=True, low=0,
-                **NOT_WRITTEN_YET),
+                blank=FIT_BLANK, table=BOTH_TABLES, **RANGE_WRITTEN_SINCE),
     measure_row("stretch_recipe_name", "the speed recipe and grading window the stretch was fitted on", "word", "word",
-                "id", "band_stretch", subjects="band|horizon", **NOT_WRITTEN_YET),
+                "id", "band_stretch", subjects="band|horizon", table=BOTH_TABLES, **RANGE_WRITTEN_SINCE),
     measure_row("fit_sessions_count", "sessions the history fit used", "count", "whole_number", "health",
-                "fit_sample", subjects="horizon", **NOT_WRITTEN_YET),
+                "fit_sample", subjects="horizon", low=0, table=BOTH_TABLES, **RANGE_WRITTEN_SINCE),
     measure_row("fit_windows_count", "windows the history fit used", "count", "whole_number", "health", "fit_sample",
-                subjects="horizon", **NOT_WRITTEN_YET),
+                subjects="horizon", low=0, table=BOTH_TABLES, **RANGE_WRITTEN_SINCE),
     measure_row("average_price_shrink_ratio", "average-price band half-width over end-price band half-width", "ratio",
-                "number", "pull", "band_stretch", subjects="horizon", history=True, low=0, high=1, **NOT_WRITTEN_YET),
-    measure_row("never_leaves_rung_portion", "share of past windows whose high and low stayed inside the rung",
-                "portion", "number", "pull", "rung_odds", subjects="horizon|rung_points", history=True, low=0, high=1,
-                **NOT_WRITTEN_YET),
+                "number", "pull", "band_stretch", subjects="horizon", history=True, low=0, high=1, blank=FIT_BLANK,
+                **RANGE_WRITTEN_SINCE),
     # Phase 2: range forecast values (reads_decision_values)
-    measure_row("band_centre_points", "price the band is centred on", "points", "number", "id", "band_centre",
-                table="reads_decision_values", pillar="reads", subjects="horizon", **POINTS_RANGE, **NOT_WRITTEN_YET),
-    measure_row("band_half_width_points", "half-width of the end-price band", "points", "number", "pull", "band_size",
-                table="reads_decision_values", pillar="reads", subjects="band|horizon", low=0, **NOT_WRITTEN_YET),
-    measure_row("average_band_half_width_points", "half-width of the average-price band", "points", "number", "pull",
-                "band_size", table="reads_decision_values", pillar="reads", subjects="band|horizon", low=0,
-                **NOT_WRITTEN_YET),
+    measure_row("band_centre_points", "price the band is centred on: the last close at the read", "points", "number",
+                "id", "band_centre", subjects="horizon", blank="feed_missing when no bar has landed", **POINTS_RANGE,
+                **DECISION_VALUE),
+    measure_row("band_half_width_points", "half-width of the band, dials applied", "points", "number", "pull",
+                "band_size", subjects="band|horizon", blank="the speed's or the fit's reason", low=0,
+                **DECISION_VALUE),
+    measure_row("band_low_points", "the band's lower edge", "points", "number", "id", "band_edges",
+                subjects="band|horizon", blank="the speed's or the fit's reason", **POINTS_RANGE, **DECISION_VALUE),
+    measure_row("band_high_points", "the band's upper edge", "points", "number", "id", "band_edges",
+                subjects="band|horizon", blank="the speed's or the fit's reason", **POINTS_RANGE, **DECISION_VALUE),
     measure_row("chance_stays_inside_rung_probability", "chance price never leaves the rung over the horizon",
-                "probability", "number", "pull", "rung_odds", table="reads_decision_values", pillar="reads",
-                subjects="horizon|rung_points", low=0, high=1, **NOT_WRITTEN_YET),
+                "probability", "number", "pull", "rung_odds", subjects="horizon|rung_points", low=0, high=1,
+                blank="the speed's or the fit's reason", **DECISION_VALUE),
     measure_row("width_multiplier", "a dial on the band's width, raw and applied", "multiplier", "number", "pull",
-                "band_size", table="reads_decision_values", pillar="reads", subjects="adjustment",
-                overlap="width_all_adjustments", low=0, **NOT_WRITTEN_YET),
+                "band_size", subjects="adjustment", overlap="width_all_adjustments", low=0,
+                blank="the speed's reason when the dial reads the speed", **DECISION_VALUE),
+    measure_row("fit_snapshot_id", "the nightly_history_fit cut whose multipliers the decision used", "id", "text",
+                "id", "band_stretch", blank=FIT_BLANK, **DECISION_VALUE),
     measure_row("chance_up_if_moves_probability", "chance the move is up, given it moves", "probability", "number",
-                group="direction_call", table="reads_decision_values", pillar="reads", low=0, high=1, lane="push",
-                overlap="direction_all_sources", leans="leans_up", neutral=0.5, **NOT_WRITTEN_YET),
+                group="direction_call", low=0, high=1, lane="push", overlap="direction_all_sources", leans="leans_up",
+                neutral=0.5, **DECISION_VALUE),
     # Phase 3: outcomes and grades (results_outcome_values)
     measure_row("grade_start_price_points", "price the grade measured from", "points", "number", "id", "grade_start",
                 table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
     measure_row("grade_start_bar_at", "start of the 1-minute bar the grade measured from", "at", "moment", "id",
                 "grade_start", table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
     measure_row("grade_start_rule_name", "which grading rule set the start", "word", "word", "id", "grade_start",
-                table="results_outcome_values", pillar="results", words=("at_the_read", "read_plus_7_minutes"),
+                table="results_outcome_values", pillar="results", words=(GRADE_START_RULE, "read_plus_7_minutes"),
                 **NOT_WRITTEN_YET),
     measure_row("end_price_points", "price at the window's end", "points", "number", "label", "window_result",
                 table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
@@ -392,7 +447,7 @@ def component_row(kind, name, meaning, parameters, version="1"):
 
 
 def component_rows():
-    """Every feed, the login, the builder and the read lanes, all at version 1."""
+    """Every feed, the login, the builder, the range engine and the read lanes, all at version 1."""
     rows = [component_row("feed", name, meaning, {"mirai_file": mirai_file, "stale_limit_seconds": stale_limit})
             for name, meaning, mirai_file, stale_limit in FEEDS]
     rows.extend(component_row("login", name, "the 7-day Schwab sign-in",
@@ -401,6 +456,9 @@ def component_rows():
     rows.append(component_row("builder", BUILDER_NAME,
                               "reads Mirai's files as they stood at a cut and writes one snapshot",
                               {"registry_version": REGISTRY_VERSION}, version=BUILDER_VERSION))
+    rows.append(component_row("forecaster", RANGE_ENGINE_NAME,
+                              "today's speed times the square root of the horizon, stretched by the history fit",
+                              RANGE_RECIPE_PARAMETERS, version=RANGE_ENGINE_VERSION))
     rows.extend(component_row("read_lane", name, f"reads every {cadence} minutes", {"cadence_minutes": cadence})
                 for name, cadence in session_clock.READ_LANES.items())
     return rows

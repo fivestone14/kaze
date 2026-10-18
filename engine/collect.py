@@ -347,7 +347,7 @@ def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
 
 
 def calendar_fact_rows(calendar, row_origin, written_at, first_copy):
-    """Calendar facts for the store: events and half days, known since the first copy's built date or the file change."""
+    """Calendar facts for the store: events and half days, known since the first copy's built date or file change."""
     known_at = session_clock.iso_utc(calendar["changed_at"])
     if first_copy:
         built_day = date.fromisoformat(calendar["built"])

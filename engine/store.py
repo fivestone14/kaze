@@ -1,5 +1,5 @@
-# The SQLite store: the Phase 1 tables (hand-kept here, following the 15-table design in docs/data_map.md), the row
-# shapers, and every write and read. The writer refuses unregistered measures, blanks without a reason, wrong value
+# The SQLite store: the tables built so far (hand-kept here, following the 15-table design in docs/data_map.md), the
+# row shapers, and every write and read. The writer refuses unregistered measures, blanks without a reason, wrong value
 # columns, out-of-range numbers and inputs newer than the cut.
 import hashlib
 import json
@@ -7,7 +7,7 @@ import sqlite3
 
 from engine import paths, registry
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_SECONDS = 30
 VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
 STORED_DECIMALS = 6
@@ -16,6 +16,9 @@ NUMBER_TOLERANCE = 10 ** -STORED_DECIMALS
 TOLERATED_PARITY_FEEDS = ("options_tape", "options_scan")
 INSERT_VERBS = {"fail": "INSERT", "replace": "INSERT OR REPLACE", "ignore": "INSERT OR IGNORE"}
 TABLE_COLUMNS = {}
+ORIGIN_PREFERENCE_SQL = "CASE row_origin WHEN 'live_frozen' THEN 0 WHEN 'live_rebuilt' THEN 1 ELSE 2 END"
+DECISION_STORAGE_SCOPE = "shared"
+RUN_KIND_FOR_ORIGIN = {"live_frozen": "live", "live_rebuilt": "live", "history_rebuilt": "history_replay"}
 
 
 def check_list(options):
@@ -23,7 +26,28 @@ def check_list(options):
     return ", ".join(f"'{word}'" for word in options)
 
 
-# Numbered schema steps; open_store applies every step above the file's user_version. Later phases append theirs here.
+# The spine's columns, shared by step 1 and the step 2 rebuild that widened its snapshot_kind list.
+SNAPSHOT_COLUMNS_SQL = f"""
+    snapshot_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+    snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ({check_list(registry.SNAPSHOT_KINDS)})),
+    read_id TEXT, read_lane TEXT, read_lane_cadence_minutes REAL, scheduled_slot_eastern TEXT,
+    slot_status TEXT NOT NULL CHECK (slot_status IN ({check_list(registry.SLOT_STATUSES)})), slot_lateness_minutes REAL,
+    market_moment_id TEXT NOT NULL, is_training_grid_read INTEGER NOT NULL, read_moment_set_by TEXT NOT NULL,
+    cut_at TEXT NOT NULL, newest_input_market_at TEXT, known_at TEXT NOT NULL,
+    known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
+    build_attempt_number INTEGER NOT NULL, builder_name TEXT NOT NULL, builder_version TEXT NOT NULL,
+    builder_code_commit TEXT, was_code_tree_dirty INTEGER, component_versions_json_text TEXT NOT NULL,
+    source_files_json_text TEXT, build_started_at TEXT, build_seconds REAL, snapshot_content_sha256 TEXT,
+    feeds_not_ok_count INTEGER, blank_values_count INTEGER,
+    snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ({check_list(registry.SNAPSHOT_STATUSES)})),
+    snapshot_status_reason TEXT, written_at TEXT NOT NULL,
+    CHECK (newest_input_market_at IS NULL OR newest_input_market_at <= cut_at)"""
+SNAPSHOT_INDEXES_SQL = """
+CREATE INDEX ix_snapshots_day_cut ON collect_snapshots (trade_date, cut_at);
+CREATE INDEX ix_snapshots_origin_cut ON collect_snapshots (row_origin, cut_at);"""
+
+# Numbered schema steps; open_store applies every step above the file's user_version, each in one transaction.
 SCHEMA_STEPS = {
     1: f"""
 CREATE TABLE registry_measures (
@@ -46,24 +70,8 @@ CREATE TABLE registry_components (
     storage_scope TEXT NOT NULL, released_at TEXT NOT NULL,
     PRIMARY KEY (component_kind, component_name, component_version, revision_number));
 
-CREATE TABLE collect_snapshots (
-    snapshot_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
-    snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ({check_list(registry.SNAPSHOT_KINDS)})),
-    read_id TEXT, read_lane TEXT, read_lane_cadence_minutes REAL, scheduled_slot_eastern TEXT,
-    slot_status TEXT NOT NULL CHECK (slot_status IN ({check_list(registry.SLOT_STATUSES)})), slot_lateness_minutes REAL,
-    market_moment_id TEXT NOT NULL, is_training_grid_read INTEGER NOT NULL, read_moment_set_by TEXT NOT NULL,
-    cut_at TEXT NOT NULL, newest_input_market_at TEXT, known_at TEXT NOT NULL,
-    known_at_rule TEXT NOT NULL CHECK (known_at_rule IN ({check_list(registry.KNOWN_AT_RULES)})),
-    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
-    build_attempt_number INTEGER NOT NULL, builder_name TEXT NOT NULL, builder_version TEXT NOT NULL,
-    builder_code_commit TEXT, was_code_tree_dirty INTEGER, component_versions_json_text TEXT NOT NULL,
-    source_files_json_text TEXT, build_started_at TEXT, build_seconds REAL, snapshot_content_sha256 TEXT,
-    feeds_not_ok_count INTEGER, blank_values_count INTEGER,
-    snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ({check_list(registry.SNAPSHOT_STATUSES)})),
-    snapshot_status_reason TEXT, written_at TEXT NOT NULL,
-    CHECK (newest_input_market_at IS NULL OR newest_input_market_at <= cut_at));
-CREATE INDEX ix_snapshots_day_cut ON collect_snapshots (trade_date, cut_at);
-CREATE INDEX ix_snapshots_origin_cut ON collect_snapshots (row_origin, cut_at);
+CREATE TABLE collect_snapshots ({SNAPSHOT_COLUMNS_SQL});
+{SNAPSHOT_INDEXES_SQL}
 
 CREATE TABLE collect_observations (
     observation_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES collect_snapshots (snapshot_id),
@@ -103,6 +111,48 @@ CREATE TABLE collect_calendar_and_events (
     written_at TEXT NOT NULL);
 CREATE INDEX ix_calendar_day_known ON collect_calendar_and_events (trade_date, known_at);
 """,
+    # Phase 2: the READS pillar's decision tables, and the spine rebuilt so a nightly_history_fit cut is allowed
+    # (SQLite cannot widen a CHECK list in place; the copy keeps every row and runs with foreign keys off).
+    2: f"""
+CREATE TABLE collect_snapshots_widened ({SNAPSHOT_COLUMNS_SQL});
+INSERT INTO collect_snapshots_widened SELECT * FROM collect_snapshots;
+DROP TABLE collect_snapshots;
+ALTER TABLE collect_snapshots_widened RENAME TO collect_snapshots;
+{SNAPSHOT_INDEXES_SQL}
+
+CREATE TABLE reads_decisions (
+    decision_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+    storage_scope TEXT NOT NULL CHECK (storage_scope IN ('shared', 'private')), decision_kind TEXT NOT NULL,
+    parent_decision_id TEXT REFERENCES reads_decisions (decision_id), input_decision_ids_text TEXT,
+    snapshot_id TEXT NOT NULL REFERENCES collect_snapshots (snapshot_id), read_id TEXT, cut_at TEXT NOT NULL,
+    features_cutoff_at TEXT NOT NULL, known_at TEXT NOT NULL,
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
+    run_kind TEXT NOT NULL CHECK (run_kind IN ('live', 'test_variant', 'history_replay', 'backtest')),
+    variant_name TEXT, producer_kind TEXT NOT NULL, producer_name TEXT NOT NULL, producer_version TEXT NOT NULL,
+    builder_code_commit TEXT, horizon_name TEXT, horizon_minutes REAL, graded_price_measure TEXT,
+    grade_start_rule_version TEXT, grade_window_starts_at TEXT, grade_window_ends_at TEXT,
+    subject_key TEXT NOT NULL, revision_number INTEGER NOT NULL,
+    decision_status TEXT NOT NULL CHECK (decision_status IN ('ok', 'late', 'failed', 'refused', 'blind', 'clipped',
+                                                             'held_grey')),
+    decision_status_reason TEXT, decision_word TEXT, written_at TEXT NOT NULL);
+CREATE INDEX ix_decisions_snapshot ON reads_decisions (snapshot_id);
+CREATE INDEX ix_decisions_day_kind ON reads_decisions (trade_date, decision_kind);
+
+CREATE TABLE reads_decision_values (
+    decision_value_id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES reads_decisions (decision_id),
+    trade_date TEXT NOT NULL, storage_scope TEXT NOT NULL CHECK (storage_scope IN ('shared', 'private')),
+    decision_kind TEXT NOT NULL, known_at TEXT NOT NULL,
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
+    measure_name TEXT NOT NULL, measure_version INTEGER NOT NULL, subject_key TEXT NOT NULL, subject_points REAL,
+    value_role TEXT NOT NULL CHECK (value_role IN ('value', 'as_answered', 'after_checks', 'raw', 'applied', 'shown')),
+    value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,
+    blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
+    trust_weight_applied_portion REAL,
+    CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL) + (value_at IS NOT NULL)
+           + (blank_reason IS NOT NULL) = 1));
+CREATE INDEX ix_decision_values_decision ON reads_decision_values (decision_id);
+CREATE INDEX ix_decision_values_measure_day ON reads_decision_values (measure_name, trade_date);
+""",
 }
 
 
@@ -113,20 +163,20 @@ def open_store():
     conn = sqlite3.connect(str(file), timeout=BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for step in range(current + 1, SCHEMA_VERSION + 1):
-        with conn:
-            conn.executescript(SCHEMA_STEPS[step])
-            conn.execute(f"PRAGMA user_version = {step}")
+        conn.executescript(f"BEGIN; {SCHEMA_STEPS[step]} PRAGMA user_version = {step}; COMMIT;")
+    conn.execute("PRAGMA foreign_keys=ON")
     seed_registry(conn)
     return conn
 
 
 def seed_registry(conn):
-    """Write every registry row, replacing earlier copies of the same key (versioned by name, not yet by edits)."""
+    """Write every registry row, replacing earlier copies of the same key and dropping names no longer registered."""
     with conn:
         insert_rows(conn, "registry_measures", registry.MEASURES, on_conflict="replace")
+        conn.execute(f"DELETE FROM registry_measures WHERE measure_name NOT IN "
+                     f"({', '.join('?' for _ in registry.MEASURES_BY_NAME)})", list(registry.MEASURES_BY_NAME))
         insert_rows(conn, "registry_components", registry.component_rows(), on_conflict="replace")
 
 
@@ -169,14 +219,16 @@ def price_record_id_for(price):
             f"{price['value_origin']}|{price['row_origin']}")
 
 
-def base_snapshot_row(snapshot_kind, cut_at_iso, trade_date, row_origin, written_at_iso, commit, dirty):
+def base_snapshot_row(snapshot_kind, cut_at_iso, trade_date, row_origin, written_at_iso, commit, dirty,
+                      builder=(registry.BUILDER_NAME, registry.BUILDER_VERSION)):
     """A collect_snapshots row with the fields every kind shares; the caller adds slot and lane, the writer counts."""
+    builder_name, builder_version = builder
     row = {
         "snapshot_kind": snapshot_kind, "trade_date": trade_date, "cut_at": cut_at_iso, "market_moment_id": cut_at_iso,
         "known_at": written_at_iso, "known_at_rule": "written_at", "row_origin": row_origin, "build_attempt_number": 1,
-        "builder_name": registry.BUILDER_NAME, "builder_version": registry.BUILDER_VERSION,
+        "builder_name": builder_name, "builder_version": builder_version,
         "builder_code_commit": commit, "was_code_tree_dirty": dirty,
-        "component_versions_json_text": json.dumps({registry.BUILDER_NAME: registry.BUILDER_VERSION,
+        "component_versions_json_text": json.dumps({builder_name: builder_version,
                                                     "measures_registry": registry.REGISTRY_VERSION}, sort_keys=True),
         "build_started_at": written_at_iso, "written_at": written_at_iso, "slot_status": "not_scheduled",
         "is_training_grid_read": 0, "read_moment_set_by": "clock", "snapshot_status": "built",
@@ -199,12 +251,118 @@ def observation_row(snapshot, measure_name, value, subject_key="whole", subject_
         "source_feed_name": source_feed_name or measure["source_feed_name"], "feed_status": feed_status,
         "feed_age_seconds": feed_age_seconds, "newest_input_market_at": market_at,
         "newest_input_received_at": received_at,
-        **dict.fromkeys(VALUE_COLUMNS),
+        **placed_value(measure, value),
     }
-    if value is not None:
-        row[measure["value_column"]] = int(value) if measure["value_type"] == "yes_no" else value
     row["observation_id"] = observation_id_for(row)
     return row
+
+
+def placed_value(measure, value):
+    """The four value columns with the value in the registry's one (yes/no stored as 0/1), or all empty when blank."""
+    columns = dict.fromkeys(VALUE_COLUMNS)
+    if value is not None:
+        columns[measure["value_column"]] = int(value) if measure["value_type"] == "yes_no" else value
+    return columns
+
+
+def decision_id_for(decision):
+    """The decision id: kind, snapshot, producer, run:variant, horizon, graded price, structure, subject, revision."""
+    return (f"{decision['decision_kind']}|{decision['snapshot_id']}|"
+            f"{decision['producer_name']}@{decision['producer_version']}|"
+            f"{decision['run_kind']}:{decision['variant_name'] or 'live'}|{decision['horizon_name'] or '-'}|"
+            f"{decision['graded_price_measure'] or '-'}|-|{decision['subject_key']}|r{decision['revision_number']}")
+
+
+def decision_value_id_for(value):
+    """The decision value id, built from its decision, measure, version, subject and role."""
+    return (f"{value['decision_id']}|{value['measure_name']}|{value['measure_version']}|{value['subject_key']}|"
+            f"{value['value_role']}")
+
+
+def decision_row(snapshot, decision_kind, producer, fields):
+    """Shape a reads_decisions row for a snapshot: the shared columns from the snapshot, the rest from fields."""
+    producer_kind, producer_name, producer_version = producer
+    row = {
+        "decision_kind": decision_kind, "trade_date": snapshot["trade_date"], "storage_scope": DECISION_STORAGE_SCOPE,
+        "parent_decision_id": None, "input_decision_ids_text": None, "snapshot_id": snapshot["snapshot_id"],
+        "read_id": snapshot.get("read_id"), "cut_at": snapshot["cut_at"], "features_cutoff_at": snapshot["cut_at"],
+        "known_at": snapshot["known_at"], "row_origin": snapshot["row_origin"],
+        "run_kind": RUN_KIND_FOR_ORIGIN[snapshot["row_origin"]], "variant_name": None, "producer_kind": producer_kind,
+        "producer_name": producer_name, "producer_version": producer_version,
+        "builder_code_commit": snapshot["builder_code_commit"], "horizon_name": None, "horizon_minutes": None,
+        "graded_price_measure": None, "grade_start_rule_version": None, "grade_window_starts_at": None,
+        "grade_window_ends_at": None, "subject_key": "whole", "revision_number": 0, "decision_status": "ok",
+        "decision_status_reason": None, "decision_word": None, "written_at": snapshot["written_at"], **fields,
+    }
+    row["decision_id"] = decision_id_for(row)
+    return row
+
+
+def decision_value_row(decision, measure_name, value, subject_key="whole", subject_points=None, value_role="value",
+                       blank_reason=None, trust_weight=None):
+    """Shape one reads_decision_values row for a decision, putting the value in the registry's column."""
+    measure = registry.MEASURES_BY_NAME.get(measure_name)
+    if measure is None:
+        raise ValueError(f"{measure_name} is not a registered measure")
+    row = {
+        "decision_id": decision["decision_id"], "trade_date": decision["trade_date"],
+        "storage_scope": decision["storage_scope"], "decision_kind": decision["decision_kind"],
+        "known_at": decision["known_at"], "row_origin": decision["row_origin"], "measure_name": measure_name,
+        "measure_version": measure["measure_version"], "subject_key": subject_key, "subject_points": subject_points,
+        "value_role": value_role, "blank_reason": blank_reason if value is None else None,
+        "trust_weight_applied_portion": trust_weight, **placed_value(measure, value),
+    }
+    row["decision_value_id"] = decision_value_id_for(row)
+    return row
+
+
+def write_decisions(conn, decisions, values):
+    """Check and write decision headers with their values; returns how many decisions were written."""
+    for value in values:
+        check_measure_value(value)
+    with conn:
+        insert_rows(conn, "reads_decisions", decisions)
+        insert_rows(conn, "reads_decision_values", values)
+    return len(decisions)
+
+
+def sessions_with_bars(conn):
+    """Every session that has SPX bars, oldest first."""
+    rows = conn.execute("SELECT DISTINCT trade_date FROM collect_market_prices "
+                        "WHERE instrument_symbol = '$SPX' AND price_kind = 'bar' ORDER BY trade_date")
+    return [row["trade_date"] for row in rows]
+
+
+def session_bars(conn, trade_date, up_to_iso=None):
+    """One SPX 1-minute bar per minute of a session, oldest first, live rows preferred, starting by the moment given."""
+    rows = conn.execute(
+        "SELECT priced_at, open_in_quote_units AS open, high_in_quote_units AS high, low_in_quote_units AS low, "
+        " close_in_quote_units AS close FROM collect_market_prices "
+        "WHERE trade_date = ? AND instrument_symbol = '$SPX' AND price_kind = 'bar' AND (? IS NULL OR priced_at <= ?) "
+        f"ORDER BY priced_at, {ORIGIN_PREFERENCE_SQL}", (trade_date, up_to_iso, up_to_iso))
+    bars = {}
+    for row in rows:
+        bars.setdefault(row["priced_at"], row)
+    return list(bars.values())
+
+
+def newest_fit_known(conn, trade_date, cut_at_iso):
+    """The newest history fit a read on this day may use: serving this session or an earlier one, known by the cut."""
+    return conn.execute(
+        "SELECT * FROM collect_snapshots WHERE snapshot_kind = 'nightly_history_fit' AND trade_date <= ? "
+        f"AND known_at <= ? ORDER BY trade_date DESC, known_at DESC, {ORIGIN_PREFERENCE_SQL} LIMIT 1",
+        (trade_date, cut_at_iso)).fetchone()
+
+
+def sessions_served_by_a_fit(conn):
+    """The sessions that already have a history fit serving them."""
+    rows = conn.execute("SELECT DISTINCT trade_date FROM collect_snapshots WHERE snapshot_kind = 'nightly_history_fit'")
+    return {row["trade_date"] for row in rows}
+
+
+def snapshot_observations(conn, snapshot_id):
+    """A snapshot's observation rows."""
+    return conn.execute("SELECT * FROM collect_observations WHERE snapshot_id = ?", (snapshot_id,)).fetchall()
 
 
 def bar_price_row(bar, trade_date, row_origin, priced_at_iso, known_at_iso, known_at_rule):
@@ -221,34 +379,45 @@ def bar_price_row(bar, trade_date, row_origin, priced_at_iso, known_at_iso, know
     return row
 
 
+def rounded(value):
+    """A float at the store's precision; anything else (None, a count, a word) unchanged."""
+    return round(value, STORED_DECIMALS) if isinstance(value, float) else value
+
+
 def observation_value(observation):
     """The one filled value column of an observation, or None when it is blank."""
     return next((observation[column] for column in VALUE_COLUMNS if observation[column] is not None), None)
 
 
-def check_observation(observation):
-    """Refuse a row that breaks the registry: unknown subject kind, blank without reason, bad column, range or word."""
-    name = observation["measure_name"]
+def check_measure_value(row):
+    """Refuse a value row that breaks the registry: unknown subject, blank without reason, bad column, range, word."""
+    name = row["measure_name"]
     measure = registry.MEASURES_BY_NAME[name]
-    filled = [column for column in VALUE_COLUMNS if observation.get(column) is not None]
+    filled = [column for column in VALUE_COLUMNS if row.get(column) is not None]
     if len(filled) > 1:
         raise ValueError(f"{name}: more than one value column filled")
     if filled and filled[0] != measure["value_column"]:
         raise ValueError(f"{name}: value belongs in {measure['value_column']}, not {filled[0]}")
-    if not filled and observation["blank_reason"] not in registry.BLANK_REASONS:
-        raise ValueError(f"{name}: blank without a listed reason ({observation['blank_reason']})")
-    key = observation["subject_key"]
+    if not filled and row["blank_reason"] not in registry.BLANK_REASONS:
+        raise ValueError(f"{name}: blank without a listed reason ({row['blank_reason']})")
+    key = row["subject_key"]
     kinds = {"whole"} if key == "whole" else {part.split("=", 1)[0] for part in key.split("&")}
     if not kinds <= set(measure["subject_kinds_text"].split("|")):
         raise ValueError(f"{name}: subject {key} is not among {measure['subject_kinds_text']}")
-    number = observation.get("value_number")
+    number = row.get("value_number")
     if number is not None:
         low, high = measure["allowed_minimum_number"], measure["allowed_maximum_number"]
         if (low is not None and number < low) or (high is not None and number > high):
             raise ValueError(f"{name}: {number} is outside {low}..{high}")
-    word = observation.get("value_text")
+    word = row.get("value_text")
     if word is not None and measure["allowed_words_text"] and word not in measure["allowed_words_text"].split("|"):
         raise ValueError(f"{name}: {word} is not an allowed word")
+
+
+def check_observation(observation):
+    """Refuse an observation that breaks the registry, names an unknown feed status or uses an input past the cut."""
+    check_measure_value(observation)
+    name = observation["measure_name"]
     if observation["feed_status"] is not None and observation["feed_status"] not in registry.FEED_STATUSES:
         raise ValueError(f"{name}: unknown feed status {observation['feed_status']}")
     market_at = observation["newest_input_market_at"]
@@ -270,6 +439,9 @@ def write_snapshot(conn, snapshot, observations):
         check_observation(observation)
     if snapshot["row_origin"] == "history_rebuilt":
         with conn:
+            conn.execute("DELETE FROM reads_decision_values WHERE decision_id IN "
+                         "(SELECT decision_id FROM reads_decisions WHERE snapshot_id = ?)", (snapshot["snapshot_id"],))
+            conn.execute("DELETE FROM reads_decisions WHERE snapshot_id = ?", (snapshot["snapshot_id"],))
             conn.execute("DELETE FROM collect_observations WHERE snapshot_id = ?", (snapshot["snapshot_id"],))
             conn.execute("DELETE FROM collect_snapshots WHERE snapshot_id = ?", (snapshot["snapshot_id"],))
     else:

@@ -79,6 +79,14 @@ def latest_trading_day(day):
     return day
 
 
+def next_trading_day(day):
+    """The first trading day after this one."""
+    day += timedelta(days=1)
+    while not is_trading_day(day):
+        day += timedelta(days=1)
+    return day
+
+
 def session_open(day):
     """09:30 New York on this day."""
     return eastern_datetime(day, SESSION_OPEN)
