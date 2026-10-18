@@ -1,5 +1,5 @@
 # Every path Kaze touches, taken from the two variables in .env: where Mirai's files are and where Kaze's data goes.
-# Nothing else in the engine builds a path on its own; it asks this file.
+# Importing this file reads .env and raises when it is missing, on purpose: nothing runs without the two paths.
 import os
 from pathlib import Path
 
@@ -25,9 +25,9 @@ def read_env_file(path=ENV_FILE):
     return values
 
 
-SETTINGS = read_env_file()
-MIRAI_HOME = Path(SETTINGS["KAZE_MIRAI_HOME"])
-KAZE_DATA = Path(SETTINGS["KAZE_DATA"])
+ENV = read_env_file()
+MIRAI_HOME = Path(ENV["KAZE_MIRAI_HOME"])
+KAZE_DATA = Path(ENV["KAZE_DATA"])
 
 
 def mirai_data(*parts):
