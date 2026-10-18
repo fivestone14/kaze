@@ -349,13 +349,13 @@ def calendar_fact_rows(calendar, row_origin, written_at, first_copy):
         if event.get("kind") == mirai_files.HALF_DAY_EVENT_KIND:
             closes_at = session_clock.iso_utc(session_clock.eastern_from_hhmm(date.fromisoformat(event["date"]),
                                                                          event.get("time_et") or "13:00"))
-            facts.append({"fact_kind": "session_date", "fact_id": event["date"], "fact_status": "half_day",
+            facts.append({"fact_kind": registry.SESSION_DATE_FACT, "fact_id": event["date"], "fact_status": "half_day",
                           "session_closes_at": closes_at, **shared})
         if event.get("time_et"):
             starts_at = session_clock.iso_utc(session_clock.eastern_from_hhmm(date.fromisoformat(event["date"]),
                                                                          event["time_et"]))
             fact_id = f"{event['date']}|{event['time_et']}|{event.get('kind')}"
-            facts.append({"fact_kind": "scheduled_event", "fact_id": fact_id,
+            facts.append({"fact_kind": registry.SCHEDULED_EVENT_FACT, "fact_id": fact_id,
                           "starts_at": starts_at, **shared})
     for fact in facts:
         fact["fact_record_id"] = f"{fact['fact_kind']}|{fact['fact_id']}|{fact['fact_version']}"

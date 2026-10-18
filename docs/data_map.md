@@ -125,7 +125,8 @@ left out of the speed, a window starting or ending on it is skipped, and the pat
 2. **Swing** = speed x the square root of the horizon's minutes, for 5, 30 and 60.
 3. **Stretch** (history) = the 80% mark of |end move| / swing over every window of the prior 60 full sessions, measured
    on the same recipe: speed at the window's start from that day's bars, windows every 5 minutes from minute 30. A full
-   session holds a bar for every minute (390, or 210 on a listed half day); the full sessions are picked first and the
+   session holds a bar for every minute (390, or 210 on a listed half day; the rule `every_minute_held`); the full
+   sessions are picked first and the
    last 60 of them taken, so a half day never shrinks the sample. The average band's multiplier is the same fit on
    |average price over the window - start| / swing. Both carry the recipe label (`stretch_recipe_name`) and the
    sample counts.
@@ -157,7 +158,8 @@ speed and swing used, `band_multiplier`, `stretch_recipe_name`, `fit_sessions_co
 `fit_snapshot_id` (which fit it used), `band_half_width_points`, `band_low_points` and `band_high_points` (band = 80
 and average_80), `chance_stays_inside_rung_probability` (horizon, rung_points), the two dials and the direction. A read
 with fewer than two bars is `blind` (`speed_not_formed`, values blank `not_formed_yet`); one with no fit known at its
-cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`). The snapshot, its observations, its decisions
+cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`); one served by a thin fit stays `ok` (the
+band is real) with `decision_status_reason = thin_fit_<n>_of_60`, which the phone block carries with `fit.status`. The snapshot, its observations, its decisions
 and their values are written in one transaction; if the range step itself fails, the snapshot still lands with
 `snapshot_status_reason = range_failed` and no decisions, the traceback goes to the job's log, and the live feed says
 so. Decision ids follow the design:
@@ -167,7 +169,8 @@ so. Decision ids follow the design:
 `range_engine@1`): `trade_date` is the session served, `cut_at` the close of the last session in its sample, and
 `known_at` that close plus 62 seconds (`bar_end_plus_62_seconds`) for a rebuilt fit or the write time for the live one
 (always before the served open). A fit built on fewer than 60 full sessions has `snapshot_status = thin` (reason
-`<n>_of_60_sessions`); reads still use it and carry its counts. The nightly stores the session's bars before it fits,
+`<n>_of_60_sessions`); reads still use it and say so. The nightly stores the session's bars once (as live rows when
+Kaze was live that day, else rebuilt) before it fits,
 then writes a rebuilt fit for every stored session that lacks one, then the live fit for the next trading day unless a
 fit with the same or newer data already serves it (so a second nightly on one day adds nothing). A read uses the
 newest fit with `trade_date <= its day` and `known_at <= its cut`, so a fit never includes the read's own day;

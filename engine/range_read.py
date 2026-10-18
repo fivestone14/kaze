@@ -113,19 +113,22 @@ def channel_forecast(forecast, name, minutes, fits, history):
         "options_over_tape": options_swing / window_swing if options_swing and window_swing else None,
         "clipped": minutes_left is not None and minutes > minutes_left, "ends_at": ends_at,
         "in_fed_window": in_fed_window,
-        "dials": {dial: {"raw": dial_raw[dial], "applied": NO_EFFECT} for dial in registry.WIDTH_DIALS},
+        "dials": {dial: {registry.RAW_ROLE: dial_raw[dial], registry.APPLIED_ROLE: NO_EFFECT}
+                  for dial in registry.WIDTH_DIALS},
         "bands": band_edges(price, swing, fit, NO_EFFECT),
         "owner_rule_bands": (band_edges(price, swing, fit, registry.FED_OWNER_RULE_MULTIPLIER)
                             if in_fed_window else None),
     }
     if swing is None:
-        channel["status"], channel["reason"] = "blind", "speed_not_formed"
+        channel["status"], channel["reason"] = registry.DECISION_BLIND, "speed_not_formed"
     elif channel["stretch"] is None:
-        channel["status"], channel["reason"] = "blind", "no_fit_known_at_cut"
-    elif channel["clipped"]:
-        channel["status"], channel["reason"] = "clipped", "window_capped_at_close"
+        channel["status"], channel["reason"] = registry.DECISION_BLIND, "no_fit_known_at_cut"
     else:
-        channel["status"], channel["reason"] = "ok", None
+        reasons = ["window_capped_at_close"] if channel["clipped"] else []
+        if forecast["fit"]["status"] == "thin":
+            reasons.append(f"thin_fit_{int(fit['sessions'])}_of_{registry.FIT_LOOKBACK_SESSIONS}")
+        channel["status"] = registry.DECISION_CLIPPED if channel["clipped"] else registry.DECISION_OK
+        channel["reason"] = ",".join(reasons) or None
     return channel
 
 
@@ -231,9 +234,10 @@ def value_rows(decision, forecast, name, variant):
         subject_points=float(channel["rung_points"]))
     for dial, setting in channel["dials"].items():
         subject = registry.subject_key(adjustment=dial)
-        applied = setting["raw"] if variant == registry.OWNER_RULE_VARIANT and dial == registry.OWNER_RULE_DIAL \
-            else setting["applied"]
-        add("width_multiplier", setting["raw"], subject, not_formed, value_role="raw")
-        add("width_multiplier", applied, subject, value_role="applied")
+        raw, applied = setting[registry.RAW_ROLE], setting[registry.APPLIED_ROLE]
+        if variant == registry.OWNER_RULE_VARIANT and dial == registry.OWNER_RULE_DIAL:
+            applied = raw
+        add("width_multiplier", raw, subject, not_formed, value_role=registry.RAW_ROLE)
+        add("width_multiplier", applied, subject, value_role=registry.APPLIED_ROLE)
     add("chance_up_if_moves_probability", forecast["chance_up_if_moves"], trust_weight=forecast["trust"])
     return rows

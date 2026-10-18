@@ -25,6 +25,10 @@ VALUE_COLUMN_FOR_TYPE = {"number": "value_number", "whole_number": "value_number
                          "moment": "value_at", "date": "value_at"}
 FEED_STATUSES = ("ok", "late", "stale", "frozen_feed", "market_closed", "missing", "stand_in")
 ROW_ORIGINS = ("live_frozen", "live_rebuilt", "history_rebuilt")
+LIVE_VALUE_ORIGIN = "live"
+VALUE_ORIGINS = (LIVE_VALUE_ORIGIN, "after_session_corrected")
+SESSION_DATE_FACT, SCHEDULED_EVENT_FACT = "session_date", "scheduled_event"
+FACT_KINDS = (SESSION_DATE_FACT, SCHEDULED_EVENT_FACT)
 SNAPSHOT_KINDS = ("read", "nightly_check", "nightly_history_fit")
 FIT_SNAPSHOT_KIND = "nightly_history_fit"
 SNAPSHOT_STATUSES = ("built", "blind", "missed", "thin")
@@ -42,8 +46,10 @@ STORAGE_SCOPES = ("shared", "private")
 SHARED_SCOPE = "shared"
 RUN_KINDS = ("live", "test_variant", "history_replay", "backtest")
 RUN_KIND_FOR_ORIGIN = {"live_frozen": "live", "live_rebuilt": "live", "history_rebuilt": "history_replay"}
-DECISION_STATUSES = ("ok", "late", "failed", "refused", "blind", "clipped", "held_grey")
-VALUE_ROLES = ("value", "as_answered", "after_checks", "raw", "applied", "shown")
+DECISION_OK, DECISION_BLIND, DECISION_CLIPPED = "ok", "blind", "clipped"
+DECISION_STATUSES = (DECISION_OK, "late", "failed", "refused", DECISION_BLIND, DECISION_CLIPPED, "held_grey")
+VALUE_ROLE, RAW_ROLE, APPLIED_ROLE = "value", "raw", "applied"
+VALUE_ROLES = (VALUE_ROLE, "as_answered", "after_checks", RAW_ROLE, APPLIED_ROLE, "shown")
 SPX_SYMBOL = "$SPX"
 SUBJECT_KINDS = (
     "adjustment", "band", "bucket", "builder", "cited_order", "claim", "consumer", "exit_rule", "expiry",
@@ -94,7 +100,7 @@ AVERAGE_BAND = "average_80"
 BAND_PRICE_MEASURE = {BAND: "end_price", AVERAGE_BAND: "average_price"}
 GRADE_START_RULE = "at_read"
 FIT_LOOKBACK_SESSIONS = 60
-FIT_MIN_BARS_PER_SESSION = 380
+FULL_SESSION_RULE = "every_minute_held"
 FIT_FIRST_WINDOW_MINUTE = 30
 FIT_WINDOW_STEP_MINUTES = 5
 STRETCH_RECIPE = {band: f"speed_half_life_{SPEED_HALF_LIFE_MINUTES}_close_changes|{GRADE_START_RULE}|{price}"
@@ -112,7 +118,7 @@ RANGE_RECIPE_PARAMETERS = {
     "speed_half_life_minutes": SPEED_HALF_LIFE_MINUTES, "fast_half_life_minutes": FAST_SPEED_HALF_LIFE_MINUTES,
     "slow_half_life_minutes": SLOW_SPEED_HALF_LIFE_MINUTES, "horizon_minutes": HORIZON_MINUTES,
     "rung_points": RUNG_POINTS, "band_portion": BAND_PORTION, "grade_start_rule": GRADE_START_RULE,
-    "fit_lookback_sessions": FIT_LOOKBACK_SESSIONS, "fit_min_bars_per_session": FIT_MIN_BARS_PER_SESSION,
+    "fit_lookback_sessions": FIT_LOOKBACK_SESSIONS, "full_session_rule": FULL_SESSION_RULE,
     "fit_first_window_minute": FIT_FIRST_WINDOW_MINUTE, "fit_window_step_minutes": FIT_WINDOW_STEP_MINUTES,
     "stretch_recipe": STRETCH_RECIPE, "fed_owner_rule_multiplier": FED_OWNER_RULE_MULTIPLIER,
     "width_dials": WIDTH_DIALS, "direction_until_earned": DIRECTION_UNTIL_EARNED,

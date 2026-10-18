@@ -157,18 +157,17 @@ def run_rebuild_day(day):
         return
     calendar, half_days = mirai_files.session_calendar()
     conn = store.open_store()
-    reads, bars_total = rebuild_session(conn, day, calendar, half_days)
-    log(JOB_REBUILD, f"rebuilt {day}: {reads} reads, {bars_total} new bars")
+    bars_total = write_session_bars(conn, day, "history_rebuilt", half_days, session_clock.now_utc())
+    reads, read_bars = rebuild_session(conn, day, calendar, half_days)
+    log(JOB_REBUILD, f"rebuilt {day}: {reads} reads, {bars_total + read_bars} new bars")
 
 
 def rebuild_session(conn, day, calendar, half_days):
-    """Every slot of a session as history_rebuilt rows plus the session's bars; returns the read and new-bar counts."""
+    """Every slot of a session as history_rebuilt rows; returns the read count and the bars the reads added."""
     reads, bars_total = 0, 0
     for slot in session_clock.day_slots(day, half_days):
-        new_bars = rebuild_read(conn, session_clock.cut_for_slot(day, slot), slot, calendar, half_days)[2]
+        bars_total += rebuild_read(conn, session_clock.cut_for_slot(day, slot), slot, calendar, half_days)[2]
         reads += 1
-        bars_total += new_bars
-    bars_total += write_session_bars(conn, day, "history_rebuilt", half_days, session_clock.now_utc())
     return reads, bars_total
 
 
@@ -206,7 +205,7 @@ def run_nightly_if_due():
 
 
 def run_nightly():
-    """Missed slots (on the session's own day), the session's bars, history fits, rebuild, parity, one log line."""
+    """Missed slots (on the session's own day), the session's bars once, history fits, rebuild, parity, one line."""
     conn = store.open_store()
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
@@ -214,8 +213,8 @@ def run_nightly():
     own_session = today == session_clock.to_eastern(written_at).date()
     missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
     live_reads = store.live_reads_count(conn, today.isoformat())
-    closing_bars = write_session_bars(conn, today, "live_frozen", half_days, written_at) if live_reads else 0
-    write_session_bars(conn, today, "history_rebuilt", half_days, written_at)
+    bars_origin = "live_frozen" if live_reads else "history_rebuilt"
+    session_bars = write_session_bars(conn, today, bars_origin, half_days, written_at)
     next_session = session_clock.next_trading_day(today)
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
@@ -235,7 +234,8 @@ def run_nightly():
     fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
                      f"{rebuilt_reads} reads rebuilt, "
-                     f"{live_bars} live bars ({closing_bars} added at the close); {fits}; parity: {parity}")
+                     f"{live_bars} live bars ({session_bars} {bars_origin} bars added at the close); {fits}; "
+                     f"parity: {parity}")
 
 
 def run_pass_test():

@@ -76,7 +76,7 @@ TABLE_COLUMNS_SQL = {
     row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
     measure_name TEXT NOT NULL, measure_version INTEGER NOT NULL, subject_key TEXT NOT NULL, subject_points REAL,
     {VALUE_COLUMNS_SQL}
-    value_origin TEXT NOT NULL CHECK (value_origin IN ('live', 'after_session_corrected')),
+    value_origin TEXT NOT NULL CHECK (value_origin IN ({check_list(registry.VALUE_ORIGINS)})),
     blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
     source_feed_name TEXT,
     feed_status TEXT CHECK (feed_status IS NULL OR feed_status IN ({check_list(registry.FEED_STATUSES)})),
@@ -94,7 +94,7 @@ TABLE_COLUMNS_SQL = {
     volume_count INTEGER, quote_status TEXT NOT NULL, blank_reasons_text TEXT""",
     "collect_calendar_and_events": f"""
     fact_record_id TEXT PRIMARY KEY,
-    fact_kind TEXT NOT NULL CHECK (fact_kind IN ('session_date', 'scheduled_event')),
+    fact_kind TEXT NOT NULL CHECK (fact_kind IN ({check_list(registry.FACT_KINDS)})),
     fact_id TEXT NOT NULL, fact_version TEXT NOT NULL, trade_date TEXT NOT NULL, starts_at TEXT,
     known_at TEXT NOT NULL, fact_name TEXT, calendar_tier TEXT, fact_status TEXT, session_closes_at TEXT,
     source_reference_text TEXT, row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
@@ -361,7 +361,7 @@ def observation_row(snapshot, measure_name, value, subject_key="whole", subject_
         "snapshot_id": snapshot["snapshot_id"], "trade_date": snapshot["trade_date"], "cut_at": snapshot["cut_at"],
         "known_at": snapshot["known_at"], "row_origin": snapshot["row_origin"], "measure_name": measure_name,
         "measure_version": measure["measure_version"], "subject_key": subject_key, "subject_points": subject_points,
-        "value_origin": "live", "blank_reason": blank_reason if value is None else None,
+        "value_origin": registry.LIVE_VALUE_ORIGIN, "blank_reason": blank_reason if value is None else None,
         "source_feed_name": source_feed_name or measure["source_feed_name"], "feed_status": feed_status,
         "feed_age_seconds": feed_age_seconds, "newest_input_market_at": market_at,
         "newest_input_received_at": received_at,
@@ -383,15 +383,16 @@ def decision_row(snapshot, decision_kind, producer, fields):
         "producer_kind": producer_kind, "producer_name": producer_name, "producer_version": producer_version,
         "builder_code_commit": snapshot["builder_code_commit"], "horizon_name": None, "horizon_minutes": None,
         "graded_price_measure": None, "grade_start_rule_version": None, "grade_window_starts_at": None,
-        "grade_window_ends_at": None, "subject_key": "whole", "revision_number": 0, "decision_status": "ok",
+        "grade_window_ends_at": None, "subject_key": "whole", "revision_number": 0,
+        "decision_status": registry.DECISION_OK,
         "decision_status_reason": None, "decision_word": None, "written_at": snapshot["written_at"], **fields,
     }
     row["decision_id"] = decision_id_for(row)
     return row
 
 
-def decision_value_row(decision, measure_name, value, subject_key="whole", subject_points=None, value_role="value",
-                       blank_reason=None, trust_weight=None):
+def decision_value_row(decision, measure_name, value, subject_key="whole", subject_points=None,
+                       value_role=registry.VALUE_ROLE, blank_reason=None, trust_weight=None):
     """Shape one reads_decision_values row for a decision, putting the value in the registry's column."""
     measure = registered_measure(measure_name)
     row = {
@@ -411,7 +412,7 @@ def bar_price_row(bar, trade_date, row_origin, priced_at_iso, known_at_iso, know
     row = {
         "trade_date": trade_date, "instrument_symbol": registry.SPX_SYMBOL, "instrument_kind": "index",
         "price_kind": "bar", "bar_minutes": 1, "priced_at": priced_at_iso, "known_at": known_at_iso,
-        "known_at_rule": known_at_rule, "row_origin": row_origin, "value_origin": "live",
+        "known_at_rule": known_at_rule, "row_origin": row_origin, "value_origin": registry.LIVE_VALUE_ORIGIN,
         "source_feed_name": "spx_bars", "feed_status": "ok", "quote_unit": "points",
         "open_in_quote_units": bar["open"], "high_in_quote_units": bar["high"], "low_in_quote_units": bar["low"],
         "close_in_quote_units": bar["close"], "quote_status": "ok",
@@ -543,10 +544,11 @@ def write_calendar_facts(conn, facts):
 def calendar_events_known(conn, trade_date, cut_at_iso):
     """The day's timed events known by the cut, one per fact (its newest known version), as (starts_at, kind)."""
     rows = conn.execute(
-        "SELECT starts_at, fact_name FROM collect_calendar_and_events e WHERE fact_kind = 'scheduled_event' "
+        "SELECT starts_at, fact_name FROM collect_calendar_and_events e WHERE fact_kind = ? "
         "AND trade_date = ? AND known_at <= ? AND known_at = (SELECT MAX(known_at) FROM collect_calendar_and_events n "
         " WHERE n.fact_kind = e.fact_kind AND n.fact_id = e.fact_id AND n.known_at <= ?) "
-        "GROUP BY fact_id ORDER BY starts_at", (trade_date, cut_at_iso, cut_at_iso)).fetchall()
+        "GROUP BY fact_id ORDER BY starts_at",
+        (registry.SCHEDULED_EVENT_FACT, trade_date, cut_at_iso, cut_at_iso)).fetchall()
     return [(row["starts_at"], row["fact_name"]) for row in rows]
 
 
@@ -564,7 +566,7 @@ def calendar_known_at(conn, cut_at_iso):
 def half_day_sessions(conn):
     """The sessions the stored calendar facts list as half days."""
     rows = conn.execute("SELECT DISTINCT fact_id FROM collect_calendar_and_events "
-                        "WHERE fact_kind = 'session_date' AND fact_status = 'half_day'")
+                        "WHERE fact_kind = ? AND fact_status = 'half_day'", (registry.SESSION_DATE_FACT,))
     return {date.fromisoformat(row["fact_id"]) for row in rows}
 
 
