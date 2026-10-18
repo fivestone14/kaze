@@ -12,7 +12,7 @@
 </head>
 <body>
 <main>
-  <p class="notice" id="notice" hidden></p>
+  <p class="notice" id="notice" role="status" hidden></p>
 
   <section class="view" id="view-read">
     <div class="card chart-card">
@@ -37,12 +37,14 @@
       <div class="row-between small-bold"><span>Average Since The Read</span><span id="strip-verdict">—</span></div>
       <svg class="strip" id="strip" viewBox="0 0 312 64" role="img"
            aria-label="Live price and running average against the bands"></svg>
+      <p class="block-note" id="strip-note" hidden></p>
       <div class="legend">
         <span><i class="swatch-average"></i>Average Band</span>
         <span><i class="swatch-end"></i>End Band</span>
       </div>
     </div>
     <div class="card reads-list" id="reads-list"></div>
+    <p class="block-note" id="list-note" hidden></p>
     <div class="scores" id="scores"></div>
   </section>
 
@@ -64,7 +66,7 @@
         <span class="card-title">How Far · Pull</span><span class="pill pill-green">Counts Now</span>
       </div>
       <div class="speed-row">
-        <svg class="speed-bars" id="speed-bars" viewBox="0 0 230 66" role="img"
+        <svg class="speed-bars" id="speed-bars" viewBox="0 0 230 76" role="img"
              aria-label="The three speeds Kaze measures, the one it uses darkest"></svg>
         <div class="speed-side">
           <span class="faint-label">Speed</span>
@@ -73,6 +75,7 @@
           <span class="faint-note">Darkest Bar =<br>The One Used</span>
         </div>
       </div>
+      <p class="faint-small" id="sight-read-line">—</p>
       <div class="chain" id="chain"></div>
       <svg class="range-bar" id="range-bar" viewBox="0 0 312 50" role="img"
            aria-label="The end band, the average band and the never-leaves rung"></svg>
@@ -84,6 +87,7 @@
         <span class="card-title">Which Way · Push</span><span class="pill pill-purple" id="push-weight">—</span>
       </div>
       <div class="push-rows" id="push-rows"></div>
+      <p class="block-note" id="push-note" hidden></p>
       <div class="push-call"><span id="push-call-label">—</span><span id="push-call">—</span></div>
     </div>
     <div class="card">
@@ -91,6 +95,7 @@
         <span class="card-title">Feeds</span><span class="pill pill-green" id="feeds-pill">—</span>
       </div>
       <div class="feeds-grid" id="feeds-grid"></div>
+      <p class="block-note" id="feeds-note" hidden></p>
       <span class="faint-small" id="login-line">—</span>
     </div>
   </section>
@@ -116,10 +121,10 @@
     </div>
     <div class="answer" id="answer"></div>
     <div class="tag-key">
-      <span><i style="background:#2F44B8"></i>Today</span>
-      <span><i style="background:#8a6300"></i>History</span>
-      <span><i style="background:#1f6b3e"></i>Check</span>
-      <span><i style="background:#5b2f8f"></i>Earned</span>
+      <span><i class="key-today"></i>Today</span>
+      <span><i class="key-history"></i>History</span>
+      <span><i class="key-check"></i>Check</span>
+      <span><i class="key-earned"></i>Earned</span>
     </div>
   </section>
 </main>

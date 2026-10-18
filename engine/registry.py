@@ -164,6 +164,11 @@ RELEASE_TIER_PREFIX = "data"
 FED_EVENT_PREFIXES = ("FOMC", "FED_")
 CLOSING_WINDOW_MINUTES = 15
 OPTIONS_VS_TAPE_POWER = 0.4
+# The options cross-check's verdict (shown, never added in): agree when the options-implied swing sits within this
+# ratio of the tape swing either way, as the worked-out sheet's "agrees" tick has it.
+OPTIONS_AGREE_RATIO = 1.25
+OPTIONS_CHECK_AGREE, OPTIONS_CHECK_DIFFER = "agree", "differ"
+OPTIONS_CHECK_WORDS = (OPTIONS_CHECK_AGREE, OPTIONS_CHECK_DIFFER)
 CAP_PORTION = 0.95
 NO_EFFECT = 1.0
 WIDTH_DIAL_MEANING = {
@@ -558,6 +563,10 @@ MEASURES = [
     measure_row("width_multiplier", "a dial on the band's width, raw and applied", "multiplier", "number", "pull",
                 "band_size", subjects="adjustment", overlap="width_all_adjustments", low=0,
                 blank="the speed's reason when the dial reads the speed", **DECISION_VALUE),
+    measure_row("options_vs_tape_check_word", "the options cross-check's verdict: agree when the options-implied swing "
+                "sits within the agree ratio of the tape swing either way, else differ", "word", "word", "pull",
+                "options_vs_tape_check", subjects="horizon", feed="options_scan", words=OPTIONS_CHECK_WORDS,
+                blank="not_priceable when either swing is missing", **DECISION_VALUE),
     measure_row("fit_snapshot_id", "the nightly_history_fit cut whose multipliers the decision used", "id", "text",
                 "id", "band_stretch", blank=FIT_BLANK_MEANING, **DECISION_VALUE),
     measure_row("chance_up_if_moves_probability", "chance the move is up, given it moves", "probability", "number",
@@ -644,7 +653,7 @@ WORD_LISTS = (LANES, FEED_STATUSES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAP
               SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS, DECISION_STATUSES,
               VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS, SUBJECT_KINDS,
               GRADE_START_RULE_NAMES, WIDTH_DIALS, PUSH_READINGS, EVALUATION_KINDS, EVALUATED_KINDS, VERDICTS,
-              INTERVAL_METHODS, BASELINES, PUSH_STATUSES, WALL_TYPES, CLAUDE_SIDES)
+              INTERVAL_METHODS, BASELINES, PUSH_STATUSES, WALL_TYPES, CLAUDE_SIDES, OPTIONS_CHECK_WORDS)
 WORD_SHAPE = re.compile(r"^[a-z0-9_$/]+$")
 
 

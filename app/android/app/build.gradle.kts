@@ -34,6 +34,8 @@ android {
         applicationId = "com.kaze.app"
         minSdk = 26
         targetSdk = 34
+        // Bump both on every rebuild that goes to the phone: Android refuses an APK whose versionCode is not
+        // higher than the one installed.
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "KAZE_URL", "\"${localValue("KAZE_URL").trimEnd('/')}\"")

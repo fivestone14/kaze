@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
             setProgressBackgroundColorSchemeColor(SURFACE)
             addView(web, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            setOnRefreshListener { web.reload() }
+            setOnRefreshListener { reloadFromServer() }
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -68,6 +68,14 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(refresh)
         if (savedInstanceState == null) web.loadUrl(BuildConfig.KAZE_URL + "/")
+    }
+
+    /** Pull-to-refresh: reload the page, or go back to the server when the offline page is what is showing
+     *  (reloading that page would only redraw it). */
+    private fun reloadFromServer() {
+        val host = web.url?.let { Uri.parse(it).host }
+        if (host != null && host.equals(serverHost, ignoreCase = true)) web.reload()
+        else web.loadUrl(BuildConfig.KAZE_URL + "/")
     }
 
     override fun onResume() {

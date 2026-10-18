@@ -442,7 +442,7 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | Path | What it holds | Written by |
 |---|---|---|
 | `kaze.sqlite` (with `-wal` and `-shm` beside it) | the store | every job |
-| `live/latest.json` | the newest live read for the phone: `read_id`, `lane`, `slot`, `origin`, `status`, `status_reason`, `cut_at`, `known_at`, `feeds` (status live / partial / blind and age per feed), `login`, `range` (the forecast, see below; null with `status_reason = range_failed`), `values` (`measure` or `measure\|subject` keys, the range readings included), `blanks` (key to reason); when the live job crashes it is replaced by `{status: failed, status_reason, failed_at}`, so a stale `cut_at` is never silent | the live read job, after each read |
+| `live/latest.json` | the newest live read for the phone: `read_id`, `lane`, `slot`, `origin`, `status`, `status_reason`, `cut_at`, `known_at`, `feeds` (status live / partial / blind and age per feed), `login`, `session` (`trade_date`, `opens_at`, `closes_at`, `next_read_at` = the next slot's cut or null after the last, `next_session_opens_at`; so the phone can tell closed from late), `range` (the forecast, see below; null with `status_reason = range_failed`), `values` (`measure` or `measure\|subject` keys, the range readings included), `blanks` (key to reason); when the live job crashes it is replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent | the live read job, after each read |
 | `logs/read_log.txt` | one line per read-job run (including the quiet "market closed" lines) and any crash's traceback | the read job |
 | `logs/nightly_log.txt` | one health line per nightly run, one line per parity mismatch, the backup warning when the copy shares the store's disk, and the hourly "not due" lines | the nightly job |
 | `logs/rebuild_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`; a `--scoreboard` or `--pass-test` crash) | hand runs |
@@ -477,7 +477,10 @@ until any of that weight is above 0, then `earned`; the list is empty when the r
 `status_reason` says `push_failed`), `chance_up_if_moves`, `trust_applied` and `direction_text` (the headline
 channel's call: 0.5, 0 and `coin flip until earned` until a reading earns weight) and `channels` keyed `5_minutes` /
 `30_minutes` / `60_minutes`, each with `minutes`, `swing`, `stretch`, `average_stretch`, `fit_sessions`,
-`fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_over_tape`, `clipped`, `ends_at`,
+`fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_over_tape`, `options_check` (the
+engine's verdict on the options cross-check, `agree` when the two swings sit within `OPTIONS_AGREE_RATIO` = 1.25 of
+each other either way, else `differ`, null when either swing is missing; stored on the decision as
+`options_vs_tape_check_word`), `clipped`, `ends_at`,
 `in_fed_window`, `closing_window_multiplier`, `release_window_multiplier`, `width_cap_multiplier`, `dials` (keyed
 `fed_window`, `release_window`, `closing_window`, `acceleration`, `options_vs_tape`, in that order: `raw`, `applied`,
 `weight`; what each means is the table above, not the file), `dials_product` (`raw` = the product of the raw values,
@@ -494,7 +497,11 @@ alike:
   between `window_from` and the cut, never past `ends_at`). `read_id`, `read_at`, `price` (the read price the band and
   the grade start sit on), `window_from`, `ends_at`, `horizon_minutes`, `ended` (the cut has passed `ends_at`: the
   window is finished and only waits for its grade, or its lane missed a slot), `clipped`, `status`, `reason`,
-  `rung_points`, `bands` and `owner_rule_bands` (the stored decision values), `minutes_held` (bars held since
+  `rung_points`, `bands` and `owner_rule_bands` (the stored decision values), `chain` (how that read worked its band
+  out, read back from its stored values so the phone's Sight and Steps explain the read the live window belongs to:
+  `speed`, `speed_fast`, `speed_slow`, `swing`, `stretch`, `average_stretch`, `fit_sessions`, `fit_windows`,
+  `stays_inside_share`, `dials_product` (`raw`, `applied`), `straddle`, `minutes_left`, `options_swing`,
+  `options_over_tape`, `options_check`, `chance_up_if_moves`, `trust_applied`), `minutes_held` (bars held since
   `window_from`, 0 at the read itself), `now` (`price` = the newest close at the cut and `move` from the read price,
   always present; `average` = the running mean of the window's closes, `average_move`, `high`, `low`, `farthest_up`,
   `farthest_down` (how far above and below the read price the window reached, floored at 0; the stored

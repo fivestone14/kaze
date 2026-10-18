@@ -19,7 +19,10 @@ FEED_ROUTE, BARS_ROUTE = "/latest.json", "/bars.json"
 PORT_KEY, TOKEN_KEY, DEFAULT_PORT = "KAZE_APP_PORT", "KAZE_APP_TOKEN", 8791
 AUTH_USER = "kaze"
 BARS_CACHE_SECONDS = 20
+HANDLER_TIMEOUT_SECONDS = 15
+LOGGED_ROUTE_CHARS = 120
 NO_STORE = "no-store"
+PAGE_POLICY = "default-src 'self'; style-src 'self' 'unsafe-inline'"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".json": "application/json", ".woff2": "font/woff2",
                  ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -75,6 +78,18 @@ def feed_trade_date():
     return session_clock.to_eastern(session_clock.now_utc()).date().isoformat()
 
 
+def read_only_store():
+    """A connection that only reads: opened read-only when the WAL sidecars exist (SQLite refuses a read-only open
+    of a WAL store without them, as after a restore from backup), else a plain open that is only ever queried."""
+    file = paths.store_file()
+    if file.with_name(file.name + "-wal").exists():
+        conn = sqlite3.connect(f"file:{file}?mode=ro", uri=True, timeout=store.BUSY_TIMEOUT_SECONDS)
+    else:
+        conn = sqlite3.connect(str(file), timeout=store.BUSY_TIMEOUT_SECONDS)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def bars_document():
     """The session's 1-minute closes as JSON bytes, from a read-only store connection, rebuilt at most every 20 s."""
     with bars_lock:
@@ -82,8 +97,7 @@ def bars_document():
         fresh = time.monotonic() - bars_cache["built_at"] < BARS_CACHE_SECONDS
         if fresh and bars_cache["trade_date"] == trade_date:
             return bars_cache["body"]
-        conn = sqlite3.connect(f"file:{paths.store_file()}?mode=ro", uri=True, timeout=store.BUSY_TIMEOUT_SECONDS)
-        conn.row_factory = sqlite3.Row
+        conn = read_only_store()
         try:
             bars = [{"at": session_clock.iso_eastern(session_clock.parse_iso(bar["priced_at"])), "close": bar["close"]}
                     for bar in store.session_bars(conn, trade_date)]
@@ -95,11 +109,23 @@ def bars_document():
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    """One request: the token first, then one of the five things this server serves."""
+    """One request: the token first, then one of the five things this server serves; a crash inside is a 503 and
+    one log line, never a traceback."""
+    timeout = HANDLER_TIMEOUT_SECONDS
 
     def do_GET(self):
         started = time.monotonic()
         route = self.path.split("?", 1)[0]
+        logged = route[:LOGGED_ROUTE_CHARS]
+        try:
+            self.answer(route)
+        except Exception as failure:
+            job_log.write_line(JOB, f"error {logged} {type(failure).__name__}: {failure}")
+            self.send_plain(HTTPStatus.SERVICE_UNAVAILABLE, "Kaze: not available right now")
+        job_log.write_line(JOB, f"GET {logged} {self.status_sent} {round((time.monotonic() - started) * 1000)} ms")
+
+    def answer(self, route):
+        """Route one authorised request; the token gate comes first."""
         if not authorized(self.headers.get("Authorization")):
             self.send_plain(HTTPStatus.UNAUTHORIZED, "Kaze: sign in", {"WWW-Authenticate": 'Basic realm="Kaze"'})
         elif route == FEED_ROUTE:
@@ -115,18 +141,21 @@ class AppHandler(BaseHTTPRequestHandler):
             if file is None:
                 self.send_plain(HTTPStatus.NOT_FOUND, "not here")
             else:
-                self.send_bytes(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache")
-        job_log.write_line(JOB, f"GET {route} {self.status_sent} {round((time.monotonic() - started) * 1000)} ms")
+                self.send_bytes(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache",
+                                PAGE_POLICY if file.suffix == ".html" else None)
 
     def do_HEAD(self):
         self.do_GET()
 
-    def send_bytes(self, status, body, content_type, cache_control):
-        """Send a response with its content type, cache rule and length (HEAD sends the headers only)."""
+    def send_bytes(self, status, body, content_type, cache_control, policy=None):
+        """Send a response with its content type, cache rule, length and, for the page, its content security policy
+        (HEAD sends the headers only)."""
         self.status_sent = status.value
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", cache_control)
+        if policy:
+            self.send_header("Content-Security-Policy", policy)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
@@ -157,7 +186,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def main():
     """Serve until stopped; launchd keeps it alive."""
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), AppHandler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), AppHandler)
+    except OSError as failure:
+        raise SystemExit(f"kaze app: cannot listen on 127.0.0.1:{PORT} ({failure.strerror}); is another copy running?")
     server.daemon_threads = True
     job_log.write_line(JOB, f"serving {WEB_FOLDER} and {paths.live_feed_file()} on 127.0.0.1:{PORT}")
     try:

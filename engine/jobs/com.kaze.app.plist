@@ -13,14 +13,15 @@
     <string>$HOME/kaze/engine/jobs/run_job.sh app</string>
   </array>
 
-  <!-- The phone's web server (app/server/app_server.py): started at login, restarted whenever it exits,
-       listening on 127.0.0.1 only; the tunnel in front of it is configured outside this repo. -->
+  <!-- The phone's web server (app/server/app_server.py): started at login, restarted whenever it exits (a minute
+       apart, so a missing token or a taken port is one line a minute, not a flood), listening on 127.0.0.1 only;
+       the tunnel in front of it is configured outside this repo. -->
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>
-  <integer>5</integer>
+  <integer>60</integer>
 
   <!-- Only what Python could not catch lands here (a missing .env, an import error, a port already taken);
        the server's own access log is under KAZE_DATA/logs. -->

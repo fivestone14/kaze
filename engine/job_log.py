@@ -2,12 +2,14 @@
 # as gzip and kept 14 days. Jobs write here and nowhere else, so launchd's capture file only holds what Python missed.
 import gzip
 import shutil
+import threading
 from datetime import date, timedelta
 
 from engine import paths, session_clock
 
 KEPT_DAYS = 14
 OLDER_FOLDER = "older"
+WRITE_LOCK = threading.Lock()
 
 
 def log_file(job):
@@ -16,18 +18,20 @@ def log_file(job):
 
 
 def write_line(job, line):
-    """Append one New York-stamped line to the job's log, rotating first when the file is from before today."""
+    """Append one New York-stamped line to the job's log, rotating first when the file is from before today; one lock
+    serialises the threads of the phone's server, so a midnight rotation happens once."""
     folder = paths.logs_folder()
     folder.mkdir(parents=True, exist_ok=True)
     path = log_file(job)
     today = date.today()
-    if path.exists():
-        last_written = date.fromtimestamp(path.stat().st_mtime)
-        if last_written < today:
-            rotate(path, last_written)
-            prune_older(folder, today)
-    with open(path, "a") as handle:
-        handle.write(f"{session_clock.iso_eastern(session_clock.now_utc())} {line}\n")
+    with WRITE_LOCK:
+        if path.exists():
+            last_written = date.fromtimestamp(path.stat().st_mtime)
+            if last_written < today:
+                rotate(path, last_written)
+                prune_older(folder, today)
+        with open(path, "a") as handle:
+            handle.write(f"{session_clock.iso_eastern(session_clock.now_utc())} {line}\n")
 
 
 def rotate(path, day):

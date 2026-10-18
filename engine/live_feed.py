@@ -1,12 +1,12 @@
 # Writes the small JSON file the phone reads after every live read: the snapshot's values, each feed's status (live,
-# partial or blind) and age, the Schwab login expiry, the range forecast copied whole and the windows block (the live
-# window per channel, today's finished windows with their grades, the score); a failed job writes a failed document so
-# the phone never keeps an old file in silence. This file is the phone's whole contract with the store.
+# partial or blind) and age, the Schwab login expiry, the session's clock, the range forecast copied whole and the
+# windows block (the live window per channel with its read's own chain, today's finished windows with their grades,
+# the score); a failed job writes a failed document so the phone never keeps an old file in silence.
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 
-from engine import grade, paths, range_fit, registry, session_clock, store
+from engine import grade, mirai_files, paths, range_fit, registry, session_clock, store
 
 PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "frozen_feed": "partial",
                               "stand_in": "partial", "missing": "blind", "market_closed": "blind"}
@@ -50,10 +50,27 @@ def write_document(document):
     return path
 
 
+def session_block(day, moment):
+    """The session's clock for the phone: when this session opens and closes, the next read's cut after the moment
+    (None after the last) and the next session's open, so the phone can tell closed from late."""
+    _, half_days = mirai_files.session_calendar()
+    trading = session_clock.is_trading_day(day)
+    slots = session_clock.day_slots(day, half_days) if trading else []
+    later = [session_clock.cut_for_slot(day, slot) for slot in slots if session_clock.cut_for_slot(day, slot) > moment]
+    return for_phone({
+        "trade_date": day.isoformat(),
+        "opens_at": session_clock.session_open(day) if trading else None,
+        "closes_at": session_clock.session_close(day, half_days) if trading else None,
+        "next_read_at": later[0] if later else None,
+        "next_session_opens_at": session_clock.session_open(session_clock.next_trading_day(day)),
+    })
+
+
 def write_live_feed(snapshot, observations, feed_states, forecast):
     """Write latest.json from a snapshot's observations, feed states and forecast (None when the range step failed)."""
     values, blanks = split_values_and_blanks(observations)
     login = {short: values.pop(f"{name}|login=schwab", None) for name, short in LOGIN_FIELD_SHORT_NAMES.items()}
+    cut_at = session_clock.parse_iso(snapshot["cut_at"])
     return write_document({
         "read_id": snapshot["read_id"], "lane": snapshot["read_lane"], "slot": snapshot["scheduled_slot_eastern"],
         "origin": snapshot["row_origin"], "status": snapshot["snapshot_status"],
@@ -62,14 +79,16 @@ def write_live_feed(snapshot, observations, feed_states, forecast):
         "known_at": session_clock.iso_eastern(session_clock.parse_iso(snapshot["known_at"])),
         "feeds": {name: {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"]}
                   for name, state in feed_states.items()},
-        "login": login, "range": for_phone(forecast), "values": values, "blanks": blanks,
+        "login": login, "session": session_block(date.fromisoformat(snapshot["trade_date"]), cut_at),
+        "range": for_phone(forecast), "values": values, "blanks": blanks,
     })
 
 
 def write_failed_feed(reason):
-    """Write a latest.json that says the live read failed, with the reason and the moment."""
-    return write_document({"status": FAILED, "status_reason": reason,
-                           "failed_at": session_clock.iso_eastern(session_clock.now_utc())})
+    """Write a latest.json that says the live read failed, with the reason, the moment and the session's clock."""
+    now = session_clock.now_utc()
+    return write_document({"status": FAILED, "status_reason": reason, "failed_at": session_clock.iso_eastern(now),
+                           "session": session_block(session_clock.to_eastern(now).date(), now)})
 
 
 def failed_windows_block(failure):
@@ -119,6 +138,7 @@ def live_window(conn, day, cut_at, channel, minutes, series, live):
     move = None if live is None or price is None else live - price
     return {
         "read_id": read["read_id"], "read_at": session_clock.parse_iso(read["cut_at"]), "price": price,
+        "chain": read_chain(conn, read, base, channel, rung),
         "window_from": session_clock.parse_iso(base["grade_window_starts_at"]),
         "ends_at": session_clock.parse_iso(base["grade_window_ends_at"]), "horizon_minutes": minutes,
         "ended": cut_iso >= base["grade_window_ends_at"],
@@ -131,6 +151,43 @@ def live_window(conn, day, cut_at, channel, minutes, series, live):
         "so_far": {ENDS_INSIDE: inside_half(move, bands[registry.BAND]["half_width"]),
                    AVERAGE_INSIDE: inside_half(moves and moves["average"], bands[registry.AVERAGE_BAND]["half_width"]),
                    NEVER_LEFT: grade.stayed_inside(moves, rung)},
+    }
+
+
+def read_chain(conn, read, decision, channel, rung):
+    """How the live window's own read worked its band out, read back from that read's stored values so Sight and
+    Steps explain the same read the Read page shows: speeds, swing, stretches, fit, rung share, dials product, the
+    options check and the direction call."""
+    rows = store.decision_values(conn, decision["decision_rowid"])
+    values = store.values_by_key(rows)
+    seen = store.values_by_key(store.snapshot_observations(conn, read["snapshot_rowid"]))
+    horizon = registry.subject_key(horizon=channel)
+    dials_product = {row["value_role"]: row["value_number"] for row in rows
+                     if row["measure_name"] == "width_multiplier"
+                     and row["subject_key"] == registry.subject_key(adjustment=registry.ALL_DIALS)}
+    direction = next((row for row in rows if row["measure_name"] == "chance_up_if_moves_probability"), None)
+    end_band = registry.subject_key(band=registry.BAND, horizon=channel)
+    average_band = registry.subject_key(band=registry.AVERAGE_BAND, horizon=channel)
+    return {
+        "speed": values.get("today_typical_1_minute_move_points"),
+        "speed_fast": seen.get("speed_fast_5_minute_half_life_points"),
+        "speed_slow": seen.get("speed_slow_30_minute_half_life_points"),
+        "swing": values.get(f"typical_swing_points|{horizon}"),
+        "stretch": values.get(f"band_multiplier|{end_band}"),
+        "average_stretch": values.get(f"band_multiplier|{average_band}"),
+        "fit_sessions": values.get(f"fit_sessions_count|{horizon}"),
+        "fit_windows": values.get(f"fit_windows_count|{horizon}"),
+        "stays_inside_share": values.get(
+            f"chance_stays_inside_rung_probability|{registry.subject_key(horizon=channel, rung_points=rung)}"),
+        "dials_product": {registry.RAW_ROLE: dials_product.get(registry.RAW_ROLE),
+                          registry.APPLIED_ROLE: dials_product.get(registry.APPLIED_ROLE)},
+        "straddle": seen.get("same_day_straddle_mid_points"),
+        "minutes_left": seen.get("minutes_until_session_close"),
+        "options_swing": seen.get(f"options_implied_swing_points|{horizon}"),
+        "options_over_tape": seen.get(f"options_over_tape_swing_ratio|{horizon}"),
+        "options_check": values.get(f"options_vs_tape_check_word|{horizon}"),
+        "chance_up_if_moves": direction and direction["value_number"],
+        "trust_applied": direction and direction["trust_weight_applied_portion"],
     }
 
 

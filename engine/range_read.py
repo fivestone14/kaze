@@ -86,6 +86,15 @@ def path_moves(closes, minutes):
     return {"up": up, "down": down, "straightness": abs(up - down) / (up + down) if up + down else None}
 
 
+def options_check_word(options_over_tape):
+    """The engine's verdict on the options cross-check: agree when the two swings sit within the agree ratio of each
+    other either way, differ otherwise, None when either swing is missing."""
+    if options_over_tape is None:
+        return None
+    within = 1 / registry.OPTIONS_AGREE_RATIO <= options_over_tape <= registry.OPTIONS_AGREE_RATIO
+    return registry.OPTIONS_CHECK_AGREE if within else registry.OPTIONS_CHECK_DIFFER
+
+
 def channel_forecast(forecast, name, minutes, fits, ratios, history, weights):
     """One horizon's swing, multipliers, bands, never-leaves share, options check, dials, window and status."""
     speed, minutes_left, price = forecast["speed"], forecast["minutes_left"], forecast["price"]
@@ -113,6 +122,7 @@ def channel_forecast(forecast, name, minutes, fits, ratios, history, weights):
         "stays_inside_share": range_fit.never_leaves_share(history, name, registry.RUNG_POINTS[name], swing)
         if history else None,
         "options_swing": options_swing, "options_over_tape": options_over_tape,
+        "options_check": options_check_word(options_over_tape),
         "clipped": window["clipped"], "ends_at": window["ends_at"],
         "in_fed_window": raw[registry.FED_DIAL] != width_dials.NO_EFFECT,
         **{RATIO_MEASURE[key]: ratio[key] for key in RATIO_MEASURE},
@@ -250,6 +260,7 @@ def value_rows(decision, forecast, name, variant):
         add("band_half_width_points", edges["half_width"], subject, band_blank)
         add("band_low_points", edges["low"], subject, band_blank)
         add("band_high_points", edges["high"], subject, band_blank)
+    add("options_vs_tape_check_word", channel["options_check"], horizon, registry.NOT_PRICEABLE_REASON)
     add("chance_stays_inside_rung_probability", channel["stays_inside_share"],
         registry.subject_key(horizon=name, rung_points=channel["rung_points"]), band_blank,
         subject_points=float(channel["rung_points"]))
