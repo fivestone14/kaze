@@ -50,6 +50,24 @@ DECISION_OK, DECISION_BLIND, DECISION_CLIPPED = "ok", "blind", "clipped"
 DECISION_STATUSES = (DECISION_OK, "late", "failed", "refused", DECISION_BLIND, DECISION_CLIPPED, "held_grey")
 VALUE_ROLE, RAW_ROLE, APPLIED_ROLE = "value", "raw", "applied"
 VALUE_ROLES = (VALUE_ROLE, "as_answered", "after_checks", RAW_ROLE, APPLIED_ROLE, "shown")
+# Outcome word lists (the RESULTS pillar): what happened after a read and how a decision graded.
+MARKET_WINDOW_KIND, FORECAST_GRADE_KIND = "market_window", "forecast_grade"
+OUTCOME_KINDS = (MARKET_WINDOW_KIND, "session_result", "level_approach_reaction", "event_reaction",
+                 FORECAST_GRADE_KIND, "chance_grade", "would_have_earned", "order_fill", "position_marks",
+                 "realized_result")
+LABEL_RESOLVED, LABEL_PARTIAL_BARS, LABEL_MISSING_BARS, LABEL_UNPRICEABLE = ("resolved", "partial_bars",
+                                                                             "missing_bars", "unpriceable")
+LABEL_STATUSES = (LABEL_RESOLVED, LABEL_PARTIAL_BARS, LABEL_MISSING_BARS, LABEL_UNPRICEABLE, "not_yet_resolved")
+LABELS_THAT_COUNT = (LABEL_RESOLVED, LABEL_PARTIAL_BARS)
+VALUE_STATUS_OK = "ok"
+VALUE_STATUSES = (VALUE_STATUS_OK, "missing_bars", "stale_quote", "not_applicable")
+VALUE_STATUS_FOR_BLANK = {"bars_missing": "missing_bars"}
+BLANK_VALUE_STATUS = "not_applicable"
+BARS_MISSING_REASON, NOT_APPLICABLE_REASON = "bars_missing", "not_applicable"
+NO_READ_PRICE_REASON = "no_read_price"
+BAND_SIDES = ("upper", "lower")
+# The three grade words, one home for the scoreboard, the phone block and the data map.
+GRADE_WORDS = ("ends_inside", "average_inside", "never_left")
 SPX_SYMBOL = "$SPX"
 SUBJECT_KINDS = (
     "adjustment", "band", "bucket", "builder", "cited_order", "claim", "consumer", "exit_rule", "expiry",
@@ -99,6 +117,7 @@ BAND = "80"
 AVERAGE_BAND = "average_80"
 BAND_PRICE_MEASURE = {BAND: "end_price", AVERAGE_BAND: "average_price"}
 GRADE_START_RULE = "at_read"
+GRADE_START_RULE_VERSION = "1"
 FIT_LOOKBACK_SESSIONS = 60
 FULL_SESSION_RULE = "every_minute_held"
 FIT_FIRST_WINDOW_MINUTE = 30
@@ -109,6 +128,7 @@ STRETCH_RECIPE = {band: f"speed_half_life_{SPEED_HALF_LIFE_MINUTES}_close_change
 FED_DECISION_EVENT_KINDS = ("FOMC",)
 FED_OWNER_RULE_MULTIPLIER = 2.6
 OWNER_RULE_VARIANT = "owner_rule"
+BASE_VARIANT = "base"
 OWNER_RULE_DIAL = "fed_window"
 WIDTH_DIALS = (OWNER_RULE_DIAL, "fast_over_slow")
 DIRECTION_UNTIL_EARNED = 0.5
@@ -122,6 +142,22 @@ RANGE_RECIPE_PARAMETERS = {
     "fit_first_window_minute": FIT_FIRST_WINDOW_MINUTE, "fit_window_step_minutes": FIT_WINDOW_STEP_MINUTES,
     "stretch_recipe": STRETCH_RECIPE, "fed_owner_rule_multiplier": FED_OWNER_RULE_MULTIPLIER,
     "width_dials": WIDTH_DIALS, "direction_until_earned": DIRECTION_UNTIL_EARNED,
+}
+# Phase 3: the rules every outcome and grade is stored under; a changed rule is a new version, never an edit.
+WINDOW_RULE = ("window_from_bars", "1")
+GRADE_RULE = ("band_grade", "1")
+GRADE_START_RULE_PARAMETERS = {"start_price": "the read's last close", "start_bar": "the bar that close came from",
+                               "window_from": "the end of the read's minute", "offset_minutes": 0}
+WINDOW_RULE_PARAMETERS = {
+    "bars": "collect_market_prices by minute, live rows preferred", "end_price": "close of the window's last bar",
+    "average_price": "mean of the window's closes", "high_low": "the window's bar highs and lows",
+    "rung_points": sorted(set(RUNG_POINTS.values())), "end_bar_missing": LABEL_MISSING_BARS,
+    "settled_after": "the session close",
+}
+GRADE_RULE_PARAMETERS = {
+    "ends_inside": "|end move| <= end band half-width", "average_inside": "|average move| <= average band half-width",
+    "never_left": "farthest excursion < the channel's rung", "band_miss": "points past the edge, signed, 0 inside",
+    "band_used": "excursion on each side over the end band half-width, floored at 0", "grade_start": GRADE_START_RULE,
 }
 
 
@@ -147,6 +183,11 @@ def measure_row(name, meaning, unit, value_type, lane=None, group=None, subjects
 PUSH_LANE_DEFAULTS = dict(lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0)
 NOT_WRITTEN_YET = dict(written_since=None)
 DECISION_VALUE = dict(table="reads_decision_values", pillar="reads")
+OUTCOME_VALUE = dict(table="results_outcome_values", pillar="results")
+NO_END_BAR = f"{BARS_MISSING_REASON} when the window's last bar never reached the store"
+NO_START = f"{NOT_APPLICABLE_REASON} when the read had no price; " + NO_END_BAR
+NO_WINDOW_MOVE = f"{NOT_APPLICABLE_REASON} when the read had no price to measure from; " + NO_END_BAR
+NO_GRADE = "the band's own reason when the decision was blind; " + NO_WINDOW_MOVE
 # A measure born on the snapshot (or the fit) and copied onto every decision that used it.
 BOTH_TABLES = "collect_observations|reads_decision_values"
 FIT_BLANK_MEANING = f"{NO_FIT_REASON} when no fit was known at the cut"
@@ -396,29 +437,42 @@ MEASURES = [
     measure_row("chance_up_if_moves_probability", "chance the move is up, given it moves", "probability", "number",
                 group="direction_call", low=0, high=1, lane="push", overlap="direction_all_sources", leans="leans_up",
                 neutral=0.5, **DECISION_VALUE),
-    # Phase 3: outcomes and grades (results_outcome_values)
-    measure_row("grade_start_price_points", "price the grade measured from", "points", "number", "id", "grade_start",
-                table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
+    # Phase 3: what happened in each decision window (market_window outcomes) and the grade start every grade carries
+    measure_row("grade_start_price_points", "price the grade measured from: the read's last close", "points", "number",
+                "id", "grade_start", blank=NO_START, **POINTS_RANGE, **OUTCOME_VALUE),
     measure_row("grade_start_bar_at", "start of the 1-minute bar the grade measured from", "at", "moment", "id",
-                "grade_start", table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
+                "grade_start", blank=NO_START, **OUTCOME_VALUE),
     measure_row("grade_start_rule_name", "which grading rule set the start", "word", "word", "id", "grade_start",
-                table="results_outcome_values", pillar="results", words=(GRADE_START_RULE, "read_plus_7_minutes"),
-                **NOT_WRITTEN_YET),
-    measure_row("end_price_points", "price at the window's end", "points", "number", "label", "window_result",
-                table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
+                words=(GRADE_START_RULE, "read_plus_7_minutes"), **OUTCOME_VALUE),
+    measure_row("end_price_points", "close of the window's last bar", "points", "number", "label", "window_result",
+                blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
+    measure_row("average_price_points", "mean of the window's 1-minute closes", "points", "number", "label",
+                "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
+    measure_row("high_price_points", "highest bar high inside the window", "points", "number", "label",
+                "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
+    measure_row("low_price_points", "lowest bar low inside the window", "points", "number", "label", "window_result",
+                blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
     measure_row("end_move_points", "end price minus grade-start price", "points", "number", "label", "window_result",
-                table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
+                blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("average_move_points", "average price over the window minus grade-start price", "points", "number",
-                "label", "window_result", table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
+                "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("high_move_points", "window high minus grade-start price", "points", "number", "label",
-                "window_result", table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
+                "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("low_move_points", "window low minus grade-start price", "points", "number", "label", "window_result",
-                table="results_outcome_values", pillar="results", **NOT_WRITTEN_YET),
-    measure_row("was_inside_band", "the end price landed inside the band", "yes_no", "yes_no", "label", "band_grade",
-                table="results_outcome_values", pillar="results", subjects="band", **NOT_WRITTEN_YET),
+                blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row("minutes_covered_count", "window minutes with a bar held in the store", "count", "whole_number",
+                "health", "window_coverage", blank=NO_END_BAR, low=0, high=390, **OUTCOME_VALUE),
     measure_row("did_leave_rung", "price touched either edge of the rung during the window", "yes_no", "yes_no",
-                "label", "rung_grade", table="results_outcome_values", pillar="results", subjects="rung_points",
-                **NOT_WRITTEN_YET),
+                "label", "rung_grade", subjects="rung_points", blank=NO_GRADE, **OUTCOME_VALUE),
+    # Phase 3: how each range decision graded (forecast_grade outcomes)
+    measure_row("was_inside_band", "the band's price (end or average) landed inside the band", "yes_no", "yes_no",
+                "label", "band_grade", subjects="band", blank=NO_GRADE, **OUTCOME_VALUE),
+    measure_row("band_miss_points", "points the band's price landed past the edge: above the top positive, below the "
+                "bottom negative, 0 inside", "points", "number", "label", "band_grade", subjects="band",
+                blank=NO_GRADE, **OUTCOME_VALUE),
+    measure_row("band_used_portion", "farthest excursion on this side over the end band's half-width; above 1 broke "
+                "out", "ratio", "number", "label", "band_grade", subjects="band|side", blank=NO_GRADE, low=0,
+                **OUTCOME_VALUE),
     measure_row("official_close_points", "the session's official close", "points", "number", "label", "window_result",
                 table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
 ]
@@ -478,6 +532,12 @@ def component_rows():
                               RANGE_RECIPE_PARAMETERS, version=RANGE_ENGINE_VERSION))
     rows.extend(component_row("read_lane", name, f"reads every {cadence} minutes", {"cadence_minutes": cadence})
                 for name, cadence in session_clock.READ_LANES.items())
+    rows.append(component_row("grade_start_rule", GRADE_START_RULE, "the grade starts at the read's price and minute",
+                              GRADE_START_RULE_PARAMETERS, version=GRADE_START_RULE_VERSION))
+    rows.append(component_row("outcome_rule", WINDOW_RULE[0], "what happened in a decision window, from the store's "
+                              "bars", WINDOW_RULE_PARAMETERS, version=WINDOW_RULE[1]))
+    rows.append(component_row("grade_rule", GRADE_RULE[0], "a range decision graded against its bands and rung",
+                              GRADE_RULE_PARAMETERS, version=GRADE_RULE[1]))
     return rows
 
 

@@ -45,15 +45,24 @@ def swing_points(speed_now, minutes):
     return speed_now * math.sqrt(minutes)
 
 
+def window_facts(closes, highs, lows, first, last):
+    """End close, average close, high, low and minutes held over the minutes first..last; None without the end bar."""
+    if last >= closes.size or np.isnan(closes[last]):
+        return None
+    held = slice(first, last + 1)
+    return {"end": float(closes[last]), "average": float(np.nanmean(closes[held])),
+            "high": float(np.nanmax(highs[held])), "low": float(np.nanmin(lows[held])),
+            "minutes": int(np.count_nonzero(~np.isnan(closes[held])))}
+
+
 def window_moves(closes, highs, lows, start, last):
     """|end move|, |average move| and farthest excursion from the start close to the last minute; None at a gap."""
-    if np.isnan(closes[start]) or np.isnan(closes[last]):
+    facts = window_facts(closes, highs, lows, start + 1, last)
+    if facts is None or np.isnan(closes[start]):
         return None
-    ahead = slice(start + 1, last + 1)
     start_close = closes[start]
-    return {registry.BAND: abs(closes[last] - start_close),
-            registry.AVERAGE_BAND: abs(np.nanmean(closes[ahead]) - start_close),
-            FARTHEST: max(np.nanmax(highs[ahead]) - start_close, start_close - np.nanmin(lows[ahead]))}
+    return {registry.BAND: abs(facts["end"] - start_close), registry.AVERAGE_BAND: abs(facts["average"] - start_close),
+            FARTHEST: max(facts["high"] - start_close, start_close - facts["low"])}
 
 
 # ---- History: the prior sessions' windows and the multipliers fitted on them ---------------------------------------

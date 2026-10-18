@@ -11,7 +11,7 @@ from datetime import date
 
 from engine import paths, registry, session_clock
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_SECONDS = 30
 VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
 STORED_DECIMALS = 6
@@ -21,7 +21,7 @@ TOLERATED_PARITY_FEEDS = ("options_tape", "options_scan")
 INSERT_VERBS = {"fail": "INSERT", "replace": "INSERT OR REPLACE", "ignore": "INSERT OR IGNORE"}
 TABLE_COLUMNS = {}
 ORIGIN_PREFERENCE_SQL = "CASE row_origin WHEN 'live_frozen' THEN 0 WHEN 'live_rebuilt' THEN 1 ELSE 2 END"
-MEASURE_ROW_TABLES = ("collect_observations", "reads_decision_values")
+MEASURE_ROW_TABLES = ("collect_observations", "reads_decision_values", "results_outcome_values")
 
 
 # ---- Schema: every table's columns rendered from the registry's word lists, numbered steps, open and seed ----------
@@ -126,6 +126,31 @@ TABLE_COLUMNS_SQL = {
     blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
     trust_weight_applied_portion REAL,
     {ONE_VALUE_OR_BLANK_SQL}""",
+    "results_outcomes": f"""
+    outcome_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+    storage_scope TEXT NOT NULL CHECK (storage_scope IN ({check_list(registry.STORAGE_SCOPES)})),
+    outcome_kind TEXT NOT NULL CHECK (outcome_kind IN ({check_list(registry.OUTCOME_KINDS)})),
+    anchor_id TEXT NOT NULL, judged_decision_id TEXT REFERENCES reads_decisions (decision_id),
+    market_outcome_id TEXT REFERENCES results_outcomes (outcome_id), read_id TEXT, horizon_name TEXT,
+    graded_price_measure TEXT, grade_start_rule_version TEXT, window_starts_at TEXT NOT NULL,
+    window_ends_at TEXT NOT NULL, was_window_clipped INTEGER NOT NULL,
+    outcome_rule_name TEXT NOT NULL, outcome_rule_version TEXT NOT NULL,
+    label_status TEXT NOT NULL CHECK (label_status IN ({check_list(registry.LABEL_STATUSES)})),
+    label_status_reason TEXT, label_resolved_at TEXT NOT NULL, does_count_toward_skill INTEGER NOT NULL,
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
+    build_attempt_number INTEGER NOT NULL, builder_code_commit TEXT, written_at TEXT NOT NULL""",
+    "results_outcome_values": f"""
+    outcome_value_id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES results_outcomes (outcome_id),
+    trade_date TEXT NOT NULL,
+    storage_scope TEXT NOT NULL CHECK (storage_scope IN ({check_list(registry.STORAGE_SCOPES)})),
+    outcome_kind TEXT NOT NULL CHECK (outcome_kind IN ({check_list(registry.OUTCOME_KINDS)})),
+    measure_name TEXT NOT NULL, measure_version INTEGER NOT NULL, subject_key TEXT NOT NULL, subject_points REAL,
+    {VALUE_COLUMNS_SQL}
+    value_status TEXT NOT NULL CHECK (value_status IN ({check_list(registry.VALUE_STATUSES)})),
+    blank_reason TEXT CHECK (blank_reason IS NULL OR blank_reason IN ({check_list(registry.BLANK_REASONS)})),
+    label_resolved_at TEXT NOT NULL,
+    row_origin TEXT NOT NULL CHECK (row_origin IN ({check_list(registry.ROW_ORIGINS)})),
+    {ONE_VALUE_OR_BLANK_SQL}""",
 }
 TABLE_INDEXES_SQL = {
     "collect_snapshots": ("CREATE INDEX ix_snapshots_day_cut ON collect_snapshots (trade_date, cut_at)",
@@ -143,6 +168,12 @@ TABLE_INDEXES_SQL = {
     "reads_decision_values": (
         "CREATE INDEX ix_decision_values_decision ON reads_decision_values (decision_id)",
         "CREATE INDEX ix_decision_values_measure_day ON reads_decision_values (measure_name, trade_date)"),
+    "results_outcomes": ("CREATE INDEX ix_outcomes_day_kind ON results_outcomes (trade_date, outcome_kind)",
+                         "CREATE INDEX ix_outcomes_anchor ON results_outcomes (anchor_id)",
+                         "CREATE INDEX ix_outcomes_judged ON results_outcomes (judged_decision_id)"),
+    "results_outcome_values": (
+        "CREATE INDEX ix_outcome_values_outcome ON results_outcome_values (outcome_id)",
+        "CREATE INDEX ix_outcome_values_measure_day ON results_outcome_values (measure_name, trade_date)"),
 }
 
 
@@ -178,27 +209,38 @@ def rebuild_table(conn, table):
     create_indexes(conn, table)
 
 
+PHASE_1_TABLES = ("registry_measures", "registry_components", "collect_snapshots", "collect_observations",
+                  "collect_market_prices", "collect_calendar_and_events")
+PHASE_2_TABLES = ("reads_decisions", "reads_decision_values")
+PHASE_3_TABLES = ("results_outcomes", "results_outcome_values")
+
+
 def schema_step_1(conn):
     """Phase 1: the registry and the COLLECT pillar."""
-    for table in ("registry_measures", "registry_components", "collect_snapshots", "collect_observations",
-                  "collect_market_prices", "collect_calendar_and_events"):
+    for table in PHASE_1_TABLES:
         create_table(conn, table)
 
 
 def schema_step_2(conn):
     """Phase 2: the READS pillar's decision tables; the spine rebuilt so a nightly_history_fit cut is allowed."""
     rebuild_table(conn, "collect_snapshots")
-    create_table(conn, "reads_decisions")
-    create_table(conn, "reads_decision_values")
+    for table in PHASE_2_TABLES:
+        create_table(conn, table)
 
 
 def schema_step_3(conn):
-    """Phase 2 fix round: every table brought to the code's text (the spine gains the thin status), rows kept."""
-    for table in TABLE_COLUMNS_SQL:
+    """Phase 2 fix round: the tables so far brought to the code's text (the spine gains the thin status), rows kept."""
+    for table in PHASE_1_TABLES + PHASE_2_TABLES:
         rebuild_table(conn, table)
 
 
-SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3}
+def schema_step_4(conn):
+    """Phase 3: the RESULTS pillar's outcome tables (what happened in each window and how each decision graded)."""
+    for table in PHASE_3_TABLES:
+        create_table(conn, table)
+
+
+SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4}
 
 
 def open_store():
@@ -318,6 +360,20 @@ def decision_value_id_for(value):
             f"{value['value_role']}")
 
 
+def outcome_id_for(outcome):
+    """The outcome id: kind, anchor, judged decision, horizon, price measure, grade start, rule, origin, attempt."""
+    return (f"{outcome['outcome_kind']}|{outcome['anchor_id']}|{outcome['judged_decision_id'] or '-'}|"
+            f"{outcome['horizon_name'] or '-'}|{outcome['graded_price_measure'] or '-'}|"
+            f"{outcome['grade_start_rule_version'] or '-'}|"
+            f"{outcome['outcome_rule_name']}@{outcome['outcome_rule_version']}|-|"
+            f"{outcome['row_origin']}|b{outcome['build_attempt_number']}")
+
+
+def outcome_value_id_for(value):
+    """The outcome value id, built from its outcome, measure, version and subject."""
+    return f"{value['outcome_id']}|{value['measure_name']}|{value['measure_version']}|{value['subject_key']}"
+
+
 def base_snapshot_row(snapshot_kind, cut_at_iso, trade_date, row_origin, written_at_iso,
                       builder=(registry.BUILDER_NAME, registry.BUILDER_VERSION)):
     """A collect_snapshots row with the fields every kind shares and the code commit; the caller adds slot and lane."""
@@ -404,6 +460,46 @@ def decision_value_row(decision, measure_name, value, subject_key="whole", subje
         "trust_weight_applied_portion": trust_weight, **placed_value(measure, value),
     }
     row["decision_value_id"] = decision_value_id_for(row)
+    return row
+
+
+def outcome_row(outcome_kind, decision, rule, written_at_iso, label_status, reason=None, **fields):
+    """Shape a results_outcomes row on a decision's window: anchored on its read, resolved when it was written."""
+    rule_name, rule_version = rule
+    starts_at, ends_at = decision["grade_window_starts_at"], decision["grade_window_ends_at"]
+    window_seconds = (session_clock.parse_iso(ends_at) - session_clock.parse_iso(starts_at)).total_seconds()
+    row = {
+        "outcome_kind": outcome_kind, "trade_date": decision["trade_date"], "storage_scope": decision["storage_scope"],
+        "anchor_id": decision["snapshot_id"], "judged_decision_id": None, "market_outcome_id": None,
+        "read_id": decision["read_id"], "horizon_name": decision["horizon_name"], "graded_price_measure": None,
+        "grade_start_rule_version": decision["grade_start_rule_version"], "window_starts_at": starts_at,
+        "window_ends_at": ends_at,
+        "was_window_clipped": int(window_seconds < decision["horizon_minutes"] * session_clock.BAR_LENGTH_SECONDS),
+        "outcome_rule_name": rule_name, "outcome_rule_version": rule_version, "label_status": label_status,
+        "label_status_reason": reason, "label_resolved_at": written_at_iso,
+        "does_count_toward_skill": int(label_status in registry.LABELS_THAT_COUNT),
+        "row_origin": decision["row_origin"], "build_attempt_number": 1, "builder_code_commit": code_head()[0],
+        "written_at": written_at_iso, **fields,
+    }
+    row["outcome_id"] = outcome_id_for(row)
+    return row
+
+
+def outcome_value_row(outcome, measure_name, value, subject_key="whole", subject_points=None, blank_reason=None):
+    """Shape one results_outcome_values row for an outcome, putting the value in the registry's column."""
+    measure = registered_measure(measure_name)
+    blank = blank_reason if value is None else None
+    row = {
+        "outcome_id": outcome["outcome_id"], "trade_date": outcome["trade_date"],
+        "storage_scope": outcome["storage_scope"], "outcome_kind": outcome["outcome_kind"],
+        "measure_name": measure_name, "measure_version": measure["measure_version"], "subject_key": subject_key,
+        "subject_points": subject_points, "blank_reason": blank,
+        "value_status": registry.VALUE_STATUS_OK if value is not None
+        else registry.VALUE_STATUS_FOR_BLANK.get(blank, registry.BLANK_VALUE_STATUS),
+        "label_resolved_at": outcome["label_resolved_at"], "row_origin": outcome["row_origin"],
+        **placed_value(measure, value),
+    }
+    row["outcome_value_id"] = outcome_value_id_for(row)
     return row
 
 
@@ -507,6 +603,9 @@ def write_snapshot(conn, snapshot, observations, decisions=(), values=()):
     snapshot["newest_input_market_at"] = max(newest) if newest else None
     with conn:
         if snapshot["row_origin"] == "history_rebuilt":
+            conn.execute("DELETE FROM results_outcome_values WHERE outcome_id IN "
+                         "(SELECT outcome_id FROM results_outcomes WHERE anchor_id = ?)", (snapshot["snapshot_id"],))
+            conn.execute("DELETE FROM results_outcomes WHERE anchor_id = ?", (snapshot["snapshot_id"],))
             conn.execute("DELETE FROM reads_decision_values WHERE decision_id IN "
                          "(SELECT decision_id FROM reads_decisions WHERE snapshot_id = ?)", (snapshot["snapshot_id"],))
             conn.execute("DELETE FROM reads_decisions WHERE snapshot_id = ?", (snapshot["snapshot_id"],))
@@ -537,6 +636,15 @@ def write_calendar_facts(conn, facts):
     """Add calendar facts the store has not seen; an earlier copy of the same fact keeps its first known_at."""
     with conn:
         return insert_rows(conn, "collect_calendar_and_events", facts, on_conflict="ignore")
+
+
+def write_outcomes(conn, outcomes, values):
+    """Check and write a window's outcome and its grades with their values in one transaction; never replaces."""
+    for value in values:
+        check_measure_value(value)
+    with conn:
+        insert_rows(conn, "results_outcomes", list(outcomes))
+        insert_rows(conn, "results_outcome_values", list(values))
 
 
 # ---- Queries: calendar, snapshots, bars, fits ----------------------------------------------------------------------
@@ -576,7 +684,7 @@ def snapshot_exists(conn, snapshot_id):
 
 
 FIRST_BUILT_LIVE_READS_SQL = """
-    SELECT s.snapshot_id, s.cut_at, s.trade_date, s.source_files_json_text FROM collect_snapshots s
+    SELECT s.* FROM collect_snapshots s
     WHERE s.snapshot_kind = 'read' AND s.row_origin IN ('live_frozen', 'live_rebuilt') AND s.snapshot_status != 'missed'
       AND s.build_attempt_number = (SELECT MIN(t.build_attempt_number) FROM collect_snapshots t
                                     WHERE t.cut_at = s.cut_at AND t.snapshot_kind = 'read'
@@ -614,9 +722,30 @@ def days_with_live_and_rebuilt_reads(conn):
     return [row["trade_date"] for row in rows]
 
 
+def newest_live_read(conn, trade_date, cut_at_iso, read_lane=None):
+    """The session's newest first-built live read at or before the cut, in one lane or any, or None."""
+    return conn.execute(
+        f"SELECT * FROM ({FIRST_BUILT_LIVE_READS_SQL}) WHERE trade_date = ? AND cut_at <= ? "
+        "AND (? IS NULL OR read_lane = ?) ORDER BY cut_at DESC LIMIT 1",
+        (trade_date, cut_at_iso, read_lane, read_lane)).fetchone()
+
+
+def session_has_reads(conn, trade_date):
+    """True once the session holds any read snapshot, live or rebuilt."""
+    return conn.execute("SELECT 1 FROM collect_snapshots WHERE trade_date = ? AND snapshot_kind = 'read' "
+                        "AND snapshot_status != 'missed' LIMIT 1", (trade_date,)).fetchone() is not None
+
+
 def snapshot_observations(conn, snapshot_id):
     """A snapshot's observation rows."""
     return conn.execute("SELECT * FROM collect_observations WHERE snapshot_id = ?", (snapshot_id,)).fetchall()
+
+
+def read_price_at(conn, snapshot_id):
+    """A read's price and the start of the bar it came from (its spx_price_points observation), or (None, None)."""
+    row = conn.execute("SELECT value_number, newest_input_market_at FROM collect_observations "
+                       "WHERE snapshot_id = ? AND measure_name = 'spx_price_points'", (snapshot_id,)).fetchone()
+    return (row["value_number"], row["newest_input_market_at"]) if row else (None, None)
 
 
 def stored_bar_times(conn, trade_date, row_origin):
@@ -683,6 +812,86 @@ def sessions_served_by_a_fit(conn):
     rows = conn.execute("SELECT DISTINCT trade_date FROM collect_snapshots WHERE snapshot_kind = ?",
                         (registry.FIT_SNAPSHOT_KIND,))
     return {row["trade_date"] for row in rows}
+
+
+# ---- Queries: decisions, windows, grades and the scoreboard -------------------------------------------------------
+
+def decisions_with_closed_windows(conn, trade_date, cut_at_iso, decision_kind):
+    """The session's decisions of a kind whose window ended by the cut and that no grade judges yet, read by read."""
+    return conn.execute(
+        "SELECT * FROM reads_decisions d WHERE trade_date = ? AND decision_kind = ? AND grade_window_ends_at <= ? "
+        "AND NOT EXISTS (SELECT 1 FROM results_outcomes o WHERE o.judged_decision_id = d.decision_id) "
+        "ORDER BY cut_at, snapshot_id, horizon_minutes, variant_name",
+        (trade_date, decision_kind, cut_at_iso)).fetchall()
+
+
+def decisions_of_read(conn, snapshot_id, decision_kind, horizon_name):
+    """A read's decisions of one kind and horizon, the base decision first, then its variants."""
+    return conn.execute("SELECT * FROM reads_decisions WHERE snapshot_id = ? AND decision_kind = ? "
+                        "AND horizon_name = ? ORDER BY variant_name IS NOT NULL, variant_name",
+                        (snapshot_id, decision_kind, horizon_name)).fetchall()
+
+
+def decision_values(conn, decision_id):
+    """A decision's value rows."""
+    return conn.execute("SELECT * FROM reads_decision_values WHERE decision_id = ?", (decision_id,)).fetchall()
+
+
+def outcome_values(conn, outcome_id):
+    """An outcome's value rows."""
+    return conn.execute("SELECT * FROM results_outcome_values WHERE outcome_id = ?", (outcome_id,)).fetchall()
+
+
+def live_windows_of_day(conn, trade_date, horizon_name, read_lane, grade_rule):
+    """The session's first-built live market windows in a lane and horizon, newest first, with the base grade's ids."""
+    rule_name, rule_version = grade_rule
+    return conn.execute(
+        "SELECT w.*, s.cut_at AS read_cut_at, g.outcome_id AS grade_outcome_id, "
+        " g.judged_decision_id AS graded_decision_id FROM results_outcomes w "
+        f"JOIN ({FIRST_BUILT_LIVE_READS_SQL}) s ON s.snapshot_id = w.anchor_id "
+        "LEFT JOIN results_outcomes g ON g.market_outcome_id = w.outcome_id AND g.outcome_kind = ? "
+        " AND g.outcome_rule_name = ? AND g.outcome_rule_version = ? AND g.judged_decision_id IN "
+        " (SELECT decision_id FROM reads_decisions WHERE snapshot_id = w.anchor_id AND variant_name IS NULL) "
+        "WHERE w.trade_date = ? AND w.outcome_kind = ? AND w.horizon_name = ? AND s.read_lane = ? "
+        "ORDER BY w.window_starts_at DESC",
+        (registry.FORECAST_GRADE_KIND, rule_name, rule_version, trade_date, registry.MARKET_WINDOW_KIND, horizon_name,
+         read_lane)).fetchall()
+
+
+def graded_sessions(conn, grade_rule):
+    """Every session with a grade under the rule, oldest first."""
+    rows = conn.execute("SELECT DISTINCT trade_date FROM results_outcomes WHERE outcome_kind = ? "
+                        "AND outcome_rule_name = ? AND outcome_rule_version = ? ORDER BY trade_date",
+                        (registry.FORECAST_GRADE_KIND, *grade_rule)).fetchall()
+    return [row["trade_date"] for row in rows]
+
+
+GRADE_WORD_SQL = {
+    "ends_inside": "v.measure_name = 'was_inside_band' AND v.subject_key = ? AND v.value_bool = 1",
+    "average_inside": "v.measure_name = 'was_inside_band' AND v.subject_key = ? AND v.value_bool = 1",
+    "never_left": "v.measure_name = 'did_leave_rung' AND v.value_bool = 0",
+}
+
+
+def grade_counts(conn, first_day, last_day, grade_rule, by_session=True):
+    """Grade counts per session (or pooled), run kind, channel, variant and clipped slice: yes and graded per word."""
+    bands = {"ends_inside": registry.subject_key(band=registry.BAND),
+             "average_inside": registry.subject_key(band=registry.AVERAGE_BAND)}
+    counted, parameters = [], ([] if by_session else [last_day]) + [registry.BASE_VARIANT]
+    for word, yes_sql in GRADE_WORD_SQL.items():
+        graded_sql = yes_sql.rsplit(" AND ", 1)[0] + " AND v.value_bool IS NOT NULL"
+        counted.append(f"SUM({yes_sql}) AS {word}, SUM({graded_sql}) AS {word}_graded")
+        parameters.extend([bands[word]] * 2 if word in bands else [])
+    parameters.extend([registry.FORECAST_GRADE_KIND, *grade_rule, registry.GRADE_START_RULE, first_day, last_day])
+    return conn.execute(
+        f"SELECT {'o.trade_date' if by_session else '? AS trade_date'}, d.run_kind, d.horizon_name, "
+        f"COALESCE(d.variant_name, ?) AS variant, o.was_window_clipped AS clipped, {', '.join(counted)} "
+        "FROM results_outcomes o JOIN reads_decisions d ON d.decision_id = o.judged_decision_id "
+        "JOIN results_outcome_values v ON v.outcome_id = o.outcome_id "
+        "WHERE o.outcome_kind = ? AND o.outcome_rule_name = ? AND o.outcome_rule_version = ? "
+        " AND o.grade_start_rule_version = ? AND o.trade_date BETWEEN ? AND ? "
+        " AND (d.row_origin = 'history_rebuilt' OR d.snapshot_id IN "
+        f" (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL}))) GROUP BY 1, 2, 3, 4, 5", parameters).fetchall()
 
 
 # ---- Parity between live and rebuilt reads ------------------------------------------------------------------------

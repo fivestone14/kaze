@@ -11,12 +11,14 @@ and direction stays 50/50 until a reading earns a say.
 
 | Folder | What it holds |
 |---|---|
-| `engine/` | The store, the registry, the collector (Mirai's files in), the range engine (`range_fit.py` fits the history, `range_read.py` works one read out), the live feed and the read job |
+| `engine/` | The store, the registry, the collector (Mirai's files in), the range engine (`range_fit.py` fits the history, `range_read.py` works one read out), the grader (`grade.py`: outcomes, grades, the scoreboard), the live feed and the read job |
 | `engine/jobs/` | The two launchd jobs, their runner and installer |
 | `docs/` | The data map |
 | `checks/` | Git hooks that block secrets from ever reaching this repo |
 
-Grading, the earned dials, the Android app and the print pack arrive with their own phases.
+Every window is graded from the read (the band sits on the read price; did the end land inside, did the running
+average, did price ever leave +/-X) and the scoreboard keeps live and replayed grades apart. The earned dials, the
+Android app and the print pack arrive with their own phases.
 
 ## Setup
 
@@ -32,7 +34,9 @@ Private data lives outside this repo, in the folder `KAZE_DATA` points to.
     python3 -m engine.read_job --at "2026-10-16 12:35:59"       # rebuild one past moment (New York time)
     python3 -m engine.read_job --rebuild-day 2026-10-16         # rebuild every 5-minute read of a session
     python3 -m engine.read_job --backfill-bars                  # load every session's SPX bars Mirai holds (one-off)
-    python3 -m engine.read_job --nightly                        # missed slots, history fits, rebuild, parity, health line
+    python3 -m engine.read_job --nightly                        # missed slots, fits, rebuild, grades, parity, health line
+    python3 -m engine.read_job --grade-history                  # rebuild sessions without reads, grade every open window
+    python3 -m engine.read_job --scoreboard [2026-10-16]        # grades per session and channel, and the last 20 sessions
     python3 -m engine.read_job --pass-test                      # print the band's walk-forward coverage test
     engine/jobs/install_jobs.sh                                 # install the two launchd jobs
 

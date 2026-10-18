@@ -1,18 +1,20 @@
-# The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, live feed) and the nightly
-# (fits, rebuild, parity); by hand it rebuilds a moment or a session, backfills bars, or prints the range pass test.
+# The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, grades, live feed) and
+# the nightly (fits, rebuild, grades, parity); by hand it rebuilds a moment or a session, grades the stored history,
+# backfills bars, or prints the scoreboard or the range pass test.
 import argparse
 import sys
 import traceback
 from datetime import date, timedelta
 
-from engine import collect, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry, session_clock
-from engine import store
+from engine import collect, grade, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry
+from engine import session_clock, store
 
 BAR_WAIT_SECONDS = 100
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
 JOB_READ, JOB_NIGHTLY, JOB_REBUILD = "read", "nightly", "rebuild"
 RANGE_FAILED = "range_failed"
+WHOLE_SCOREBOARD = "every graded session"
 
 
 def main():
@@ -24,10 +26,14 @@ def main():
     parser.add_argument("--nightly", action="store_true",
                         help="missed slots, closing bars, history fits, rebuild, parity, health line")
     parser.add_argument("--nightly-if-due", action="store_true", help="the nightly, only in the 17:00 New York hour")
+    parser.add_argument("--grade-history", action="store_true",
+                        help="rebuild every stored session that has no reads, then grade every window still open")
+    parser.add_argument("--scoreboard", nargs="?", const=WHOLE_SCOREBOARD, metavar="YYYY-MM-DD",
+                        help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
-    if args.at or args.rebuild_day or args.backfill_bars or args.pass_test:
+    if args.at or args.rebuild_day or args.backfill_bars or args.grade_history or args.scoreboard or args.pass_test:
         job = JOB_REBUILD
     try:
         if args.nightly_if_due:
@@ -40,6 +46,10 @@ def main():
             run_rebuild_day(date.fromisoformat(args.rebuild_day))
         elif args.backfill_bars:
             run_backfill_bars()
+        elif args.grade_history:
+            run_grade_history()
+        elif args.scoreboard:
+            run_scoreboard(None if args.scoreboard == WHOLE_SCOREBOARD else args.scoreboard)
         elif args.pass_test:
             run_pass_test()
         else:
@@ -76,13 +86,28 @@ def run_live():
         conn, cut_at, "live_frozen", written_at, slot, slot_status, calendar, half_days,
         login=mirai_files.read_login_state(), bar_arrived=bar_arrived)
     forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at, JOB_READ)
+    graded = grade_closed_windows(conn, day, cut_at, session_clock.now_utc(), forecast)
     live_feed.write_live_feed(snapshot, observations, feed_states, forecast)
     reason = f", {snapshot['snapshot_status_reason']}" if snapshot["snapshot_status_reason"] else ""
     build = f"{snapshot['row_origin']} b{snapshot['build_attempt_number']}"
     log(JOB_READ, f"live read {slot} ({snapshot['read_lane']}, {build}) "
                   f"cut {session_clock.iso_eastern(cut_at)}: {len(observations)} observations, {new_bars} new bars, "
-                  f"status {snapshot['snapshot_status']}{reason}, {band_summary(forecast)}, "
+                  f"status {snapshot['snapshot_status']}{reason}, {band_summary(forecast)}, {graded}, "
                   f"built in {snapshot['build_seconds']} s")
+
+
+def grade_closed_windows(conn, day, cut_at, written_at, forecast):
+    """After a live read: close the day's ended windows and put the windows block on the forecast; a crash is logged."""
+    try:
+        windows, grades = grade.close_windows(conn, day, cut_at, written_at)
+        if forecast is not None:
+            forecast[grade.WINDOWS] = grade.phone_block(conn, day, cut_at)
+    except Exception:
+        log(JOB_READ, "grading step FAILED\n" + traceback.format_exc().rstrip())
+        if forecast is not None:
+            forecast[grade.WINDOWS] = None
+        return "grading step failed"
+    return f"{windows} windows closed ({grades} grades)"
 
 
 def write_read(conn, snapshot, observations, bars, cut_at, job):
@@ -146,12 +171,15 @@ def run_rebuild_moment(cut_at):
     calendar, half_days = mirai_files.session_calendar()
     conn = store.open_store()
     snapshot, forecast, new_bars = rebuild_read(conn, cut_at, session_clock.slot_for_cut(cut_at), calendar, half_days)
+    now = session_clock.now_utc()
+    windows, grades = grade.close_windows(conn, day, now, now)
     log(JOB_REBUILD, f"rebuilt read at {session_clock.iso_eastern(cut_at)}: {new_bars} new bars, "
-                     f"status {snapshot['snapshot_status']}, {band_summary(forecast)}, id {snapshot['snapshot_id']}")
+                     f"status {snapshot['snapshot_status']}, {band_summary(forecast)}, {windows} windows closed "
+                     f"({grades} grades), id {snapshot['snapshot_id']}")
 
 
 def run_rebuild_day(day):
-    """Rebuild every scheduled read of a session, then store the whole session's bars."""
+    """Rebuild every scheduled read of a session with the whole session's bars, then grade its ended windows."""
     if not session_clock.is_trading_day(day):
         log(JOB_REBUILD, f"{day} is not a trading day; nothing rebuilt")
         return
@@ -159,7 +187,27 @@ def run_rebuild_day(day):
     conn = store.open_store()
     bars_total = write_session_bars(conn, day, "history_rebuilt", half_days, session_clock.now_utc())
     reads, read_bars = rebuild_session(conn, day, calendar, half_days)
-    log(JOB_REBUILD, f"rebuilt {day}: {reads} reads, {bars_total + read_bars} new bars")
+    now = session_clock.now_utc()
+    windows, grades = grade.close_windows(conn, day, now, now)
+    log(JOB_REBUILD, f"rebuilt {day}: {reads} reads, {bars_total + read_bars} new bars, {windows} windows closed "
+                     f"({grades} grades)")
+
+
+def run_grade_history():
+    """Rebuild every stored session that has no reads yet, then close every window of every session still open."""
+    calendar, half_days = mirai_files.session_calendar()
+    conn = store.open_store()
+    now = session_clock.now_utc()
+    for trade_date, _ in store.sessions_with_bars(conn):
+        day = date.fromisoformat(trade_date)
+        reads = 0 if store.session_has_reads(conn, trade_date) else rebuild_session(conn, day, calendar, half_days)[0]
+        windows, grades = grade.close_windows(conn, day, now, now)
+        log(JOB_REBUILD, f"graded {day}: {reads} reads rebuilt, {windows} windows closed ({grades} grades)")
+
+
+def run_scoreboard(day):
+    """Print the scoreboard for one session (or every graded session) and the pooled last 20 sessions."""
+    print("\n".join(grade.scoreboard_lines(store.open_store(), day)))
 
 
 def rebuild_session(conn, day, calendar, half_days):
@@ -218,6 +266,7 @@ def run_nightly():
     next_session = session_clock.next_trading_day(today)
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
+    windows, grades = grade.close_windows(conn, today, written_at, written_at)
     summaries = []
     for day in store.days_with_live_and_rebuilt_reads(conn):
         compared, mismatches, tolerated = store.parity_result(conn, day)
@@ -233,7 +282,7 @@ def run_nightly():
     parity = "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
     fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
-                     f"{rebuilt_reads} reads rebuilt, "
+                     f"{rebuilt_reads} reads rebuilt, {windows} windows closed ({grades} grades), "
                      f"{live_bars} live bars ({session_bars} {bars_origin} bars added at the close); {fits}; "
                      f"parity: {parity}")
 

@@ -10,7 +10,7 @@ blank, or either path is not a folder.
 
 The target is the four-pillar store of 2026-10-16: fifteen tables defined by two registries, every value stored long as
 measure x subject x value x blank reason x known_at. `engine/store.py` creates only the tables and columns the phases
-so far write (schema version 3, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
+so far write (schema version 4, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
 word lists); each phase adds its tables through the next numbered schema step, applied in one transaction when a store
 is opened, and a step that changes a word list rebuilds the table in place (rows kept, children still pointing at it).
 At every open the store refuses to run if any table's text differs from the code's, so a fresh store and a migrated
@@ -27,11 +27,14 @@ one are identical. The full design, for reference, is:
 | Train | `train_feature_set_columns`, `train_examples`, `train_splits` | the frozen recipe of a model row, the model-ready rows, the walk-forward day roles | later |
 | Reads | `reads_decisions`, `reads_decision_values` | one decision header (for now a `range_forecast` per channel) and every number, word or id inside it | Phase 2 (the columns the range engine fills) |
 | Reads | `reads_trade_legs` | the legs of a trade-shaped decision | later |
-| Results | `results_outcomes`, `results_outcome_values`, `results_evaluations` | what happened after each read, how each decision graded, the trust weights earned | Phase 3 |
+| Results | `results_outcomes`, `results_outcome_values` | one outcome header (a `market_window`: what happened after a read over one horizon; a `forecast_grade`: how one decision graded against it) and every fact or grade inside it | Phase 3 (the columns the window and grade rules fill) |
+| Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | later (Phase 4's trust ledger) |
 
-Two columns are Kaze's own additions to the design's `collect_snapshots`: `newest_input_market_at` (the newest input
-any observation of the cut used; the store refuses it past `cut_at`) and `source_files_json_text` (the byte length of
-each source file at a live read, so a rebuild of that cut reads only what the live read could have seen).
+Three columns are Kaze's own additions to the design: on `collect_snapshots`, `newest_input_market_at` (the newest
+input any observation of the cut used; the store refuses it past `cut_at`) and `source_files_json_text` (the byte
+length of each source file at a live read, so a rebuild of that cut reads only what the live read could have seen); on
+`results_outcomes`, `was_window_clipped` (the window was capped at the close, so the scoreboard can split that slice
+without reading the decision).
 
 ## Rules every row follows
 
@@ -48,11 +51,13 @@ each source file at a live read, so a rebuild of that cut reads only what the li
   `known_at = written_at` (rule `written_at`) for every origin until a worst live lag has been measured. Bars seen in
   their own slot are known 62 seconds after the bar ends (`bar_end_plus_62_seconds`); bars that turn up later are
   stamped with the moment they were written (`written_at`); backfilled sessions with the file's change time
-  (`file_modified_at`).
+  (`file_modified_at`). An outcome's `label_resolved_at` is the moment it was written, and it is never written before
+  the window's last bar is in the store, so a grade written today for a July window says today.
 - **Origins.** `row_origin` is `live_frozen` (written during the session, first attempt), `live_rebuilt` (a second run
   at the same live cut; the first is never deleted) or `history_rebuilt` (built later from Mirai's files as they stood
-  at the cut; re-running replaces it, decisions included). The nightly compares `live_frozen` with `history_rebuilt`.
-  A decision carries its snapshot's origin and `run_kind` `live` or `history_replay`.
+  at the cut; re-running replaces it, decisions and their outcomes and grades included). The nightly compares
+  `live_frozen` with `history_rebuilt`. A decision carries its snapshot's origin and `run_kind` `live` or
+  `history_replay`; its outcome and grade carry the same origin, so live and replay grades never mix in a count.
 - **Calendar as known.** Every read first copies Mirai's calendar into `collect_calendar_and_events`, then reads the
   day's events from the store with `known_at <= cut_at`, one row per fact (its newest version known at the cut, so a
   new `built` stamp on the file never doubles a count). The very first copy stamps its facts with the calendar's own
@@ -103,9 +108,11 @@ list. By group:
 | range readings (Phase 2, from the store's bars) | `today_typical_1_minute_move_points` (speed: recency-weighted mean absolute 1-minute close change, half-life 15 minutes), `speed_fast_5_minute_half_life_points`, `speed_slow_30_minute_half_life_points`, `speed_fast_over_slow_ratio` (a weight-0 reading), `typical_swing_points` (horizon = 5_minutes, 30_minutes, 60_minutes; speed x the square root of the minutes), `options_implied_swing_points` and `options_over_tape_swing_ratio` (horizon; the straddle left x the square root of window minutes over minutes left, against the tape swing over the same minutes; a check never added in), `path_up_points`, `path_down_points`, `trend_straightness_ratio` (window_minutes = 15, 30, 60; weight-0 push readings) |
 | nightly check | `reads_compared_count`, `values_mismatched_count`, `tolerated_mismatches_count`, `rebuild_identical_portion` |
 | nightly history fit (Phase 2) | `band_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon), `fit_sessions_count`, `fit_windows_count`, `average_price_shrink_ratio` (horizon) |
+| market window (Phase 3, `results_outcome_values`) | `grade_start_price_points`, `grade_start_bar_at`, `grade_start_rule_name`, `end_price_points`, `average_price_points`, `high_price_points`, `low_price_points`, `end_move_points`, `average_move_points`, `high_move_points`, `low_move_points`, `minutes_covered_count`, `did_leave_rung` (rung_points = 5, 10, 15) |
+| forecast grade (Phase 3, `results_outcome_values`) | the three grade-start measures again, `was_inside_band` and `band_miss_points` (band = 80, average_80), `did_leave_rung` (the channel's own rung), `band_used_portion` (band = 80; side = upper, lower) |
 
-Registered now and written from Phase 3 on: the outcome values including the grade start (`grade_start_price_points`,
-`grade_start_bar_at`, `grade_start_rule_name`). Rows with a blank `available_since_trade_date` are these.
+Registered now and written later: `official_close_points` (a `session_result` outcome). Rows with a blank
+`available_since_trade_date` are these.
 
 Every measure's lane and fact group are checked when the registry loads: one fact may reach the pull lane (how far)
 or the push lane (which way), never both.
@@ -189,9 +196,60 @@ average band passes (0.7950, 0.7690-0.8237); the 60-minute end band (0.8089, 0.7
 (0.8126, 0.7764-0.8506) and the 60-minute average band (0.8071, 0.7607-0.8516) hold 0.80 but cross the 0.85 ceiling
 and are not yet decidable until more test days exist. Nothing is tuned to the test.
 
-**Storage.** A decision value row costs about 1 KB and an observation about 670 B with their indexes; a trading day
-writes about 77 x 132 observations and 77 x 66 decision values live and the same again rebuilt, about 24 MB a day.
-There is no retention rule yet; Phase 3 decides one for `history_rebuilt` rows.
+## Outcomes and grades (Phase 3)
+
+Every range decision window is closed from the store's bars and every decision graded against its own bands, under
+rules the registry names and versions (`registry_components`: grade-start rule `at_read@1`, outcome rule
+`window_from_bars@1`, grade rule `band_grade@1`); a changed rule is a new version and new rows, never an edit.
+
+- **Grade from the read.** The grade-start rule is `at_read`: the start price is the read's last close (the
+  snapshot's `spx_price_points`, the price the band is centred on), the start bar is the bar that close came from, and
+  the window runs from the end of the read's minute for the horizon, capped at the close (the decision's own
+  `grade_window_starts_at` to `grade_window_ends_at`; 12:36:00 to 13:06:00 for the 12:35 read). Every outcome and
+  grade stores the start price, its bar and the rule name (`grade_start_price_points`, `grade_start_bar_at`,
+  `grade_start_rule_name`) beside the rule word in `grade_start_rule_version`.
+- **The window** (`results_outcomes.outcome_kind = market_window`, one per read and horizon, anchored on the read's
+  snapshot, `judged_decision_id` blank): the bars whose minute lies inside the window (12:36 to 13:05, live rows
+  preferred, `engine/range_fit.py` `window_facts`, the same measurement the history fit and the pass test use through
+  `window_moves`). End price = the close of the window's last bar; average = the mean of the window's closes; high and
+  low = the bars' highs and lows; the four moves are signed from the start price; `did_leave_rung` per rung (5, 10, 15
+  points) says whether the farthest excursion on either side reached the rung; `minutes_covered_count` counts the
+  minutes held (a clipped window holds fewer). `was_window_clipped` is set when the window is shorter than its
+  horizon. `label_status` is `resolved`, `partial_bars` (the end bar held but a minute inside is missing; the reason
+  says `<held>_of_<wanted>_minutes_held`), `missing_bars` (no end bar; every value blank `bars_missing`) or
+  `unpriceable` (the read had no price; the moves blank `not_applicable`). Only the first two count toward skill.
+- **The grade** (`outcome_kind = forecast_grade`, one per decision, so the owner-rule variant is graded beside its
+  base; `judged_decision_id` the decision, `market_outcome_id` its window, `graded_price_measure` copied from the
+  decision): `was_inside_band` for band `80` (|end move| <= the end band's half-width) and `average_80` (|average move|
+  <= the average band's half-width), `band_miss_points` per band (points past the edge, signed with the move, 0
+  inside), `did_leave_rung` for the channel's rung (5 / 10 / 15 points for 5 / 30 / 60 minutes; `never_left` is its
+  no), `band_used_portion` (band 80; `upper` = high move over the half-width, `lower` = the drop over it, floored at
+  0; above 1 broke out) and the three grade-start values. A blind decision's grade is `unpriceable` with the
+  decision's reason and blank values carrying the band's blank reason. Half-widths are the decision's stored values,
+  so the owner-rule grade uses the x2.6 band.
+- **When.** Each live read closes every window of the day whose end is at or before its cut and whose last bar the
+  store holds (the 12:35 read's 30-minute window ends 13:06:00, so the 13:10 read, cut 13:10:59, closes it; a
+  5-minute window closes two reads later). A window whose last bar has not landed waits. The nightly closes anything
+  left for the session (after its bar write, so a bar Mirai filled in late is seen) and settles a window whose end bar
+  is still missing as `missing_bars`; `--rebuild-day` and `--at` close the rebuilt day's windows the same way;
+  `--grade-history` rebuilds every stored session that has no reads and closes every window still open on every
+  session. The window and its grades are written in one transaction, never replaced except with their rebuilt read.
+- **Ids.** `<kind>|<anchor snapshot_id>|<judged decision_id or ->|<horizon>|<graded price or ->|<grade start rule>|
+  <outcome rule>@<version>|-|<row_origin>|b<attempt>`; a value is `<outcome_id>|<measure>|<version>|<subject>`.
+
+**Scoreboard** (`--scoreboard [YYYY-MM-DD]`, `engine/grade.py` over `store.grade_counts`). Per session, run kind
+(`live` or `history_replay`, never pooled), channel, variant (`base` or `owner_rule`) and slice (`unclipped` or
+`clipped`): ends inside, average inside and never left as yes/graded with the share, only grades under the current
+rule versions and the `at_read` start, only first-built live reads; then the same pooled over the last 20 graded
+sessions. Every 5-minute read is graded, so a day's 30-minute share is the pass test's per-day number (2026-10-16:
+end30 57/77 = 0.740 both ways); the phone's score counts only the headline-lane windows it lists.
+
+**Storage** (measured 2026-10-18 on the real store: 74 sessions of bars, all 74 rebuilt and graded, 1,439 MB after a
+WAL checkpoint, 810 MB of table pages and the rest indexes). Per session of 77 reads: 9,908 observations (3.8 MB of
+table pages), 5,082 decision values (2.8 MB), 231 windows and 231 grades with 5,775 outcome values (3.9 MB; an outcome
+value's id carries the outcome id, which carries the decision id), about 19.5 MB in all with indexes. A live day
+writes that once live and once again rebuilt by the nightly, about 39 MB a day, so 100 sessions of live running add
+about 4 GB. There is no retention rule yet; Will decides one at about 100 sessions.
 
 ## Feeds (what Kaze reads from Mirai)
 
@@ -226,11 +284,13 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 
 | Job | When | Writes |
 |---|---|---|
-| `python3 -m engine.read_job` (launchd `com.kaze.read`) | every 5 minutes; builds only at the 09:35-15:55 slots on trading days, else one log line | one `live_frozen` snapshot (or `live_rebuilt` on a rerun) with its observations and range readings, calendar facts, new bars, three `range_forecast` decisions (plus owner-rule variants in a Fed window) with their values, `live/latest.json` |
-| `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, and its range decisions |
-| `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, plus the whole session's bars |
+| `python3 -m engine.read_job` (launchd `com.kaze.read`) | every 5 minutes; builds only at the 09:35-15:55 slots on trading days, else one log line | one `live_frozen` snapshot (or `live_rebuilt` on a rerun) with its observations and range readings, calendar facts, new bars, three `range_forecast` decisions (plus owner-rule variants in a Fed window) with their values; then the outcome and grades of every window of the day that ended by the cut; then `live/latest.json` (a crash in the grading step is logged, the read stays stored and the feed carries `windows: null`) |
+| `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, its range decisions, and the outcomes and grades of every window of that day still open |
+| `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, the whole session's bars, then the session's outcomes and grades (the earlier rebuilt ones replaced with their reads) |
 | `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
-| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15 and acts only in the 17:00 New York hour) | 17:15 New York | `missed` rows for unserved slots, the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt), a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists), the session rebuilt, one `nightly_check` snapshot per session with both live and rebuilt reads, and the health line |
+| `python3 -m engine.read_job --grade-history` | by hand | every stored session that has no reads rebuilt as `--rebuild-day` would, then the outcomes and grades of every window still open on every session (one log line per session) |
+| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15 and acts only in the 17:00 New York hour) | 17:15 New York | `missed` rows for unserved slots, the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt), a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists), the session rebuilt, the outcomes and grades of every window of the session still open (live and rebuilt; an end bar still missing settles as `missing_bars`), one `nightly_check` snapshot per session with both live and rebuilt reads, and the health line |
+| `python3 -m engine.read_job --scoreboard [YYYY-MM-DD]` | by hand | nothing; prints the grades per session, run kind, channel, variant and clipped slice (one session, or every graded one) and the pooled last 20 sessions |
 | `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
 
 The `range` block of `latest.json` is the forecast copied whole (floats at six decimals, moments on the New York clock):
@@ -240,7 +300,30 @@ The `range` block of `latest.json` is the forecast copied whole (floats at six d
 `channels` keyed `5_minutes` / `30_minutes` / `60_minutes`, each with `minutes`, `swing`, `stretch`, `average_stretch`,
 `fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_over_tape`, `clipped`,
 `ends_at`, `in_fed_window`, `dials` (`fed_window`, `fast_over_slow`: `raw`, `applied`), `bands` (`80` and `average_80`:
-`half_width`, `low`, `high`), `owner_rule_bands` (the same at x2.6; null outside a Fed window), `status` and `reason`.
+`half_width`, `low`, `high`), `owner_rule_bands` (the same at x2.6; null outside a Fed window), `status` and `reason`;
+and, from Phase 3, `windows` (built by `engine/grade.py` from the store after the read and its grades are written;
+null when that step crashed):
+
+- `current`, keyed `5_minutes` / `30_minutes` / `60_minutes`: the window the phone tracks live for that channel, the
+  newest live headline-lane read (:05 / :35) for 30 and 60 minutes and the newest live read for 5 minutes. Each
+  carries `read_id`, `read_at`, `price` (the read price the band and the grade start sit on), `window_from`,
+  `ends_at`, `minutes`, `clipped`, `status`, `reason`, `rung_points`, `bands` and `owner_rule_bands` (as above, the
+  stored decision values), `minutes_in` (bars held since `window_from`), `live` (`price` = the newest close, `gap`
+  from the read price, `average` = the running mean of the closes since the window start, `average_gap`, `high`,
+  `low`, `farthest_up`, `farthest_down`; null before the first bar of the window) and `so_far` (`ends_inside`: the
+  live gap inside the end band's half-width; `average_inside`: the average gap inside the average band's;
+  `never_left`: neither side reached the rung yet). Null when the day has no live read yet for that lane.
+- `finished`: today's closed windows of the headline channel (30 minutes) from the headline-lane reads, newest first,
+  what the Read page draws as past-read boxes, gauges and the list: `read_id`, `read_at`, `price`, `window_from`,
+  `ends_at`, `clipped`, `minutes` (covered), `status` (the window's label status), `half_width` and
+  `average_half_width` (the base decision's bands), `high`, `low`, `farthest_up`, `farthest_down`, `end`, `end_move`,
+  `average`, `average_move`, `grades` (`ends_inside`, `average_inside`, `never_left`: true / false, null when
+  ungraded) and `band_used` (`upper`, `lower`, the end band's share used on each side; above 1 broke out).
+- `score`: over the `finished` list, per grade word (`ends_inside`, `average_inside`, `never_left`), `yes` and `of`
+  (graded).
+
+The grade words, the window kinds and every list behind them live in `engine/registry.py` (`GRADE_WORDS`,
+`OUTCOME_KINDS`, `LABEL_STATUSES`, `VALUE_STATUSES`, `BAND_SIDES`).
 
 `engine/jobs/install_jobs.sh` writes the two plists into `~/Library/LaunchAgents` with this repo's real path and
 boots them (bootout, wait, bootstrap, enable).
