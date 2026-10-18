@@ -6,7 +6,9 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from engine import registry, session_clock, store, width_dials
+from engine import session_clock
+from engine.range import width_dials
+from engine.store import registry, store
 
 FARTHEST = "farthest"
 WINDOW_MOVES = (registry.BAND, registry.AVERAGE_BAND, FARTHEST)

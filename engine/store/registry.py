@@ -6,7 +6,8 @@ import json
 import re
 from collections import defaultdict
 
-from engine import mirai_files, session_clock
+from engine import session_clock
+from engine.collect import mirai_files
 
 REGISTRY_VERSION = "1"
 # One date for the whole registry: when these rows were defined and the first session Kaze served (2026-10-16);

@@ -2,7 +2,9 @@
 # the session is settled), writes the window's outcome and one grade per decision, and prints the scoreboard.
 import itertools
 
-from engine import range_fit, range_read, registry, session_clock, store
+from engine import session_clock
+from engine.range import range_fit, range_read
+from engine.store import registry, store
 
 SCOREBOARD_SESSIONS = 20
 CLIPPED_SLICE_WORD = {0: "unclipped", 1: "clipped"}

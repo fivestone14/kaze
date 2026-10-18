@@ -1,7 +1,7 @@
-# The SQLite store: opening a file at the code's version (engine/store_schema.py holds the tables), the row shapers,
-# and every write and read. The writer refuses unregistered measures, blanks without a reason, wrong value columns,
-# out-of-range numbers and inputs newer than the cut; a read's snapshot, observations and decisions land in one
-# transaction, as do a window's outcome and its grades.
+# The SQLite store: opening a file at the code's version (engine/store/store_schema.py holds the tables), the row
+# shapers, and every write and read. The writer refuses unregistered measures, blanks without a reason, wrong value
+# columns, out-of-range numbers and inputs newer than the cut; a read's snapshot, observations and decisions land in
+# one transaction, as do a window's outcome and its grades.
 import functools
 import hashlib
 import json
@@ -9,7 +9,8 @@ import sqlite3
 import subprocess
 from datetime import date
 
-from engine import paths, registry, session_clock, store_schema
+from engine import paths, session_clock
+from engine.store import registry, store_schema
 
 BUSY_TIMEOUT_SECONDS = 30
 STORED_DECIMALS = 6

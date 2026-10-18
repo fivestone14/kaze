@@ -9,7 +9,7 @@ blank, or either path is not a folder.
 ## The design and what is built of it
 
 The target is the four-pillar store of 2026-10-16: fifteen tables defined by two registries, every value stored long as
-measure x subject x value x blank reason x known_at. `engine/store.py` creates only the tables and columns the phases
+measure x subject x value x blank reason x known_at. `engine/store/store.py` creates only the tables and columns the phases
 so far write (schema version 9, kept by hand with `NOT NULL` on keys and `CHECK` lists rendered from the registry's
 word lists); each phase adds its tables through the next numbered schema step, applied in one transaction when a store
 is opened, and a step that changes a word list rebuilds the table in place (rows kept, children still pointing at it).
@@ -18,7 +18,7 @@ one are identical. The full design, for reference, is:
 
 | Pillar | Table | What one row is | Built |
 |---|---|---|---|
-| Registry | `registry_measures` | one measure Kaze may store: name, plain meaning, unit, lane, the fact it carries, subjects, source feed, blank rule | Phase 1; seeded from `engine/registry.py` on every open (a name dropped from the code is dropped from the table, refused while rows still use it) |
+| Registry | `registry_measures` | one measure Kaze may store: name, plain meaning, unit, lane, the fact it carries, subjects, source feed, blank rule | Phase 1; seeded from `engine/store/registry.py` on every open (a name dropped from the code is dropped from the table, refused while rows still use it) |
 | Registry | `registry_components` | one versioned thing: a feed, the Schwab login, the collector, the range engine, a read lane, a reading, a dial, a trust test | Phase 1; since Phase 4 a component whose parameters or meaning changed under the same version gets the next `revision_number` and earlier revisions and retired names stay, so the ledger's rows can be read against the parameters of their night |
 | Collect | `collect_snapshots` | one cut: a read at a moment, a nightly check, or a nightly history fit, with its slot, lane, origin, attempt, builder commit, source-file byte lengths, health counts, content hash | Phase 1; steps 2 and 3 rebuilt it for the `nightly_history_fit` kind and the `thin` status |
 | Collect | `collect_observations` | one measure x subject at one cut, with its feed's status and age at the cut | Phase 1 |
@@ -30,7 +30,7 @@ one are identical. The full design, for reference, is:
 | Results | `results_outcomes`, `results_outcome_values` | one outcome header (a `market_window`: what happened after a read over one horizon; a `forecast_grade`: how one decision graded against it) and every fact or grade inside it | Phase 3 (the columns the window and grade rules fill) |
 | Results | `results_evaluations` | the trust weights earned and the skill judgements made over many results | Phase 4 (the trust ledger; schema step 7, which also renamed the stored `fast_over_slow` dial `acceleration`; steps 8 and 9 rebuilt it for the `held` and `held_down` verdicts) |
 
-The table text lives in `engine/store_schema.py`; `engine/store.py` shapes, checks, writes and reads rows. Since
+The table text lives in `engine/store/store_schema.py`; `engine/store/store.py` shapes, checks, writes and reads rows. Since
 schema step 5 the three header tables (`collect_snapshots`, `reads_decisions`, `results_outcomes`) carry an integer
 rowid primary key beside their design text id (unique), and the three long value tables (`collect_observations`,
 `reads_decision_values`, `results_outcome_values`) hang off them by that rowid with one unique index on the design's
@@ -105,7 +105,7 @@ runs on that session's own day; a hand `--nightly` on a later day never marks a 
 
 ## What a read stores
 
-One observation per measure and subject; the registry (`registry_measures`, built from `engine/registry.py`) is the
+One observation per measure and subject; the registry (`registry_measures`, built from `engine/store/registry.py`) is the
 list. By group:
 
 | Group | Measures |
@@ -137,9 +137,9 @@ or the push lane (which way), never both.
 
 ## The range forecast (Phase 2)
 
-The recipe is the verified worked-out sheet of 2026-10-16 12:35:59; its fixed numbers live in `engine/registry.py`
+The recipe is the verified worked-out sheet of 2026-10-16 12:35:59; its fixed numbers live in `engine/store/registry.py`
 (the `range_engine` component row carries them) and the 12:35 read reproduces the sheet to six decimals. Bars are read
-by minute of the session (`engine/range_fit.py`, `minute_series`): a missing minute is a gap, so a change across it is
+by minute of the session (`engine/range/range_fit.py`, `minute_series`): a missing minute is a gap, so a change across it is
 left out of the speed, a window starting or ending on it is skipped, and the path windows count real minutes.
 
 1. **Speed** (today) = the recency-weighted mean of |1-minute close change| over the session's bars up to the cut,
@@ -167,7 +167,7 @@ left out of the speed, a window starting or ending on it is skipped, and the pat
    over the same window minutes as `options_over_tape_swing_ratio`; shown, never added in. On a clipped window both
    swings cover the minutes to the close, so the ratio compares like with like.
 7. **Dials** (`width_multiplier`, subject `adjustment`, roles `raw` and `applied`; the list and order is
-   `registry.WIDTH_DIALS`, the code `engine/width_dials.py`): each dial's raw value is measured on every read and
+   `registry.WIDTH_DIALS`, the code `engine/range/width_dials.py`): each dial's raw value is measured on every read and
    its applied value is 1 + weight x (raw - 1), where the weight is the one the trust ledger holds for that dial and
    channel (none yet, so every applied value is 1.00). The band's half-width is swing x stretch x the product of the
    applied dials other than the Fed held under the cap, x the Fed dial's applied value on top (the Fed dial sits
@@ -243,7 +243,7 @@ rules the registry names and versions (`registry_components`: grade-start rule `
   (`grade_start_price_points`, `grade_start_bar_at`, `grade_start_rule_name`).
 - **The window** (`results_outcomes.outcome_kind = market_window`, one per read and horizon, anchored on the read's
   snapshot, `judged_decision_id` blank): the bars whose minute lies inside the window (12:36 to 13:05, live rows
-  preferred, `engine/range_fit.py` `window_facts`, the same measurement the history fit and the pass test use through
+  preferred, `engine/range/range_fit.py` `window_facts`, the same measurement the history fit and the pass test use through
   `window_moves`). End price = the close of the window's last bar; average = the mean of the window's closes; high and
   low = the bars' highs and lows; the four moves are signed from the start price; `stayed_inside_rung` per rung (5,
   10, 15 points) says whether the farthest excursion on both sides stayed short of the rung; `minutes_covered_count`
@@ -274,7 +274,7 @@ rules the registry names and versions (`registry_components`: grade-start rule `
   <outcome rule>@<v>|-|<row_origin>|b<attempt>` (`at_read@1`, `window_from_bars@1`, `band_grade@1`); a value row has
   no stored id, its design id being `<outcome_id>|<measure>|<version>|<subject>`.
 
-**Scoreboard** (`--scoreboard [YYYY-MM-DD]`, `engine/grade.py` over `store.grade_counts`). Per session, run kind
+**Scoreboard** (`--scoreboard [YYYY-MM-DD]`, `engine/grade/grade.py` over `store.grade_counts`). Per session, run kind
 (`live` or `history_replay`, never pooled), channel, variant (`base` or `owner_rule`) and slice (`unclipped` or
 `clipped`): ends inside, average inside and never left as yes/graded with the share, only grades under the current
 rule versions (`band_grade@1`, start `at_read@1`), only first-built live reads; then the same pooled over the last 20
@@ -289,7 +289,7 @@ counts the windows its finished list holds.
 Everything here starts at zero weight. A reading or dial changes a number on the phone only after the trust ledger has
 written it a weight, and the ledger writes one only from live graded windows under a test fixed in advance.
 
-**Push readings** (which way; `engine/push_read.py`). Each read turns inputs already on its snapshot into a value in
+**Push readings** (which way; `engine/range/push_read.py`). Each read turns inputs already on its snapshot into a value in
 words (`push_reading_text`) and a lean (`push_lean_probability`): the chance that the move is up if price moves, were
 the reading trusted, 0 to 1. Share readings lean by their share; signed readings lean by a smooth squash, 0.5 + 0.2 x
 tanh(value / scale), so they never lean past 0.3 or 0.7 (the scales are in `registry.LEAN_SCALE`):
@@ -315,7 +315,7 @@ the readings with a lean, the trusts scaled to sum to at most 1 (`direction_all_
 0.5 and the phone says `coin flip until earned`. Direction is a coin flip on every input tested so far, so none of
 these is expected to earn weight soon; they are on the board so the ledger can say so from live data.
 
-**Width dials** (`registry.WIDTH_DIALS`, in the ledger's scoring order, `engine/width_dials.py`), each stored per
+**Width dials** (`registry.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`), each stored per
 read per channel with a raw and an applied value (`width_multiplier`, subject `adjustment`), applied = 1 + weight x
 (raw - 1), weight 0 today:
 
@@ -339,7 +339,7 @@ such window); `width_cap_multiplier` the history's 95% mark over its 80% mark (2
 which the product of the dials other than the Fed is held under. With every weight 0 the band's multiplier is 1.00
 and every Phase 2 and 3 number stands; the raw product is still stored (`all_dials`, raw 1.042 at 12:35).
 
-**The trust ledger** (`results_evaluations`, `engine/trust.py`) is written by the nightly after the session's windows
+**The trust ledger** (`results_evaluations`, `engine/grade/trust.py`) is written by the nightly after the session's windows
 are settled, for the next session. One row per judged thing x channel x metric x slice (138 rows a night). The
 columns: `evaluation_id` is the run (`trust_ledger|<data-through day>|<judge>@<version>`), `evaluation_row_id` the run
 plus the judged component, channel, slice and metric; `evaluation_kind` is `trust_weight` (the weight row) or
@@ -450,21 +450,21 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | `nightly_done.txt` | the session the nightly last finished (the once-per-session rule reads it) | the nightly job |
 | `backup_in_progress/` | where a backup copy is made, checked and gzipped before it moves, finished, to the backup folder; empty between nightlies | the nightly job |
 | `backups/kaze-<session>.sqlite.gz` (or the same under `KAZE_BACKUP_DIR` when `.env` sets it) | the last 5 nightly copies of the store: `VACUUM INTO` a dated file, `integrity_check` on it, gzipped, then moved in whole; older copies go only after the new one passed | the nightly job |
-| `logs/older/<day>/*.gz` | the logs of earlier days, kept 14 days | `engine/job_log.py` when a job first writes on a new day |
+| `logs/older/<day>/*.gz` | the logs of earlier days, kept 14 days | `engine/jobs/job_log.py` when a job first writes on a new day |
 | `/tmp/com.kaze.read.launchd.log`, `/tmp/com.kaze.nightly.launchd.log`, `/tmp/com.kaze.app.launchd.log` | only what Python could not catch (a missing `.env`, an import error, a port already taken) | launchd |
 
 ## Who writes what, and when
 
 | Job | When | Writes |
 |---|---|---|
-| `python3 -m engine.read_job` (launchd `com.kaze.read`) | every 5 minutes; builds only at the 09:35-15:55 slots on trading days, else one log line | one `live_frozen` snapshot (or `live_rebuilt` on a rerun) with its observations and range readings, calendar facts, new bars, three `range_forecast` decisions (plus owner-rule variants in a Fed window) with their values; then the outcome and grades of every window of the day that ended by the cut with all its bars held; then `live/latest.json` (a crash in the grading step is logged, the stored read's `snapshot_status_reason` gains `grade_failed`, the feed's `status_reason` says so and its `windows` block is `{status: failed, reason}`) |
-| `python3 -m engine.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, its range decisions, and the outcomes and grades of every window of that day ended and still open |
-| `python3 -m engine.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, the whole session's bars, then the session's outcomes and grades (the earlier rebuilt ones replaced with their reads); on a fresh store this is how a past session gets its grades |
-| `python3 -m engine.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
-| `python3 -m engine.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once per session, on the first launch from 17:00 New York on when `nightly_done.txt` does not name the latest session, so a box asleep at 17:15 catches up at 18:15 and a weekend or holiday launch does nothing; a hand `--nightly` is refused with one line while the session is open and is a no-op once the session is done) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); the trust ledger for the next session; one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, the ledger, parity, the backup file); `nightly_done.txt` |
-| `python3 -m engine.read_job --scoreboard [YYYY-MM-DD]` | by hand | nothing; prints the grades per session, run kind, channel, variant and clipped slice (one session, or every graded one) and the pooled last 20 sessions |
-| `python3 -m engine.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
-| `python3 -m engine.read_job --trust` | by hand | nothing; prints the trust ledger: every reading and dial per channel with its sample, score, interval, verdict and weight |
+| `python3 -m engine.jobs.read_job` (launchd `com.kaze.read`) | every 5 minutes; builds only at the 09:35-15:55 slots on trading days, else one log line | one `live_frozen` snapshot (or `live_rebuilt` on a rerun) with its observations and range readings, calendar facts, new bars, three `range_forecast` decisions (plus owner-rule variants in a Fed window) with their values; then the outcome and grades of every window of the day that ended by the cut with all its bars held; then `live/latest.json` (a crash in the grading step is logged, the stored read's `snapshot_status_reason` gains `grade_failed`, the feed's `status_reason` says so and its `windows` block is `{status: failed, reason}`) |
+| `python3 -m engine.jobs.read_job --at "YYYY-MM-DD HH:MM:SS"` | by hand, trading days only | one `history_rebuilt` snapshot at that New York moment, the bars up to it, its range decisions, and the outcomes and grades of every window of that day ended and still open |
+| `python3 -m engine.jobs.read_job --rebuild-day YYYY-MM-DD` | by hand | every slot of the session as `history_rebuilt` rows with their range decisions, the whole session's bars, then the session's outcomes and grades (the earlier rebuilt ones replaced with their reads); on a fresh store this is how a past session gets its grades |
+| `python3 -m engine.jobs.read_job --backfill-bars` | by hand, once | every session's SPX bars Mirai holds, as `history_rebuilt` rows known at the file's change time |
+| `python3 -m engine.jobs.read_job --nightly` (launchd `com.kaze.nightly` runs `--nightly-if-due` hourly at :15; it acts once per session, on the first launch from 17:00 New York on when `nightly_done.txt` does not name the latest session, so a box asleep at 17:15 catches up at 18:15 and a weekend or holiday launch does nothing; a hand `--nightly` is refused with one line while the session is open and is a no-op once the session is done) | 17:15 New York, or the first :15 after | `missed` rows for unserved slots (on the session's own day), then for today and for every live session that was never rebuilt: the session's bars (closing bars as live when Kaze was live, the whole session as rebuilt) and the session rebuilt; a rebuilt `nightly_history_fit` for every stored session without one and the live fit for the next trading day (unless as fresh a one exists); every open window of every session settled (live and rebuilt); the trust ledger for the next session; one `nightly_check` snapshot per session with both live and rebuilt reads; the backup; `PRAGMA optimize`; the health line (live reads, missed slots, reads whose grading step failed, bars, rebuilds, fits, what was settled, the ledger, parity, the backup file); `nightly_done.txt` |
+| `python3 -m engine.jobs.read_job --scoreboard [YYYY-MM-DD]` | by hand | nothing; prints the grades per session, run kind, channel, variant and clipped slice (one session, or every graded one) and the pooled last 20 sessions |
+| `python3 -m engine.jobs.read_job --pass-test` | by hand | nothing; prints the band's walk-forward coverage per day and channel, the converged interval, the verdict and the clipped slice |
+| `python3 -m engine.jobs.read_job --trust` | by hand | nothing; prints the trust ledger: every reading and dial per channel with its sample, score, interval, verdict and weight |
 
 The `range` block of `latest.json` is the forecast copied whole (floats at six decimals, moments on the New York clock):
 `price`, `read_at`, `window_from` (end of the read's minute), `newest_bar_at`, `minutes_in`, `minutes_left`, `speed`,
@@ -488,7 +488,7 @@ each other either way, else `differ`, null when either swing is missing; stored 
 reading, `text`), `bands` (`80` and `average_80`: `half_width`, `low`, `high`), `owner_rule` (`product` and `bands`
 with the Fed dial applied in full; null outside a Fed window), `status` and `reason`; and, from Phase 3, `windows`
 (built by
-`engine/live_feed.py` from the store after the read and its grades are written; `{status: failed, reason}` when that
+`engine/feed/live_feed.py` from the store after the read and its grades are written; `{status: failed, reason}` when that
 step crashed). Every channel key is `5_minutes` / `30_minutes` / `60_minutes`; the 5-minute channel follows every
 read, the 30- and 60-minute channels the headline-lane reads (:05 and :35), in `current`, `finished` and `score`
 alike:
@@ -520,7 +520,7 @@ alike:
 - `score[channel]`: over that channel's `finished` list, per grade word, `yes` and `graded`.
 
 The grade words and what yes means (`GRADE_WORD_MEASURE`), the window kinds, the readings and dials with their
-meanings and parameters, the trust tests' parameters and every list behind them live in `engine/registry.py`
+meanings and parameters, the trust tests' parameters and every list behind them live in `engine/store/registry.py`
 (`OUTCOME_KINDS`, `LABEL_STATUSES`, `VALUE_STATUSES`, `BAND_SIDES`, `WINDOW_SIDES`, `PUSH_READINGS`, `WIDTH_DIALS`,
 `LEAN_TEST_PARAMETERS`, `DIAL_TEST_PARAMETERS`).
 

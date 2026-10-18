@@ -4,7 +4,8 @@
 import math
 from datetime import timedelta
 
-from engine import registry, session_clock
+from engine import session_clock
+from engine.store import registry
 
 NO_EFFECT = registry.NO_EFFECT
 # Why a dial's raw value can be blank; the dials left out always read.

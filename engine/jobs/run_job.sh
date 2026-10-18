@@ -11,8 +11,8 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 case "$job" in
-  read) exec /usr/bin/python3 -m engine.read_job ;;
-  nightly) exec /usr/bin/python3 -m engine.read_job --nightly-if-due ;;
+  read) exec /usr/bin/python3 -m engine.jobs.read_job ;;
+  nightly) exec /usr/bin/python3 -m engine.jobs.read_job --nightly-if-due ;;
   app) exec /usr/bin/python3 -m app.server.app_server ;;
   *) echo "kaze: unknown job $job" >&2; exit 2 ;;
 esac

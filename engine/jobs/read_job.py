@@ -6,8 +6,13 @@ import sys
 import traceback
 from datetime import date
 
-from engine import backup, collect, grade, job_log, live_feed, mirai_files, paths, push_read, range_fit, range_read
-from engine import registry, session_clock, store, trust
+from engine import paths, session_clock
+from engine.collect import collect, mirai_files
+from engine.feed import live_feed
+from engine.grade import grade, trust
+from engine.jobs import job_log
+from engine.range import push_read, range_fit, range_read
+from engine.store import backup, registry, store
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20

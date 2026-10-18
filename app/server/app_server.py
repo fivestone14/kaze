@@ -11,7 +11,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from engine import job_log, paths, session_clock, store
+from engine import paths, session_clock
+from engine.jobs import job_log
+from engine.store import store
 
 JOB = "app"
 WEB_FOLDER = (paths.REPO_ROOT / "app" / "web").resolve()

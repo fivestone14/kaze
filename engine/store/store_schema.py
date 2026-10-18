@@ -2,7 +2,7 @@
 # registry's word lists, the indexes, the numbered schema steps and the open-time check that a store matches the code.
 # Header tables (snapshots, decisions, outcomes) carry the design's text ids; the long value tables hang off them by
 # integer rowid and keep one unique index on the design's own grain.
-from engine import registry
+from engine.store import registry
 
 SCHEMA_VERSION = 9
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"

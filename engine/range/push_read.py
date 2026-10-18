@@ -3,7 +3,7 @@
 # until the ledger writes one, so the call stays a coin flip. A reading with a blank input stays blank with that reason.
 import math
 
-from engine import registry, store
+from engine.store import registry, store
 
 
 def observation_of(observations, measure_name, subject_key=store.WHOLE):
