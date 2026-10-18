@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The page's own colours, compiled in so the window, the status bar and the launch flash match the screens.
+     A palette change here is a rebuild; a change to the screens themselves is a file edit on the Mac. -->
+<resources>
+    <color name="status_bar">#1F2622</color>
+    <color name="page">#EDE9E2</color>
+    <color name="surface">#F4F1EB</color>
+    <color name="blue">#2F44B8</color>
+</resources>

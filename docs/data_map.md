@@ -446,11 +446,12 @@ Gzipped copies (`.jsonl.gz`) of older days are read the same way.
 | `logs/read_log.txt` | one line per read-job run (including the quiet "market closed" lines) and any crash's traceback | the read job |
 | `logs/nightly_log.txt` | one health line per nightly run, one line per parity mismatch, the backup warning when the copy shares the store's disk, and the hourly "not due" lines | the nightly job |
 | `logs/rebuild_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`; a `--scoreboard` or `--pass-test` crash) | hand runs |
+| `logs/app_log.txt` | one line per request the phone's server answered (route, status, milliseconds; never the token or a body), plus its start and stop lines | the phone's server (`app/server/app_server.py`) |
 | `nightly_done.txt` | the session the nightly last finished (the once-per-session rule reads it) | the nightly job |
 | `backup_in_progress/` | where a backup copy is made, checked and gzipped before it moves, finished, to the backup folder; empty between nightlies | the nightly job |
 | `backups/kaze-<session>.sqlite.gz` (or the same under `KAZE_BACKUP_DIR` when `.env` sets it) | the last 5 nightly copies of the store: `VACUUM INTO` a dated file, `integrity_check` on it, gzipped, then moved in whole; older copies go only after the new one passed | the nightly job |
 | `logs/older/<day>/*.gz` | the logs of earlier days, kept 14 days | `engine/job_log.py` when a job first writes on a new day |
-| `/tmp/com.kaze.read.launchd.log`, `/tmp/com.kaze.nightly.launchd.log` | only what Python could not catch (a missing `.env`, an import error) | launchd |
+| `/tmp/com.kaze.read.launchd.log`, `/tmp/com.kaze.nightly.launchd.log`, `/tmp/com.kaze.app.launchd.log` | only what Python could not catch (a missing `.env`, an import error, a port already taken) | launchd |
 
 ## Who writes what, and when
 
@@ -515,5 +516,6 @@ meanings and parameters, the trust tests' parameters and every list behind them 
 (`OUTCOME_KINDS`, `LABEL_STATUSES`, `VALUE_STATUSES`, `BAND_SIDES`, `WINDOW_SIDES`, `PUSH_READINGS`, `WIDTH_DIALS`,
 `LEAN_TEST_PARAMETERS`, `DIAL_TEST_PARAMETERS`).
 
-`engine/jobs/install_jobs.sh` writes the two plists into `~/Library/LaunchAgents` with this repo's real path and
-boots them (bootout, wait, bootstrap, enable).
+`engine/jobs/install_jobs.sh` writes the three plists into `~/Library/LaunchAgents` with this repo's real path and
+boots them (bootout, wait, bootstrap, enable). The phone reads `live/latest.json` through `app/server/app_server.py`,
+which also serves `/bars.json`, the session's 1-minute closes read from the store (`app/README.md`).

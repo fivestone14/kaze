@@ -1,0 +1,152 @@
+<!doctype html>
+<!-- The phone's one page: three views (Read, Sight, Steps) behind a bottom tab bar, every number filled in by app.js
+     from /latest.json and /bars.json. Nothing here is a value; the slots are empty until the feed arrives. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F2622">
+<title>Kaze</title>
+<link rel="preload" href="/fonts/PlusJakartaSans.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <p class="notice" id="notice" hidden></p>
+
+  <section class="view" id="view-read">
+    <div class="card chart-card">
+      <div class="top">
+        <span class="brand">Kaze · SPX</span>
+        <span class="clock"><i class="clock-dot"></i><span class="clock-text">—</span></span>
+      </div>
+      <div class="price-row"><span class="price" id="price">—</span><span class="change" id="change">—</span></div>
+      <div class="switch" role="tablist" aria-label="Window">
+        <button role="tab" data-channel="5_minutes">5 Min</button>
+        <button role="tab" data-channel="30_minutes">30 Min</button>
+        <button role="tab" data-channel="60_minutes">60 Min</button>
+      </div>
+      <div class="range-row">
+        <span class="range-line" id="range-line">—</span><span class="pill pill-blue" id="held">—</span>
+      </div>
+      <svg class="chart" id="chart" viewBox="0 0 336 214" role="img"
+           aria-label="Today's price with each past read's band as a box and the live band ahead"></svg>
+      <p class="block-note" id="chart-note" hidden></p>
+    </div>
+    <div class="card strip-card">
+      <div class="row-between small-bold"><span>Average Since The Read</span><span id="strip-verdict">—</span></div>
+      <svg class="strip" id="strip" viewBox="0 0 312 64" role="img"
+           aria-label="Live price and running average against the bands"></svg>
+      <div class="legend">
+        <span><i class="swatch-average"></i>Average Band</span>
+        <span><i class="swatch-end"></i>End Band</span>
+      </div>
+    </div>
+    <div class="card reads-list" id="reads-list"></div>
+    <div class="scores" id="scores"></div>
+  </section>
+
+  <section class="view" id="view-sight" hidden>
+    <div class="top">
+      <span class="brand">Kaze · SPX</span>
+      <span class="clock"><i class="clock-dot"></i><span class="clock-text">—</span></span>
+    </div>
+    <div class="title-row">
+      <span class="title">What Kaze Sees</span>
+      <div class="switch switch-small" role="tablist" aria-label="Window">
+        <button role="tab" data-channel="5_minutes">5</button>
+        <button role="tab" data-channel="30_minutes">30 Min</button>
+        <button role="tab" data-channel="60_minutes">60</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row-between">
+        <span class="card-title">How Far · Pull</span><span class="pill pill-green">Counts Now</span>
+      </div>
+      <div class="speed-row">
+        <svg class="speed-bars" id="speed-bars" viewBox="0 0 230 66" role="img"
+             aria-label="The three speeds Kaze measures, the one it uses darkest"></svg>
+        <div class="speed-side">
+          <span class="faint-label">Speed</span>
+          <span class="speed-value" id="speed-value">—</span>
+          <span class="faint-small">Pts / Min</span>
+          <span class="faint-note">Darkest Bar =<br>The One Used</span>
+        </div>
+      </div>
+      <div class="chain" id="chain"></div>
+      <svg class="range-bar" id="range-bar" viewBox="0 0 312 50" role="img"
+           aria-label="The end band, the average band and the never-leaves rung"></svg>
+      <div class="checks" id="sight-checks"></div>
+      <p class="block-note" id="sight-note" hidden></p>
+    </div>
+    <div class="card">
+      <div class="row-between">
+        <span class="card-title">Which Way · Push</span><span class="pill pill-purple" id="push-weight">—</span>
+      </div>
+      <div class="push-rows" id="push-rows"></div>
+      <div class="push-call"><span id="push-call-label">—</span><span id="push-call">—</span></div>
+    </div>
+    <div class="card">
+      <div class="row-between">
+        <span class="card-title">Feeds</span><span class="pill pill-green" id="feeds-pill">—</span>
+      </div>
+      <div class="feeds-grid" id="feeds-grid"></div>
+      <span class="faint-small" id="login-line">—</span>
+    </div>
+  </section>
+
+  <section class="view" id="view-steps" hidden>
+    <div class="top">
+      <span class="brand">Kaze · SPX</span>
+      <span class="clock"><i class="clock-dot"></i><span class="clock-text">—</span></span>
+    </div>
+    <div class="title-row">
+      <span class="title title-steps">How It's Worked Out</span>
+      <div class="switch switch-small" role="tablist" aria-label="Window">
+        <button role="tab" data-channel="5_minutes">5</button>
+        <button role="tab" data-channel="30_minutes">30 Min</button>
+        <button role="tab" data-channel="60_minutes">60</button>
+      </div>
+    </div>
+    <div class="faint-small steps-sub" id="steps-sub">—</div>
+    <div class="card steps-card">
+      <div id="steps-bars"></div>
+      <div class="step-checks" id="steps-checks"></div>
+      <p class="block-note" id="steps-note" hidden></p>
+    </div>
+    <div class="answer" id="answer"></div>
+    <div class="tag-key">
+      <span><i style="background:#2F44B8"></i>Today</span>
+      <span><i style="background:#8a6300"></i>History</span>
+      <span><i style="background:#1f6b3e"></i>Check</span>
+      <span><i style="background:#5b2f8f"></i>Earned</span>
+    </div>
+  </section>
+</main>
+
+<nav class="tabs" aria-label="Main">
+  <button data-tab="read" aria-current="page">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 17l3.5-3.5 3 2L13 12"/><path d="M13 12 21 6.5" stroke-dasharray="1.5 2.6"/>
+      <path d="M13 12l8 2.5" stroke-dasharray="1.5 2.6"/>
+      <circle cx="13" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+    </svg>
+    <span>Read</span><i></i>
+  </button>
+  <button data-tab="sight">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.6"/>
+    </svg>
+    <span>Sight</span><i></i>
+  </button>
+  <button data-tab="steps">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M10 6h10M10 12h10M10 18h10"/><path d="M4 5.5l1 1 2-2"/><path d="M4 11.5l1 1 2-2"/>
+      <path d="M4 17.5l1 1 2-2"/>
+    </svg>
+    <span>Steps</span><i></i>
+  </button>
+</nav>
+<script src="/app.js"></script>
+</body>
+</html>

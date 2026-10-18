@@ -1,0 +1,8 @@
+# Copy to local.properties and fill in. The copy is git-ignored and must stay that way: it holds the token, and
+# Gradle also writes sdk.dir into it (an absolute path under the home folder).
+
+# Where the Kaze server answers from the phone's point of view: the tunnel's https address, no trailing slash.
+KAZE_URL=https://kaze.example.com
+
+# The token the server's .env holds as KAZE_APP_TOKEN. The shell sends it as HTTP Basic (user kaze) on every request.
+KAZE_TOKEN=paste-the-same-token-here

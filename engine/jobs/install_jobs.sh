@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs the two Kaze launchd jobs: writes each plist into ~/Library/LaunchAgents with this repo's real path,
-# boots the old copy out, waits until it is gone, then bootstraps and enables the new one.
+# Installs the three Kaze launchd jobs (the read, the nightly, the phone server): writes each plist into
+# ~/Library/LaunchAgents with this repo's real path, boots the old copy out, waits until it is gone, then bootstraps
+# and enables the new one.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -16,7 +17,7 @@ wait_until_unloaded() {   # $1: label; gives launchd up to 10 s to finish the bo
   echo "warning: $1 still loaded after bootout" >&2
 }
 
-for label in com.kaze.read com.kaze.nightly; do
+for label in com.kaze.read com.kaze.nightly com.kaze.app; do
   target="$agents/$label.plist"
   sed "s#\$HOME/kaze#$repo#g" "$here/$label.plist" > "$target"
   launchctl bootout "$domain/$label" 2>/dev/null || true
