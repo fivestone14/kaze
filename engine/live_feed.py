@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime
 
-from engine import grade, paths, range_fit, range_read, registry, session_clock, store
+from engine import grade, paths, range_fit, registry, session_clock, store
 
 PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "frozen_feed": "partial",
                               "stand_in": "partial", "missing": "blind", "market_closed": "blind"}
@@ -103,7 +103,8 @@ def live_window(conn, day, cut_at, channel, minutes, series, live):
     moves from the read price, and the three grade words so far; ended once the cut has passed the window's end."""
     cut_iso = session_clock.iso_utc(cut_at)
     read = store.newest_live_read(conn, day.isoformat(), cut_iso, lane_of_live_window(minutes))
-    decisions = store.decisions_of_read(conn, read["snapshot_id"], range_read.DECISION_KIND, channel) if read else ()
+    decisions = store.decisions_of_read(conn, read["snapshot_id"], registry.RANGE_DECISION_KIND, channel) \
+        if read else ()
     if not decisions:
         return None
     base = decisions[0]

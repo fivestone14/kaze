@@ -1,12 +1,12 @@
 # The range engine's history side: the speed recipe on minute-indexed bars, the windows of past sessions measured on
-# that same recipe, the nightly fit of the band multipliers, the closing-window ratio and the width cap (one
-# nightly_history_fit cut per session served) and the Phase 2 pass test with its day-resampled interval.
+# that same recipe, the nightly fit of the band multipliers (one nightly_history_fit cut per session served), the
+# time-of-day ratios and width cap a read takes from the same history, and the Phase 2 pass test with its interval.
 import math
 from datetime import date, timedelta
 
 import numpy as np
 
-from engine import registry, session_clock, store
+from engine import registry, session_clock, store, width_dials
 
 FARTHEST = "farthest"
 WINDOW_MOVES = (registry.BAND, registry.AVERAGE_BAND, FARTHEST)
@@ -77,16 +77,21 @@ def history_before(conn, day, lookback=registry.FIT_LOOKBACK_SESSIONS):
 
 def build_history(conn, day, lookback):
     """history_before without the cache: each full session's windows, every 5 minutes from minute 30, in swings, and
-    the closing sample: the windows on the same grid that end inside the last minutes before the close."""
+    two time-of-day samples on the same grid: windows ending inside the last minutes before the close (unclipped,
+    the full horizon held) and windows a timed release, as known at the served day's open, lands in."""
     sessions = [session for session in store.full_sessions(conn) if session < day.isoformat()][-lookback:]
     table = {name: {move: [] for move in WINDOW_MOVES} for name in registry.HORIZON_MINUTES}
     closing = {name: [] for name in registry.HORIZON_MINUTES}
+    release = {name: [] for name in registry.HORIZON_MINUTES}
+    known_by = session_clock.iso_utc(session_clock.session_open(day))
     last_bar_at = None
     longest = max(registry.HORIZON_MINUTES.values())
     for session in sessions:
         bars = store.session_bars(conn, session)
         last_bar_at = bars[-1]["priced_at"]
         closes, highs, lows = minute_series(bars, session)
+        releases_at = [release["at"] for release
+                       in width_dials.releases(store.calendar_events_known(conn, session, known_by))]
         # the last start is the longest horizon before the session's last minute, so every window ends on a held bar
         starts = range(registry.FIT_FIRST_WINDOW_MINUTE, closes.size - longest, registry.FIT_WINDOW_STEP_MINUTES)
         for start in starts:
@@ -100,21 +105,28 @@ def build_history(conn, day, lookback):
                 swing = swing_points(start_speed, minutes)
                 for move, value in moves.items():
                     table[name][move].append(value / swing)
+        open_at = session_clock.session_open(date.fromisoformat(session))
         for name, minutes in registry.HORIZON_MINUTES.items():
-            closing[name].extend(closing_window_ratios(closes, highs, lows, minutes))
+            closing[name].extend(end_move_ratios(closes, highs, lows, minutes,
+                                                 range(closes.size - registry.CLOSING_WINDOW_MINUTES, closes.size)))
+            release[name].extend(end_move_ratios(
+                closes, highs, lows, minutes, range(minutes + 1, closes.size),
+                lambda last: width_dials.release_in_window(releases_at, open_at + timedelta(minutes=last - minutes + 1),
+                                                           open_at + timedelta(minutes=last + 1))))
     windows = {name: {move: np.sort(np.array(values)) for move, values in moves.items()}
                for name, moves in table.items()}
     return {"sessions": sessions, "last_bar_at": last_bar_at, "windows": windows,
-            "closing": {name: np.sort(np.array(values)) for name, values in closing.items()}}
+            "closing": {name: np.sort(np.array(values)) for name, values in closing.items()},
+            "release": {name: np.sort(np.array(values)) for name, values in release.items()}}
 
 
-def closing_window_ratios(closes, highs, lows, minutes):
-    """|end move| in swings of the session's 5-minute-grid windows ending in the last minutes before the close."""
-    first_end = closes.size - registry.CLOSING_WINDOW_MINUTES
+def end_move_ratios(closes, highs, lows, minutes, last_minutes, picked=lambda last: True):
+    """|end move| in swings of the session's 5-minute-grid windows of a horizon ending on the minutes given (and
+    picked), each at its start speed; the all-day sample's own measurement."""
     ratios = []
-    for last in range(first_end, closes.size):
+    for last in last_minutes:
         start = last - minutes
-        if start % registry.FIT_WINDOW_STEP_MINUTES or start < 0:
+        if start % registry.FIT_WINDOW_STEP_MINUTES or start < 0 or not picked(last):
             continue
         start_speed = speed(closes[:start + 1])
         moves = window_moves(closes, highs, lows, start, last)
@@ -125,36 +137,48 @@ def closing_window_ratios(closes, highs, lows, minutes):
 
 def band_multiplier(sorted_ratios):
     """The swings that cover the band's share of past windows: the 80% mark of the sorted ratios, or None if empty."""
-    return mark(sorted_ratios, registry.BAND_PORTION)
+    return ratio_at_share(sorted_ratios, registry.BAND_PORTION)
 
 
-def mark(sorted_ratios, portion):
+def ratio_at_share(sorted_ratios, portion):
     """The ratio at a share of the sorted sample (the band multiplier's own index rule), or None if empty."""
     if sorted_ratios.size == 0:
         return None
     return float(sorted_ratios[int(portion * sorted_ratios.size)])
 
 
-def horizon_fit(end, average, sessions, windows, closing=None, cap=None, closing_windows=None):
-    """One horizon's fit in the shape the fit writes and the read reads back: both multipliers, shrink, counts, the
-    closing-window ratio and the width cap."""
+def horizon_fit(end, average, sessions, windows):
+    """One horizon's fit in the shape the fit writes and the read reads back: both multipliers, shrink, counts."""
     return {registry.BAND: end, registry.AVERAGE_BAND: average, "shrink": average / end if end else None,
-            "sessions": sessions, "windows": windows, "closing": closing, "cap": cap,
-            "closing_windows": closing_windows}
+            "sessions": sessions, "windows": windows}
+
+
+def empty_fit():
+    """The fit of a read that has none: every multiplier and count blank."""
+    return horizon_fit(None, None, None, None)
 
 
 def multipliers_from_history(history):
-    """Per horizon, the end and average band multipliers fitted on the history with the sample counts, the closing
-    ratio (the closing sample's 80% mark over the all-day mark) and the cap (the 95% mark over the 80% mark)."""
-    fits = {}
+    """Per horizon, the end and average band multipliers fitted on the history, with the sample counts."""
+    return {name: horizon_fit(band_multiplier(moves[registry.BAND]), band_multiplier(moves[registry.AVERAGE_BAND]),
+                              len(history["sessions"]), int(moves[registry.BAND].size))
+            for name, moves in history["windows"].items()}
+
+
+def width_ratios(history):
+    """Per horizon, what the dials take from the same history: the closing and release ratios (each sample's 80% mark
+    over the all-day mark; None without a sample) and the cap (the 95% mark over the 80% mark), with sample sizes."""
+    ratios = {}
     for name, moves in history["windows"].items():
         end = band_multiplier(moves[registry.BAND])
         closing_mark = band_multiplier(history["closing"][name])
-        fits[name] = horizon_fit(end, band_multiplier(moves[registry.AVERAGE_BAND]), len(history["sessions"]),
-                                 int(moves[registry.BAND].size), closing_mark / end if end and closing_mark else None,
-                                 mark(moves[registry.BAND], registry.CAP_PORTION) / end if end else None,
-                                 int(history["closing"][name].size))
-    return fits
+        release_mark = band_multiplier(history["release"][name])
+        ratios[name] = {"closing": closing_mark / end if end and closing_mark else None,
+                        "release": release_mark / end if end and release_mark else None,
+                        "cap": ratio_at_share(moves[registry.BAND], registry.CAP_PORTION) / end if end else None,
+                        "closing_windows": int(history["closing"][name].size),
+                        "release_windows": int(history["release"][name].size)}
+    return ratios
 
 
 def never_leaves_share(history, horizon_name, rung_points, swing):
@@ -195,12 +219,6 @@ def fit_snapshot_rows(conn, served_day, row_origin, written_at):
                                                   subject))
         observations.append(store.observation_row(snapshot, "fit_sessions_count", fit["sessions"], subject))
         observations.append(store.observation_row(snapshot, "fit_windows_count", fit["windows"], subject))
-        observations.append(store.observation_row(snapshot, "closing_window_multiplier", store.rounded(fit["closing"]),
-                                                  subject, blank_reason=registry.NO_FIT_REASON))
-        observations.append(store.observation_row(snapshot, "width_cap_multiplier", store.rounded(fit["cap"]), subject,
-                                                  blank_reason=registry.NO_FIT_REASON))
-        observations.append(store.observation_row(snapshot, "closing_fit_windows_count", fit["closing_windows"],
-                                                  subject))
     return snapshot, observations
 
 

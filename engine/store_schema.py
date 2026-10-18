@@ -4,7 +4,7 @@
 # integer rowid and keep one unique index on the design's own grain.
 from engine import registry
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -299,8 +299,14 @@ def schema_step_7(conn):
                  (registry.subject_key(adjustment=registry.ACCELERATION_DIAL), "adjustment=fast_over_slow"))
 
 
+def schema_step_8(conn):
+    """Phase 4 fix round: the ledger table at the code's text (the verdict list gains the hold word), rows kept."""
+    for table in PHASE_4_TABLES:
+        rebuild_table(conn, table)
+
+
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
-                6: schema_step_6, 7: schema_step_7}
+                6: schema_step_6, 7: schema_step_7, 8: schema_step_8}
 
 
 def upgrade(conn):

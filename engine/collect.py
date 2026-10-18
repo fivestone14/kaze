@@ -13,7 +13,6 @@ SECTOR_FUNDS = ("XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", 
 LARGEST_STOCKS = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "BRK/B")
 MOVE_SINCE_MINUTES = {"5_minutes": 5, "15_minutes": 15, "30_minutes": 30, "60_minutes": 60}
 CLAUDE_HORIZONS = {"30_minutes": "next_30_minutes", "to_close": "to_close"}
-CLAUDE_SIDES = ("up", "flat", "down")
 TAPE_WINDOW_MINUTES = 30
 HEADLINE_WINDOW_MINUTES = 60
 STRIKE_STEP_POINTS = 5
@@ -246,10 +245,9 @@ def collect_options_scan(read, scans):
     read.note_feed("options_scan", scan.get("at"), received_at=scan.get("at"), present=present)
     views = scan.get("gex_views") or {}
     read.add_observation("vwap_points", scan.get("vwap"))
-    read.add_observation("level_price_points", views.get("call_wall_gamma"), level_type="call_wall")
-    read.add_observation("level_price_points", views.get("put_wall_gamma"), level_type="put_wall")
-    read.add_observation("level_gamma_share_portion", views.get("call_wall_gamma_share"), level_type="call_wall")
-    read.add_observation("level_gamma_share_portion", views.get("put_wall_gamma_share"), level_type="put_wall")
+    for level in registry.WALL_TYPES:
+        read.add_observation("level_price_points", views.get(f"{level}_gamma"), level_type=level)
+        read.add_observation("level_gamma_share_portion", views.get(f"{level}_gamma_share"), level_type=level)
     read.add_observation("dealer_net_gamma_usd", views.get("net_gex"))
     read.add_observation("dealer_gamma_sign", scan.get("gamma_sign"))
     atm_iv = scan.get("atm_iv")
@@ -321,7 +319,7 @@ def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
         read.add_observation("minutes_until_next_event", None, blank="calendar_not_covering_day", impact="any")
         return
     cut_iso = session_clock.iso_utc(cut_at)
-    left = [(starts_at, kind) for starts_at, kind in store.calendar_events_known(conn, day.isoformat(), cut_iso)
+    left = [(starts_at, kind) for starts_at, kind, _ in store.calendar_events_known(conn, day.isoformat(), cut_iso)
             if starts_at > cut_iso]
     read.add_observation("events_left_today_count", len(left))
     next_at, next_kind = left[0] if left else (None, None)
@@ -388,7 +386,7 @@ def collect_mirai_claude_forecast(read, forecast, cut_at):
         answer = (forecast["forecast"].get(field) or {}) if usable else {}
         ok = answer.get("status") == "ok"
         base = answer.get("base_rate_shown_to_claude") or answer.get("base_rate") or {}
-        for side in CLAUDE_SIDES:
+        for side in registry.CLAUDE_SIDES:
             read.add_observation("mirai_claude_forecast_pct", answer.get(f"{side}_pct") if ok else None, blank=blank,
                                  horizon=horizon, side=side)
             read.add_observation("mirai_claude_base_rate_pct", base.get(f"{side}_pct") if ok else None, blank=blank,

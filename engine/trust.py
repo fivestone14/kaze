@@ -1,30 +1,33 @@
 # The trust ledger: every push reading and width dial scored per channel, nightly, on live graded windows only
-# (replayed history never counts) with a test fixed in advance in the registry, and the sample, score, interval,
-# verdict and weight written as results_evaluations rows; the read job applies only weights the ledger holds.
+# (replayed history never counts) with a test fixed in advance in the registry, each on top of what has already earned
+# weight, against a fake baseline, held for three passing runs; written as results_evaluations rows the read applies.
+import itertools
 from collections import defaultdict
 
 import numpy as np
 
-from engine import range_fit, range_read, registry, session_clock, store
+from engine import push_read, range_fit, registry, session_clock, store, width_dials
 
 LEDGER = "trust_ledger"
-EVEN_BRIER = (1 - registry.DIRECTION_UNTIL_EARNED) ** 2
-PRINT_COLUMNS = ("reading or dial", "channel", "sessions", "windows", "score", "95% interval", "verdict", "weight")
+PRINT_COLUMNS = ("reading or dial", "channel", "sessions", "windows", "score", "95% interval", "fake 95th",
+                 "verdict", "weight")
+FAMILY_SIZE = {registry.LEAN_TEST: len(registry.PUSH_READINGS) * len(registry.HORIZON_MINUTES),
+               registry.DIAL_TEST: len(registry.WIDTH_DIALS) * len(registry.HORIZON_MINUTES)}
 
 
 # ---- The sample: live windows with what each decision stored ------------------------------------------------------
 
-def scored_windows(conn, horizon_name):
-    """The channel's live, first-built base decisions whose window counts, oldest first, each with its day, its
-    window's end move, its undialed half-width (swing x stretch), cap, every dial's raw value and every lean."""
+def counting_live_windows(conn, horizon_name, through_day):
+    """The channel's live, first-built base decisions through a day whose window counts, oldest first, each with its
+    day, its window's end move, its undialed half-width (swing x stretch), cap, every dial's raw value, every lean."""
     values = defaultdict(dict)
-    for row in store.live_scored_decision_values(conn, range_read.DECISION_KIND, horizon_name, registry.GRADE_RULE):
+    for row in store.live_counting_decision_values(conn, horizon_name, through_day, registry.GRADE_RULE):
         key = (row["measure_name"], row["subject_key"], row["value_role"])
         values[row["decision_rowid"]][key] = row["value_number"]
     horizon = registry.subject_key(horizon=horizon_name)
     band = registry.subject_key(band=registry.BAND, horizon=horizon_name)
     windows = []
-    for decision in store.live_scored_decisions(conn, range_read.DECISION_KIND, horizon_name, registry.GRADE_RULE):
+    for decision in store.live_counting_decisions(conn, horizon_name, through_day, registry.GRADE_RULE):
         stored = values[decision["decision_rowid"]]
         swing = stored.get(("typical_swing_points", horizon, registry.VALUE_ROLE))
         stretch = stored.get(("band_multiplier", band, registry.VALUE_ROLE))
@@ -32,7 +35,8 @@ def scored_windows(conn, horizon_name):
             continue
         windows.append({
             "day": decision["trade_date"], "origin": decision["row_origin"], "move": decision["end_move"],
-            "base": swing * stretch, "cap": stored.get(("width_cap_multiplier", horizon, registry.VALUE_ROLE)),
+            "undialed_half_width": swing * stretch,
+            "cap": stored.get(("width_cap_multiplier", horizon, registry.VALUE_ROLE)),
             "raw": {dial: stored.get(("width_multiplier", registry.subject_key(adjustment=dial), registry.RAW_ROLE))
                     for dial in registry.WIDTH_DIALS},
             "leans": {reading: stored.get(("push_lean_probability", registry.subject_key(reading=reading),
@@ -41,13 +45,16 @@ def scored_windows(conn, horizon_name):
     return windows
 
 
-def day_means(scores_by_day):
-    """Each day's mean score, in day order."""
-    return [float(np.mean(scores)) for day, scores in sorted(scores_by_day.items())]
+def by_day(windows):
+    """The windows grouped by day, in day order."""
+    days = defaultdict(list)
+    for window in windows:
+        days[window["day"]].append(window)
+    return [days[day] for day in sorted(days)]
 
 
 def sample_counts(windows, horizon_name):
-    """The sample's sessions, independent (non-overlapping) windows, rows and first-built live rows."""
+    """The sample's sessions, independent (non-overlapping) windows, rows, first-built live rows and first day."""
     minutes = registry.HORIZON_MINUTES[horizon_name]
     return {"sessions_count": len({window["day"] for window in windows}),
             "independent_windows_count": len(windows) * session_clock.SLOT_MINUTES // minutes,
@@ -56,36 +63,95 @@ def sample_counts(windows, horizon_name):
             "data_from_trade_date": min((window["day"] for window in windows), default=None)}
 
 
+def day_permutations(days, column):
+    """The fake baselines' inputs: each day's column handed to another day's windows (cycled to its length), for
+    every permutation of the days, drawn with the registry's fixed seed."""
+    draw = np.random.default_rng(registry.FAKE_SEED)
+    columns = [[window[column] for window in day] for day in days]
+    for _ in range(registry.FAKE_PERMUTATIONS):
+        order = draw.permutation(len(days))
+        yield [[columns[source][index % len(columns[source])] for index in range(len(day))]
+               for day, source in zip(days, order)]
+
+
 # ---- The two tests -------------------------------------------------------------------------------------------------
 
-def lean_verdict(windows, reading, horizon_name):
-    """The lean test on one reading and channel: Brier skill over even odds on the moved windows with a lean, its
-    day-resampled interval, the verdict and the weight (the interval's low end, floored at 0)."""
+def lean_skill(days, reading, earned, column="lean"):
+    """Mean over days of the Brier skill of the earned leans with this reading's lean added (at the room left under
+    1) over the earned leans alone; the lean column may be a permuted stand-in."""
+    room = 1 - sum(earned.values())
+    skills = []
+    for day in days:
+        with_, without = 0.0, 0.0
+        for window in day:
+            up = 1.0 if window["move"] > 0 else 0.0
+            baseline = push_read.combined_lean(window["leans"], earned)
+            added = min(1.0, max(0.0, baseline + room * (window[column] - registry.EVEN_CHANCE)))
+            with_ += (added - up) ** 2
+            without += (baseline - up) ** 2
+        skills.append(1 - with_ / without if without else 0.0)
+    return skills
+
+
+def lean_test(conn, windows, reading, earned, horizon_name, through_day):
+    """The lean test on one reading and channel, on top of the readings earned before it: Brier skill on the moved
+    windows with the lean, its day-resampled interval, the fake baseline, the hold rule, the verdict and weight."""
     threshold = registry.LEAN_MOVED_RUNG_SHARE * registry.RUNG_POINTS[horizon_name]
-    scored = [window for window in windows
+    scored = [dict(window, lean=window["leans"][reading]) for window in windows
               if abs(window["move"]) > threshold and window["leans"][reading] is not None]
-    skills = defaultdict(list)
-    for window in scored:
-        up = 1.0 if window["move"] > 0 else 0.0
-        skills[window["day"]].append(1 - (window["leans"][reading] - up) ** 2 / EVEN_BRIER)
-    return verdict_of(scored, horizon_name, day_means(skills), lambda low: max(0.0, low))
+    days = by_day(scored)
+    room = 1 - sum(earned.values())
+    fakes = [float(np.mean(lean_skill([[dict(window, fake=lean) for window, lean in zip(day, leans)]
+                                       for day, leans in zip(days, permuted)], reading, earned, "fake")))
+             for permuted in day_permutations(days, "lean")] if days else []
+    return test_result(conn, (registry.PUSH_READING_KIND, reading, registry.COMPONENT_VERSION), horizon_name,
+                       through_day, scored, lean_skill(days, reading, earned), fakes,
+                       len(days) >= registry.TRUST_MINIMUM_SESSIONS, lambda low: max(0.0, low) * room)
 
 
-def dial_verdict(windows, dial, earned, horizon_name):
+def band_scores(days, dial, earned, column="dial_raw"):
+    """Per day, the mean interval-score gain of the band with the dial's raw (the column named, a permuted stand-in
+    for the fake baseline) against without, on top of the earned dials (the Fed outside the cap), and the coverage
+    with and without."""
+    gains, inside = [], {registry.DIAL_ON: [], registry.DIAL_OFF: []}
+    for day in days:
+        day_gains = []
+        for window in day:
+            raw = window[column]
+            others = float(np.prod([window["raw"][name] for name in earned if name != registry.FED_DIAL]))
+            fed = window["raw"][registry.FED_DIAL] if registry.FED_DIAL in earned else width_dials.NO_EFFECT
+            off = width_dials.half_width(window["undialed_half_width"], others, fed, window["cap"])
+            if dial == registry.FED_DIAL:
+                on = width_dials.half_width(window["undialed_half_width"], others, raw, window["cap"])
+            else:
+                on = width_dials.half_width(window["undialed_half_width"], others * raw, fed, window["cap"])
+            day_gains.append(interval_score(off, window["move"]) - interval_score(on, window["move"]))
+            inside[registry.DIAL_ON].append(abs(window["move"]) <= on)
+            inside[registry.DIAL_OFF].append(abs(window["move"]) <= off)
+        gains.append(float(np.mean(day_gains)))
+    return gains, {key: float(np.mean(flags)) if flags else None for key, flags in inside.items()}
+
+
+def dial_test(conn, windows, dial, earned, horizon_name, through_day):
     """The dial test on one dial and channel, on top of the dials earned before it: the band's interval score with
-    the dial's raw against without, over the windows the dial touches; coverage on and off comes back beside it."""
-    scored = [window for window in windows if window["raw"][dial] not in (None, registry.NO_EFFECT)]
-    gains, inside = defaultdict(list), {registry.DIAL_ON: [], registry.DIAL_OFF: []}
-    for window in scored:
-        stack = float(np.prod([window["raw"][other] for other in earned if window["raw"][other] is not None]))
-        off = window["base"] * range_read.capped(stack, window["cap"])
-        on = window["base"] * range_read.capped(stack * window["raw"][dial], window["cap"])
-        gains[window["day"]].append(interval_score(off, window["move"]) - interval_score(on, window["move"]))
-        inside[registry.DIAL_ON].append(abs(window["move"]) <= on)
-        inside[registry.DIAL_OFF].append(abs(window["move"]) <= off)
-    verdict = verdict_of(scored, horizon_name, day_means(gains), lambda low: 1.0 if low > 0 else 0.0)
-    verdict["coverage"] = {key: float(np.mean(flags)) if flags else None for key, flags in inside.items()}
-    return verdict
+    the dial's raw against without over the windows the dial touches, its interval, the fake baseline, the hold rule,
+    the verdict and weight; the Fed dial needs its own minimum of windows and sessions."""
+    scored = [dict(window, dial_raw=window["raw"][dial]) for window in windows
+              if window["raw"][dial] not in (None, width_dials.NO_EFFECT)]
+    days = by_day(scored)
+    gains, coverage = band_scores(days, dial, earned)
+    fakes = [float(np.mean(band_scores([[dict(window, fake=raw) for window, raw in zip(day, raws)]
+                                        for day, raws in zip(days, permuted)], dial, earned, "fake")[0]))
+             for permuted in day_permutations(days, "dial_raw")] if days else []
+    enough = len(days) >= registry.TRUST_MINIMUM_SESSIONS if dial != registry.FED_DIAL else (
+        len(scored) >= registry.FED_TEST_MINIMUM["windows"] and len(days) >= registry.FED_TEST_MINIMUM["sessions"])
+    result = test_result(conn, (registry.WIDTH_DIAL_KIND, dial, registry.COMPONENT_VERSION), horizon_name,
+                         through_day, scored, gains, fakes, enough, lambda low: 1.0)
+    result["coverage"] = coverage
+    result["baseline_value"] = float(np.mean([interval_score(
+        width_dials.half_width(window["undialed_half_width"], 1.0, 1.0, window["cap"]), window["move"])
+        for window in scored])) if scored else None
+    return result
 
 
 def interval_score(half_width, move):
@@ -93,68 +159,90 @@ def interval_score(half_width, move):
     return 2 * half_width + 2 / registry.INTERVAL_SCORE_ALPHA * max(0.0, abs(move) - half_width)
 
 
-def verdict_of(scored, horizon_name, means, weight_rule):
-    """A test's result: the sample counts, then, with enough sessions, the mean score, its day-resampled interval, the
-    verdict and the weight the rule gives the interval's low end; short of sessions, the too-few verdict."""
-    result = {"counts": sample_counts(scored, horizon_name), "score": None, "interval": None, "weight": None,
-              "verdict": registry.TOO_FEW_SESSIONS}
-    if len(means) < registry.TRUST_MINIMUM_SESSIONS:
+def test_result(conn, judged, horizon_name, through_day, scored, day_means, fakes, enough, weight_rule):
+    """A test's result: the sample counts, then, with enough sessions, the mean score, its day-resampled interval,
+    the fake baseline's 95th percentile, and the verdict: passed (the interval above 0, the mean above the fake,
+    and the same on the two runs before) with the rule's weight, held (passing but not yet three runs), failed, or
+    too few sessions."""
+    result = {"judged": judged, "counts": sample_counts(scored, horizon_name), "score": None, "interval": None,
+              "fake": None, "weight": None, "verdict": registry.TOO_FEW_SESSIONS,
+              "detail": f"{registry.TOO_FEW_SESSIONS}: {len({window['day'] for window in scored})} of "
+                        f"{registry.TRUST_MINIMUM_SESSIONS} live sessions"}
+    if not enough:
         return result
-    mean, low, high = range_fit.bootstrap_interval(means)
-    result.update({"score": mean, "interval": (low, high), "weight": weight_rule(low),
-                   "verdict": registry.PASSED if low > 0 else registry.FAILED_VERDICT})
+    mean, low, high = range_fit.bootstrap_interval(day_means)
+    fake = float(np.percentile(fakes, registry.FAKE_PERCENTILE))
+    result.update({"score": mean, "interval": (low, high), "fake": fake, "weight": 0.0,
+                   "verdict": registry.VERDICT_FAILED, "detail": f"interval low {low:+.4f}, fake 95th {fake:+.4f}"})
+    if low > 0 and mean > fake:
+        earlier = store.prior_verdicts(conn, judged, horizon_name, through_day, registry.HOLD_RUNS - 1)
+        passes = 1 + sum(1 for _ in itertools.takewhile(
+            lambda verdict: verdict in (registry.VERDICT_PASSED, registry.VERDICT_HELD), earlier))
+        held = passes < registry.HOLD_RUNS
+        result.update({"verdict": registry.VERDICT_HELD if held else registry.VERDICT_PASSED,
+                       "weight": 0.0 if held else weight_rule(low),
+                       "detail": f"pass {passes} of {registry.HOLD_RUNS} runs"})
     return result
 
 
 # ---- Writing the ledger (nightly) ------------------------------------------------------------------------------------
 
 def ledger_rows(conn, through_day, in_force_day, written_at):
-    """Every reading's and dial's rows per channel: the weight row and its skill rows, from the live windows."""
+    """Every reading's and dial's rows per channel, readings then dials in the registry's order, each test on top of
+    the components that earned weight earlier in the same pass."""
     written_iso = session_clock.iso_utc(written_at)
-    shared = {"trade_date": in_force_day.isoformat(), "data_through_trade_date": through_day.isoformat(),
-              "applies_from_at": session_clock.iso_utc(session_clock.session_open(in_force_day)),
-              "known_at": written_iso, "written_at": written_iso}
+    run = {"trade_date": in_force_day.isoformat(), "data_through_trade_date": through_day.isoformat(),
+           "applies_from_at": session_clock.iso_utc(session_clock.session_open(in_force_day)),
+           "known_at": written_iso, "written_at": written_iso}
     rows = []
     for horizon_name in registry.HORIZON_MINUTES:
-        windows = scored_windows(conn, horizon_name)
+        windows = counting_live_windows(conn, horizon_name, through_day.isoformat())
+        earned = {}
         for reading in registry.PUSH_READINGS:
-            result = lean_verdict(windows, reading, horizon_name)
-            evaluated = (registry.PUSH_READING_KIND, reading, "1")
-            rows.extend(result_rows(through_day, registry.LEAN_TEST, evaluated, horizon_name, result,
-                                    "brier_skill_portion", registry.EVEN_ODDS, 0.0, shared))
+            result = lean_test(conn, windows, reading, earned, horizon_name, through_day.isoformat())
+            rows.extend(test_rows(result, registry.LEAN_TEST, horizon_name, "brier_skill_portion",
+                                  registry.EARNED_LEANS, 0.0, run))
+            if result["weight"]:
+                earned[reading] = result["weight"]
         earned = []
         for dial in registry.WIDTH_DIALS:
-            result = dial_verdict(windows, dial, earned, horizon_name)
-            evaluated = (registry.WIDTH_DIAL_KIND, dial, "1")
-            detail = f"scored on top of: {', '.join(earned) or 'no earned dial'}"
-            rows.extend(result_rows(through_day, registry.DIAL_TEST, evaluated, horizon_name, result,
-                                    "interval_score_gain_points", registry.UNDIALED_BAND, 0.0, shared, detail))
-            evaluation_id = f"{LEDGER}|{through_day}|{registry.DIAL_TEST[0]}@{registry.DIAL_TEST[1]}"
+            result = dial_test(conn, windows, dial, earned, horizon_name, through_day.isoformat())
+            rows.extend(test_rows(result, registry.DIAL_TEST, horizon_name, "interval_score_gain_points",
+                                  registry.UNDIALED_BAND, result["baseline_value"], run))
             for slice_key, coverage in result["coverage"].items():
                 rows.append(store.evaluation_row(
-                    evaluation_id, registry.SKILL_METRIC_KIND, evaluated, registry.DIAL_TEST, horizon_name,
-                    "band_coverage_portion", coverage if result["weight"] is not None else None,
-                    blank_reason=registry.NO_FIT_REASON, baseline=registry.UNDIALED_BAND, slice_key=slice_key,
-                    **result["counts"], **shared))
+                    run_id(through_day, registry.DIAL_TEST), result["judged"], registry.DIAL_TEST, horizon_name,
+                    kind=registry.SKILL_METRIC_KIND, metric_name="band_coverage_portion", value=coverage,
+                    baseline=registry.UNDIALED_BAND, counts=result["counts"], run=run, slice_key=slice_key,
+                    family_size=FAMILY_SIZE[registry.DIAL_TEST]))
             if result["weight"]:
                 earned.append(dial)
     return rows
 
 
-def result_rows(through_day, judge, evaluated, horizon_name, result, score_measure, baseline, baseline_value, shared,
-                detail=None):
-    """A test result as its two ledger rows: the trust weight and the score with its interval."""
-    evaluation_id = f"{LEDGER}|{through_day}|{judge[0]}@{judge[1]}"
-    too_few = result["weight"] is None
-    note = f"{registry.NOT_ENOUGH_LIVE_SESSIONS}: {result['counts']['sessions_count']} of " \
-           f"{registry.TRUST_MINIMUM_SESSIONS}" if too_few else detail
-    common = dict(horizon_name=horizon_name, verdict=result["verdict"], blank_reason=registry.NO_FIT_REASON,
-                  baseline=baseline, detail=note, **result["counts"], **shared)
-    return [store.evaluation_row(evaluation_id, registry.TRUST_WEIGHT_KIND, evaluated, judge,
-                                 metric_name="trust_weight_portion", value=result["weight"], **common),
-            store.evaluation_row(evaluation_id, registry.SKILL_METRIC_KIND, evaluated, judge,
-                                 metric_name=score_measure, value=result["score"], interval=result["interval"],
-                                 baseline_value=baseline_value if not too_few else None, **common)]
+def run_id(through_day, judge):
+    """One ledger run's id: the ledger, the data-through day and the judge."""
+    return f"{LEDGER}|{through_day}|{judge[0]}@{judge[1]}"
+
+
+def test_rows(result, judge, horizon_name, score_measure, baseline, baseline_value, run):
+    """A test result as its three ledger rows: the trust weight, the score with its interval, the fake baseline."""
+    shared = dict(judged=result["judged"], judge=judge, horizon_name=horizon_name, baseline=baseline,
+                  counts=result["counts"], run=run, family_size=FAMILY_SIZE[judge])
+    evaluation_id = run_id(run["data_through_trade_date"], judge)
+    return [store.evaluation_row(evaluation_id, shared["judged"], judge, horizon_name, kind=registry.TRUST_WEIGHT_KIND,
+                                 metric_name="trust_weight_portion", value=result["weight"], verdict=result["verdict"],
+                                 detail=result["detail"], baseline=baseline, counts=result["counts"], run=run,
+                                 family_size=shared["family_size"]),
+            store.evaluation_row(evaluation_id, shared["judged"], judge, horizon_name, kind=registry.SKILL_METRIC_KIND,
+                                 metric_name=score_measure, value=result["score"], verdict=result["verdict"],
+                                 interval=result["interval"], baseline=baseline,
+                                 baseline_value=baseline_value if result["score"] is not None else None,
+                                 counts=result["counts"], run=run, family_size=shared["family_size"]),
+            store.evaluation_row(evaluation_id, shared["judged"], judge, horizon_name, kind=registry.SKILL_METRIC_KIND,
+                                 metric_name=score_measure, value=result["fake"], baseline=baseline,
+                                 counts=result["counts"], run=run, slice_key=registry.FAKE_BASELINE,
+                                 family_size=shared["family_size"])]
 
 
 def write_ledger(conn, through_day, in_force_day, written_at):
@@ -162,49 +250,56 @@ def write_ledger(conn, through_day, in_force_day, written_at):
     rows = ledger_rows(conn, through_day, in_force_day, written_at)
     written = store.write_evaluations(conn, rows)
     weights = [row for row in rows if row["evaluation_kind"] == registry.TRUST_WEIGHT_KIND]
+    verdicts = {verdict: sum(1 for row in weights if row[registry.VERDICT_COLUMN] == verdict)
+                for verdict in registry.VERDICTS}
     earned = [f"{row['evaluated_name']} {row['horizon_name']} {row['metric_value']}" for row in weights
               if row["metric_value"]]
-    short = sum(1 for row in weights if row["metric_text"] == registry.TOO_FEW_SESSIONS)
-    return (f"trust ledger {written} rows written for {in_force_day}: {len(weights)} weights, {short} with "
-            f"{registry.NOT_ENOUGH_LIVE_SESSIONS}, earned {', '.join(earned) or 'none'}")
+    counts = ", ".join(f"{count} {verdict}" for verdict, count in verdicts.items() if count)
+    return (f"trust ledger {written} rows written for {in_force_day}: {len(weights)} weights ({counts}), "
+            f"earned {', '.join(earned) or 'none'}")
 
 
 # ---- Printing the ledger ---------------------------------------------------------------------------------------------
 
 def ledger_lines(conn):
-    """The newest ledger per reading, dial and channel: sample, score, interval, verdict, weight."""
+    """The newest ledger per reading, dial and channel: sample, score, interval, fake baseline, verdict, weight."""
     rows = store.newest_evaluations(conn)
     if not rows:
         return ["no trust ledger yet: the nightly writes it after the first live session"]
-    by_component = defaultdict(dict)
+    cells = defaultdict(dict)
     for row in rows:
-        by_component[(row["evaluated_kind"], row["evaluated_name"], row["horizon_name"])][
-            (row["evaluation_kind"], row["slice_key"])] = row
+        cells[(row["evaluated_name"], row["horizon_name"])][(row["evaluation_kind"], row["slice_key"])] = row
     order = {name: place for place, name in enumerate(registry.PUSH_READINGS + registry.WIDTH_DIALS)}
     newest = max(row["trade_date"] for row in rows)
     through = max(row["data_through_trade_date"] for row in rows)
     lines = [f"trust ledger ({registry.LEAN_TEST[0]}@{registry.LEAN_TEST[1]} on leans, {registry.DIAL_TEST[0]}@"
              f"{registry.DIAL_TEST[1]} on dials): weights in force for {newest}, live data through {through}",
-             f"minimum {registry.TRUST_MINIMUM_SESSIONS} live sessions; a weight above 0 needs the interval above 0",
-             "{:<18} {:<11} {:>8} {:>8} {:>9} {:>20} {:<16} {}".format(*PRINT_COLUMNS)]
-    for (kind, name, horizon), cells in sorted(by_component.items(), key=lambda item: (order[item[0][1]],
-                                                                               registry.HORIZON_MINUTES[item[0][2]])):
-        weight = cells[(registry.TRUST_WEIGHT_KIND, store.WHOLE)]
-        score = cells[(registry.SKILL_METRIC_KIND, store.WHOLE)]
-        lines.append(ledger_line(name, horizon, weight, score))
-        if kind == registry.WIDTH_DIAL_KIND and score["metric_value"] is not None:
-            on, off = (cells[(registry.SKILL_METRIC_KIND, key)]["metric_value"] for key in (registry.DIAL_ON,
-                                                                                              registry.DIAL_OFF))
-            lines.append(f"{'':<18} {'':<11} coverage with the dial {on:.3f}, without {off:.3f}")
+             f"minimum {registry.TRUST_MINIMUM_SESSIONS} live sessions (Fed dial: "
+             f"{registry.FED_TEST_MINIMUM['windows']} windows over {registry.FED_TEST_MINIMUM['sessions']} sessions); "
+             f"a weight needs the interval above 0, "
+             f"the score above the fake baseline's {registry.FAKE_PERCENTILE}th percentile, on "
+             f"{registry.HOLD_RUNS} runs in a row",
+             "{:<18} {:<11} {:>8} {:>8} {:>9} {:>20} {:>9} {:<16} {}".format(*PRINT_COLUMNS)]
+    for (name, horizon), cell in sorted(cells.items(), key=lambda item: (order.get(item[0][0], len(order)),
+                                                                          registry.HORIZON_MINUTES[item[0][1]])):
+        lines.append(ledger_line(name, horizon, cell[(registry.TRUST_WEIGHT_KIND, store.WHOLE)],
+                                 cell[(registry.SKILL_METRIC_KIND, store.WHOLE)],
+                                 cell[(registry.SKILL_METRIC_KIND, registry.FAKE_BASELINE)]))
+        on, off = (cell.get((registry.SKILL_METRIC_KIND, key)) for key in (registry.DIAL_ON, registry.DIAL_OFF))
+        if on is not None and on["metric_value"] is not None:
+            lines.append(f"{'':<18} {'':<11} coverage with the dial {on['metric_value']:.3f}, without "
+                         f"{off['metric_value']:.3f}")
     return lines
 
 
-def ledger_line(name, horizon, weight, score):
+def ledger_line(name, horizon, weight, score, fake):
     """One printed row of the ledger."""
     blank = "-"
     interval = f"{score['metric_interval_low']:+.4f} to {score['metric_interval_high']:+.4f}" \
         if score["metric_interval_low"] is not None else blank
     value = f"{score['metric_value']:+.4f}" if score["metric_value"] is not None else blank
-    earned = f"{weight['metric_value']:.4f}" if weight["metric_value"] is not None else f"0 ({weight['detail_text']})"
+    fake_value = f"{fake['metric_value']:+.4f}" if fake["metric_value"] is not None else blank
+    earned = f"{weight['metric_value']:.4f}" if weight["metric_value"] is not None else "0"
     return (f"{name:<18} {horizon:<11} {weight['sessions_count']:>8} {weight['rows_count']:>8} {value:>9} "
-            f"{interval:>20} {weight['metric_text']:<16} {earned}")
+            f"{interval:>20} {fake_value:>9} {weight[registry.VERDICT_COLUMN]:<16} {earned} "
+            f"({weight['detail_text']})")

@@ -246,32 +246,30 @@ def evaluation_row_id_for(evaluation):
             f"{evaluation['metric_name']}")
 
 
-def evaluation_row(evaluation_id, kind, evaluated, judge, horizon_name, metric_name, value, verdict=None,
-                   blank_reason=None, interval=None, baseline=registry.EVEN_ODDS, baseline_value=None,
-                   slice_key=WHOLE, detail=None, **fields):
-    """Shape a results_evaluations row: one metric of one judged component on one channel, with its sample counts,
-    interval and verdict; the caller's fields carry the dates, the moment it is in force from and the write."""
-    evaluated_kind, evaluated_name, evaluated_version = evaluated
+def evaluation_row(evaluation_id, judged, judge, horizon_name, *, kind, metric_name, value, baseline, counts, run,
+                   verdict=None, interval=None, baseline_value=None, slice_key=WHOLE, detail=None, family_size=1):
+    """Shape a results_evaluations row: one metric of one judged component (kind, name, version) on one channel, with
+    its sample counts, interval and verdict; `run` carries the dates, the moment it is in force from and the write."""
+    evaluated_kind, evaluated_name, evaluated_version = judged
     judge_name, judge_version = judge
     measure = registered_measure(metric_name)
     if measure["stored_in_table_name"] != "results_evaluations":
         raise ValueError(f"{metric_name} is not an evaluation metric")
+    weighted = registry.MEASURES_BY_NAME[registry.WEIGHTED_MEASURE[evaluated_kind]]
     low, high = interval if interval is not None else (None, None)
     row = {
         "evaluation_id": evaluation_id, "evaluation_kind": kind, "evaluated_kind": evaluated_kind,
         "evaluated_name": evaluated_name, "evaluated_version": evaluated_version, "judge_name": judge_name,
-        "judge_version": judge_version, "signal_lane": "pull" if evaluated_kind == registry.WIDTH_DIAL_KIND else "push",
-        "overlap_group_name": "width_all_adjustments" if evaluated_kind == registry.WIDTH_DIAL_KIND
-        else "direction_all_sources", "horizon_name": horizon_name,
+        "judge_version": judge_version, "signal_lane": weighted["signal_lane"],
+        "overlap_group_name": weighted["overlap_group_name"], "horizon_name": horizon_name,
         "graded_price_measure": registry.BAND_PRICE_MEASURE[registry.BAND], "slice_key": slice_key,
-        "metric_name": metric_name, "metric_value": rounded(value), "metric_text": verdict,
-        "blank_reason": blank_reason if value is None else None, "metric_interval_low": rounded(low),
+        "metric_name": metric_name, "metric_value": rounded(value), registry.VERDICT_COLUMN: verdict,
+        "blank_reason": registry.TOO_FEW_SESSIONS if value is None else None, "metric_interval_low": rounded(low),
         "metric_interval_high": rounded(high),
         "interval_method": registry.BOOTSTRAP_BY_DAY if interval is not None else None, "baseline_name": baseline,
-        "baseline_metric_value": rounded(baseline_value), "sessions_count": 0, "independent_windows_count": 0,
-        "rows_count": 0, "live_frozen_rows_count": 0, "data_from_trade_date": None, "was_pre_registered": 1,
-        "test_family_name": f"{judge_name}@{judge_version}", "test_family_size_count": 1, "detail_text": detail,
-        "row_origin": "live_frozen", "builder_code_commit": code_head()[0], **fields,
+        "baseline_metric_value": rounded(baseline_value), "was_pre_registered": 1,
+        "test_family_name": f"{judge_name}@{judge_version}", "test_family_size_count": family_size,
+        "detail_text": detail, "row_origin": "live_frozen", "builder_code_commit": code_head()[0], **counts, **run,
     }
     row["evaluation_row_id"] = evaluation_row_id_for(row)
     return row
@@ -471,22 +469,25 @@ def write_outcomes(conn, outcomes, values):
 
 
 def write_evaluations(conn, rows):
-    """Write trust ledger rows in one transaction; a row id already stored is kept as first written."""
+    """Write a ledger run in one transaction, replacing every row of the same run (same judge and data-through day)
+    so a rerun never leaves a stale row behind; returns the rows written."""
+    runs = sorted({row["evaluation_id"] for row in rows})
     with conn:
-        return insert_rows(conn, "results_evaluations", rows, on_conflict="ignore")
+        conn.execute(f"DELETE FROM results_evaluations WHERE evaluation_id IN ({', '.join('?' for _ in runs)})", runs)
+        return insert_rows(conn, "results_evaluations", rows)
 
 
 # ---- Queries: calendar, snapshots, bars, fits ----------------------------------------------------------------------
 
 def calendar_events_known(conn, trade_date, cut_at_iso):
-    """The day's timed events known by the cut, one per fact (its newest known version), as (starts_at, kind)."""
+    """The day's timed events known by the cut, one per fact (its newest known version), as (starts_at, kind, tier)."""
     rows = conn.execute(
-        "SELECT starts_at, fact_name FROM collect_calendar_and_events e WHERE fact_kind = ? "
+        "SELECT starts_at, fact_name, calendar_tier FROM collect_calendar_and_events e WHERE fact_kind = ? "
         "AND trade_date = ? AND known_at <= ? AND known_at = (SELECT MAX(known_at) FROM collect_calendar_and_events n "
         " WHERE n.fact_kind = e.fact_kind AND n.fact_id = e.fact_id AND n.known_at <= ?) "
         "GROUP BY fact_id ORDER BY starts_at",
         (registry.SCHEDULED_EVENT_FACT, trade_date, cut_at_iso, cut_at_iso)).fetchall()
-    return [(row["starts_at"], row["fact_name"]) for row in rows]
+    return [(row["starts_at"], row["fact_name"], row["calendar_tier"]) for row in rows]
 
 
 def has_calendar_facts(conn):
@@ -657,6 +658,19 @@ def sessions_served_by_a_fit(conn):
 
 # ---- Queries: decisions, windows, grades and the scoreboard -------------------------------------------------------
 
+def grade_under_rule_sql(alias):
+    """The one statement of 'a forecast grade under the current grade and grade-start rules', for a table alias; its
+    four parameters come from grade_rule_parameters."""
+    return (f"{alias}.outcome_kind = '{registry.FORECAST_GRADE_KIND}' AND {alias}.outcome_rule_name = ? "
+            f"AND {alias}.outcome_rule_version = ? AND {alias}.grade_start_rule_name = ? "
+            f"AND {alias}.grade_start_rule_version = ?")
+
+
+def grade_rule_parameters(grade_rule):
+    """The parameters grade_under_rule_sql binds: the grade rule and the grade-start rule, name and version."""
+    return (*grade_rule, registry.GRADE_START_RULE, registry.GRADE_START_RULE_VERSION)
+
+
 OPEN_WINDOWS_SQL = ("FROM reads_decisions d WHERE decision_kind = ? AND grade_window_ends_at <= ? "
                     "AND NOT EXISTS (SELECT 1 FROM results_outcomes o WHERE o.judged_decision_id = d.decision_id)")
 
@@ -695,17 +709,15 @@ def outcome_values(conn, outcome_rowid):
 def lane_windows_with_grades(conn, trade_date, horizon_name, read_lane, grade_rule):
     """The session's first-built live market windows of a horizon (one lane, or every read when None), newest first,
     each with its read's cut and the base decision's grade (its rowid and decision rowid) when graded."""
-    rule_name, rule_version = grade_rule
     return conn.execute(
         "SELECT w.*, s.cut_at AS read_cut_at, g.outcome_rowid AS grade_rowid, "
         " d.decision_rowid AS graded_decision_rowid "
         f"FROM results_outcomes w JOIN ({FIRST_BUILT_LIVE_READS_SQL}) s ON s.snapshot_id = w.anchor_id "
-        "LEFT JOIN results_outcomes g ON g.market_outcome_id = w.outcome_id AND g.outcome_kind = ? "
-        " AND g.outcome_rule_name = ? AND g.outcome_rule_version = ? "
+        f"LEFT JOIN results_outcomes g ON g.market_outcome_id = w.outcome_id AND {grade_under_rule_sql('g')} "
         "LEFT JOIN reads_decisions d ON d.decision_id = g.judged_decision_id AND d.variant_name IS NULL "
         "WHERE w.trade_date = ? AND w.outcome_kind = ? AND w.horizon_name = ? AND (? IS NULL OR s.read_lane = ?) "
         " AND (g.outcome_rowid IS NULL OR d.decision_rowid IS NOT NULL) ORDER BY w.window_starts_at DESC",
-        (registry.FORECAST_GRADE_KIND, rule_name, rule_version, trade_date, registry.MARKET_WINDOW_KIND, horizon_name,
+        (*grade_rule_parameters(grade_rule), trade_date, registry.MARKET_WINDOW_KIND, horizon_name,
          read_lane, read_lane)).fetchall()
 
 
@@ -727,15 +739,13 @@ def grade_counts(conn, first_day, last_day, grade_rule, by_session=True):
                        f"SUM({matched} AND v.value_bool IS NOT NULL) AS {word}_graded")
         subject = registry.subject_key(band=band) if band else None
         parameters.extend([measure_name, subject, subject, yes, measure_name, subject, subject])
-    parameters.extend([registry.FORECAST_GRADE_KIND, *grade_rule, registry.GRADE_START_RULE,
-                       registry.GRADE_START_RULE_VERSION, first_day, last_day])
+    parameters.extend([*grade_rule_parameters(grade_rule), first_day, last_day])
     return conn.execute(
         f"SELECT {'o.trade_date' if by_session else '? AS trade_date'}, d.run_kind, d.horizon_name, "
         f"COALESCE(d.variant_name, ?) AS variant, o.was_window_clipped AS clipped, {', '.join(counted)} "
         "FROM results_outcomes o JOIN reads_decisions d ON d.decision_id = o.judged_decision_id "
         "JOIN results_outcome_values v ON v.outcome_rowid = o.outcome_rowid "
-        "WHERE o.outcome_kind = ? AND o.outcome_rule_name = ? AND o.outcome_rule_version = ? "
-        " AND o.grade_start_rule_name = ? AND o.grade_start_rule_version = ? AND o.trade_date BETWEEN ? AND ? "
+        f"WHERE {grade_under_rule_sql('o')} AND o.trade_date BETWEEN ? AND ? "
         " AND (d.row_origin = 'history_rebuilt' OR d.snapshot_id IN "
         f" (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL}))) GROUP BY 1, 2, 3, 4, 5", parameters).fetchall()
 
@@ -789,36 +799,34 @@ def parity_side_value(pair, side):
 
 # ---- Queries: the trust ledger ---------------------------------------------------------------------------------------
 
-LIVE_SCORED_DECISIONS_SQL = f"""
+LIVE_COUNTING_DECISIONS_SQL = f"""
     SELECT d.decision_rowid, d.trade_date, d.row_origin, d.cut_at, m.value_number AS end_move
     FROM reads_decisions d
     JOIN results_outcomes g ON g.judged_decision_id = d.decision_id AND g.does_count_toward_skill = 1
-     AND g.outcome_kind = '{registry.FORECAST_GRADE_KIND}' AND g.outcome_rule_name = ? AND g.outcome_rule_version = ?
+     AND {grade_under_rule_sql('g')}
     JOIN results_outcomes w ON w.outcome_id = g.market_outcome_id
     JOIN results_outcome_values m ON m.outcome_rowid = w.outcome_rowid AND m.value_number IS NOT NULL
      AND m.measure_name = '{registry.WINDOW_MOVE_MEASURE["end"]}'
-    WHERE d.decision_kind = ? AND d.horizon_name = ? AND d.run_kind = 'live' AND d.variant_name IS NULL
-     AND d.grade_start_rule_name = ? AND d.grade_start_rule_version = ?
+    WHERE d.decision_kind = '{registry.RANGE_DECISION_KIND}' AND d.horizon_name = ? AND d.trade_date <= ?
+     AND d.run_kind = '{registry.RUN_KIND_FOR_ORIGIN["live_frozen"]}' AND d.variant_name IS NULL
      AND d.snapshot_id IN (SELECT snapshot_id FROM ({FIRST_BUILT_LIVE_READS_SQL}))
 """
 
 
-def live_scored_decisions(conn, decision_kind, horizon_name, grade_rule):
-    """The channel's live, first-built base decisions whose grade counts, oldest first, each with its window's end
-    move; replayed history never appears here."""
-    return conn.execute(f"{LIVE_SCORED_DECISIONS_SQL} ORDER BY d.cut_at",
-                        (*grade_rule, decision_kind, horizon_name, registry.GRADE_START_RULE,
-                         registry.GRADE_START_RULE_VERSION)).fetchall()
+def live_counting_decisions(conn, horizon_name, through_day, grade_rule):
+    """The channel's live, first-built base range decisions through a day whose grade counts, oldest first, each with
+    its window's end move; replayed history never appears here."""
+    return conn.execute(f"{LIVE_COUNTING_DECISIONS_SQL} ORDER BY d.cut_at",
+                        (*grade_rule_parameters(grade_rule), horizon_name, through_day)).fetchall()
 
 
-def live_scored_decision_values(conn, decision_kind, horizon_name, grade_rule):
-    """Every number stored on those decisions, as (decision_rowid, value key, role, value, trust applied)."""
+def live_counting_decision_values(conn, horizon_name, through_day, grade_rule):
+    """Every number stored on those decisions, as (decision_rowid, measure, subject, role, value)."""
     return conn.execute(
-        "SELECT v.decision_rowid, v.measure_name, v.subject_key, v.value_role, v.value_number, "
-        " v.trust_weight_applied_portion FROM reads_decision_values v WHERE v.value_number IS NOT NULL "
-        f"AND v.decision_rowid IN (SELECT decision_rowid FROM ({LIVE_SCORED_DECISIONS_SQL}))",
-        (*grade_rule, decision_kind, horizon_name, registry.GRADE_START_RULE,
-         registry.GRADE_START_RULE_VERSION)).fetchall()
+        "SELECT v.decision_rowid, v.measure_name, v.subject_key, v.value_role, v.value_number "
+        "FROM reads_decision_values v WHERE v.value_number IS NOT NULL "
+        f"AND v.decision_rowid IN (SELECT decision_rowid FROM ({LIVE_COUNTING_DECISIONS_SQL}))",
+        (*grade_rule_parameters(grade_rule), horizon_name, through_day)).fetchall()
 
 
 def trust_weights_known(conn, trade_date, cut_at_iso):
@@ -836,12 +844,22 @@ def trust_weights_known(conn, trade_date, cut_at_iso):
             for row in rows}
 
 
+def prior_verdicts(conn, judged, horizon_name, through_day, runs):
+    """The verdicts of a component's last ledger runs before a data-through day, newest first."""
+    evaluated_kind, evaluated_name, evaluated_version = judged
+    rows = conn.execute(
+        f"SELECT {registry.VERDICT_COLUMN} FROM results_evaluations WHERE evaluation_kind = ? AND evaluated_kind = ? "
+        "AND evaluated_name = ? AND evaluated_version = ? AND horizon_name = ? AND data_through_trade_date < ? "
+        "ORDER BY data_through_trade_date DESC, known_at DESC LIMIT ?",
+        (registry.TRUST_WEIGHT_KIND, evaluated_kind, evaluated_name, evaluated_version, horizon_name, through_day,
+         runs)).fetchall()
+    return [row[0] for row in rows]
+
+
 def newest_evaluations(conn):
-    """The rows of the newest evaluation run per component and channel, in the ledger's scoring order."""
+    """The rows of the newest evaluation run per component and channel."""
     return conn.execute(
         "SELECT e.* FROM results_evaluations e WHERE e.known_at = ("
         " SELECT MAX(n.known_at) FROM results_evaluations n WHERE n.evaluated_kind = e.evaluated_kind"
         "  AND n.evaluated_name = e.evaluated_name AND n.evaluated_version = e.evaluated_version"
-        "  AND n.horizon_name = e.horizon_name) "
-        "ORDER BY e.evaluated_kind DESC, e.evaluated_name, e.horizon_name, e.evaluation_kind DESC, e.slice_key, "
-        " e.metric_name").fetchall()
+        "  AND n.horizon_name = e.horizon_name)").fetchall()

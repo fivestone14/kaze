@@ -143,45 +143,46 @@ FED_DECISION_EVENT_KINDS = ("FOMC",)
 FED_OWNER_RULE_MULTIPLIER = 2.6
 OWNER_RULE_VARIANT = "owner_rule"
 BASE_VARIANT = "base"
-DIRECTION_UNTIL_EARNED = 0.5
-NO_FIT_REASON = "too_few_sessions"
+EVEN_CHANCE = 0.5
+TOO_FEW_SESSIONS = "too_few_sessions"
 NOT_FORMED_REASON = "not_formed_yet"
 NOT_PRICEABLE_REASON = "not_priceable"
+RANGE_DECISION_KIND = "range_forecast"
+COMPONENT_VERSION = "1"
+WALL_TYPES = ("call_wall", "put_wall")
+CLAUDE_SIDES = ("up", "flat", "down")
 # Phase 4: the width dials, in the order the trust ledger scores them (each earns weight only for what it adds beyond
-# the dials before it); every dial starts applied at 1.00 and moves only on a weight the ledger wrote.
-OWNER_RULE_DIAL = "fed_window"
-RELEASE_DIAL, CLOSING_DIAL, ACCELERATION_DIAL = "release_window", "closing_window", "acceleration"
-OPTIONS_VS_TAPE_DIAL, WALLS_DIAL = "options_vs_tape", "walls"
-WIDTH_DIALS = (OWNER_RULE_DIAL, RELEASE_DIAL, CLOSING_DIAL, ACCELERATION_DIAL, OPTIONS_VS_TAPE_DIAL, WALLS_DIAL)
-STACKED_DIALS = "product"
+# the dials before it); every dial starts applied at 1.00 and moves only on a weight the ledger wrote. The Fed dial
+# sits outside the cap: the cap holds the product of the other dials, the Fed multiplier stacks on top.
+FED_DIAL, RELEASE_DIAL, CLOSING_DIAL = "fed_window", "release_window", "closing_window"
+ACCELERATION_DIAL, OPTIONS_VS_TAPE_DIAL = "acceleration", "options_vs_tape"
+WIDTH_DIALS = (FED_DIAL, RELEASE_DIAL, CLOSING_DIAL, ACCELERATION_DIAL, OPTIONS_VS_TAPE_DIAL)
+ALL_DIALS = "all_dials"
 RELEASE_WINDOW_MULTIPLIER = 1.4
+RELEASE_FIXED_HORIZON = "5_minutes"
+RELEASE_TIER_PREFIX = "data"
+FED_EVENT_PREFIXES = ("FOMC", "FED_")
 CLOSING_WINDOW_MINUTES = 15
 OPTIONS_VS_TAPE_POWER = 0.4
-WALLS_MULTIPLIER = 1.0
 CAP_PORTION = 0.95
 NO_EFFECT = 1.0
 WIDTH_DIAL_MEANING = {
-    OWNER_RULE_DIAL: "wider from a Fed decision to the close",
-    RELEASE_DIAL: "wider when a scheduled release lands inside the window",
-    CLOSING_DIAL: "wider for windows ending in the last 15 minutes",
+    FED_DIAL: "wider from a Fed decision to the close, Will's owner rule",
+    RELEASE_DIAL: "wider when a timed economic release lands inside the window",
+    CLOSING_DIAL: "wider for unclipped windows ending in the last 15 minutes",
     ACCELERATION_DIAL: "fast speed over slow speed, the pace picking up or fading",
-    OPTIONS_VS_TAPE_DIAL: "options swing over tape swing, to the 0.4 power",
-    WALLS_DIAL: "distance to the nearest dealer wall, held at 1.00",
+    OPTIONS_VS_TAPE_DIAL: "the options-implied swing against the tape swing",
 }
 WIDTH_DIAL_PARAMETERS = {
-    OWNER_RULE_DIAL: {"raw": FED_OWNER_RULE_MULTIPLIER, "when": "the window ends after a Fed decision known at the cut",
-                      "event_kinds": FED_DECISION_EVENT_KINDS},
-    RELEASE_DIAL: {"raw": RELEASE_WINDOW_MULTIPLIER, "when": "a timed calendar event other than a Fed decision, known "
-                   "at the cut, has its own five minutes overlapping the window"},
-    CLOSING_DIAL: {"raw": "the history's 80% mark of |end move| in swings over windows ending in the last minutes, "
-                   "over the all-day mark", "last_minutes": CLOSING_WINDOW_MINUTES,
-                   "when": "the window ends inside the last minutes before the close"},
-    ACCELERATION_DIAL: {"raw": "speed_fast_over_slow_ratio"},
-    OPTIONS_VS_TAPE_DIAL: {"raw": f"options_over_tape_swing_ratio ** {OPTIONS_VS_TAPE_POWER}"},
-    WALLS_DIAL: {"raw": WALLS_MULTIPLIER, "input": "level_distance_from_price_points, the nearest wall"},
+    FED_DIAL: {"multiplier": FED_OWNER_RULE_MULTIPLIER, "event_kinds": FED_DECISION_EVENT_KINDS, "capped": False},
+    RELEASE_DIAL: {f"multiplier_{RELEASE_FIXED_HORIZON}": RELEASE_WINDOW_MULTIPLIER, "other_horizons": "fitted ratio",
+                   "tier_prefix": RELEASE_TIER_PREFIX, "never": FED_EVENT_PREFIXES},
+    CLOSING_DIAL: {"last_minutes": CLOSING_WINDOW_MINUTES, "clipped": False},
+    ACCELERATION_DIAL: {"input": "speed_fast_over_slow_ratio"},
+    OPTIONS_VS_TAPE_DIAL: {"input": "options_over_tape_swing_ratio", "power": OPTIONS_VS_TAPE_POWER},
 }
-# Phase 4: the push readings (which way), each a lean: the chance of up if price moves, 0 to 1. Share readings lean
-# by their share; signed readings lean by a smooth squash of value over scale, at most the tilt from even.
+# Phase 4: the push readings (which way), in the order the ledger scores them, each a lean: the chance of up if price
+# moves, 0 to 1. Share readings lean by their share; signed readings by even + tilt x tanh(value / scale).
 PRICE_TREND, STRAIGHTNESS, BREADTH = "price_trend", "straightness", "breadth"
 BIG_TECH_VS_REST, OPTIONS_BUYERS, YIELD_CHANGE, MIRAI_CLAUDE = "big_tech_vs_rest", "options_buyers", "yield_change", \
     "mirai_claude"
@@ -192,27 +193,27 @@ STRAIGHTNESS_WINDOW_MINUTES = 30
 BIG_TECH_SYMBOL, REST_SYMBOL = "QQQ", "RSP"
 CLAUDE_LEAN_HORIZON = "30_minutes"
 PUSH_READING_MEANING = {
-    PRICE_TREND: "SPX move since the prior close and since the open, in points",
+    PRICE_TREND: "SPX move since the prior close (and since the open), in points",
     STRAIGHTNESS: "net move over total path in the last 30 minutes, signed by the net move",
-    BREADTH: "NYSE advancers against decliners",
+    BREADTH: "NYSE advancers over advancers plus decliners",
     BIG_TECH_VS_REST: "QQQ change less RSP change since the prior close, in percentage points",
     OPTIONS_BUYERS: "share of sided same-day option premium that was bullish in the last 30 minutes",
     YIELD_CHANGE: "10-year yield change since its prior close, in basis points",
-    MIRAI_CLAUDE: "Mirai's Claude 30-minute forecast: up over up plus down",
+    MIRAI_CLAUDE: "Mirai's Claude 30-minute forecast, up over up plus down",
 }
 PUSH_READING_PARAMETERS = {
-    PRICE_TREND: {"lean": "even + tilt x tanh(move since prior close / scale)",
-                  "scale_points": LEAN_SCALE[PRICE_TREND]},
-    STRAIGHTNESS: {"lean": "even + tilt x straightness, signed by up legs less down legs",
-                   "window_minutes": STRAIGHTNESS_WINDOW_MINUTES},
-    BREADTH: {"lean": "advancers over advancers plus decliners"},
-    BIG_TECH_VS_REST: {"lean": "even + tilt x tanh((QQQ change - RSP change) / scale)",
-                       "scale_pct_points": LEAN_SCALE[BIG_TECH_VS_REST]},
-    OPTIONS_BUYERS: {"lean": "bullish_portion_of_sided_premium"},
-    YIELD_CHANGE: {"lean": "even + tilt x tanh(yield change / scale)", "scale_basis_points": LEAN_SCALE[YIELD_CHANGE]},
-    MIRAI_CLAUDE: {"lean": "up_pct over up_pct plus down_pct", "horizon": CLAUDE_LEAN_HORIZON},
+    PRICE_TREND: {"tilt": LEAN_TILT, "scale_points": LEAN_SCALE[PRICE_TREND]},
+    STRAIGHTNESS: {"tilt": LEAN_TILT, "window_minutes": STRAIGHTNESS_WINDOW_MINUTES},
+    BREADTH: {},
+    BIG_TECH_VS_REST: {"tilt": LEAN_TILT, "scale_pct_points": LEAN_SCALE[BIG_TECH_VS_REST],
+                       "symbols": (BIG_TECH_SYMBOL, REST_SYMBOL)},
+    OPTIONS_BUYERS: {},
+    YIELD_CHANGE: {"tilt": LEAN_TILT, "scale_basis_points": LEAN_SCALE[YIELD_CHANGE]},
+    MIRAI_CLAUDE: {"horizon": CLAUDE_LEAN_HORIZON},
 }
 DIRECTION_TEXT_UNTIL_EARNED = "coin flip until earned"
+PUSH_UNTESTED, PUSH_EARNED = "untested", "earned"
+PUSH_STATUSES = (PUSH_UNTESTED, PUSH_EARNED)
 RANGE_RECIPE_PARAMETERS = {
     "speed_half_life_minutes": SPEED_HALF_LIFE_MINUTES, "fast_half_life_minutes": FAST_SPEED_HALF_LIFE_MINUTES,
     "slow_half_life_minutes": SLOW_SPEED_HALF_LIFE_MINUTES, "horizon_minutes": HORIZON_MINUTES,
@@ -220,46 +221,48 @@ RANGE_RECIPE_PARAMETERS = {
     "fit_lookback_sessions": FIT_LOOKBACK_SESSIONS, "full_session_rule": FULL_SESSION_RULE,
     "fit_first_window_minute": FIT_FIRST_WINDOW_MINUTE, "fit_window_step_minutes": FIT_WINDOW_STEP_MINUTES,
     "stretch_recipe": STRETCH_RECIPE, "fed_owner_rule_multiplier": FED_OWNER_RULE_MULTIPLIER,
-    "width_dials": WIDTH_DIALS, "applied_dial": "1 + weight x (raw - 1)",
-    "width_cap": f"the history's {CAP_PORTION:.0%} mark of |end move| in swings over its {BAND_PORTION:.0%} mark",
-    "direction_until_earned": DIRECTION_UNTIL_EARNED,
-    "direction": "even + sum over readings of trust x (lean - even), the trusts summing to at most 1",
-    "push_readings": PUSH_READINGS, "lean_tilt": LEAN_TILT,
+    "width_dials": WIDTH_DIALS, "uncapped_dial": FED_DIAL, "cap_portion": CAP_PORTION,
+    "even_chance": EVEN_CHANCE, "push_readings": PUSH_READINGS, "lean_tilt": LEAN_TILT,
 }
 # Phase 4: the trust ledger. Two tests fixed in advance, their verdict words, and what a verdict needs.
 TRUST_WEIGHT_KIND, SKILL_METRIC_KIND = "trust_weight", "skill_metric"
 EVALUATION_KINDS = (TRUST_WEIGHT_KIND, SKILL_METRIC_KIND)
 PUSH_READING_KIND, WIDTH_DIAL_KIND = "push_reading", "width_dial"
 EVALUATED_KINDS = (PUSH_READING_KIND, WIDTH_DIAL_KIND)
-PASSED, FAILED_VERDICT, TOO_FEW_SESSIONS = "passed", "failed", "too_few_sessions"
-VERDICTS = (PASSED, FAILED_VERDICT, TOO_FEW_SESSIONS)
-NOT_ENOUGH_LIVE_SESSIONS = "not enough live sessions"
+# The dial's and the reading's trust is keyed by the measure that carries the applied weight; its lane and overlap
+# group are read off that measure's registry row.
+WEIGHTED_MEASURE = {PUSH_READING_KIND: "push_lean_probability", WIDTH_DIAL_KIND: "width_multiplier"}
+VERDICT_COLUMN = "metric_text"
+VERDICT_PASSED, VERDICT_HELD, VERDICT_FAILED = "passed", "held", "failed"
+VERDICTS = (VERDICT_PASSED, VERDICT_HELD, VERDICT_FAILED, TOO_FEW_SESSIONS)
 BOOTSTRAP_BY_DAY = "bootstrap_by_day"
 INTERVAL_METHODS = (BOOTSTRAP_BY_DAY,)
-EVEN_ODDS, UNDIALED_BAND = "even_odds", "undialed_band"
-BASELINES = (EVEN_ODDS, UNDIALED_BAND)
-DIAL_ON, DIAL_OFF = "dial_on", "dial_off"
-LEAN_TEST = ("lean_brier_test", "1")
-DIAL_TEST = ("dial_band_test", "1")
+EARNED_LEANS, UNDIALED_BAND = "earned_leans", "undialed_band"
+BASELINES = (EARNED_LEANS, UNDIALED_BAND)
+DIAL_ON, DIAL_OFF, FAKE_BASELINE = "dial_on", "dial_off", "fake_baseline"
+LEAN_TEST = ("lean_brier_test", COMPONENT_VERSION)
+DIAL_TEST = ("dial_band_test", COMPONENT_VERSION)
 TRUST_MINIMUM_SESSIONS = 20
+FED_TEST_MINIMUM = {"windows": 20, "sessions": 5}
+HOLD_RUNS = 3
+FAKE_PERMUTATIONS = 200
+FAKE_PERCENTILE = 95
+FAKE_SEED = 1
 LEAN_MOVED_RUNG_SHARE = 0.5
 INTERVAL_SCORE_ALPHA = 1 - BAND_PORTION
+TRUST_TEST_SHARED = {
+    "sample": "live first-built base decisions whose grade counts", "replay_counts": False,
+    "minimum_sessions": TRUST_MINIMUM_SESSIONS, "interval": BOOTSTRAP_BY_DAY, "interval_percent": 95,
+    "hold_runs": HOLD_RUNS, "fake_permutations": FAKE_PERMUTATIONS, "fake_percentile": FAKE_PERCENTILE,
+    "fake_seed": FAKE_SEED,
+}
 LEAN_TEST_PARAMETERS = {
-    "sample": "live first-built base decisions whose window counts, |end move| above the rung share of the channel's "
-              "rung, lean present", "moved_rung_share": LEAN_MOVED_RUNG_SHARE,
-    "score": "Brier skill over even odds: 1 - mean (lean - up)^2 / 0.25, up = 1 when the end move is positive",
-    "interval": f"day means resampled {BOOTSTRAP_BY_DAY}, 95%", "minimum_sessions": TRUST_MINIMUM_SESSIONS,
-    "weight": "the interval's low end, floored at 0; passed when it is above 0",
-    "overlap": "weights of one channel's readings scaled to sum to at most 1",
+    **TRUST_TEST_SHARED, "order": PUSH_READINGS, "moved_rung_share": LEAN_MOVED_RUNG_SHARE,
+    "baseline": EARNED_LEANS, "weight": "interval low x the room left under 1",
 }
 DIAL_TEST_PARAMETERS = {
-    "sample": "live first-built base decisions whose window counts and whose dial raw is not 1.00",
-    "order": WIDTH_DIALS, "band": "swing x stretch x the dials earned before this one, capped, with and without "
-                                  "this dial's raw",
-    "score": f"interval score of the {BAND_PORTION:.0%} end band: 2h + (2 / alpha) x max(0, |end move| - h), "
-             f"alpha {INTERVAL_SCORE_ALPHA:.1f}; gain = score without - score with",
-    "interval": f"day means resampled {BOOTSTRAP_BY_DAY}, 95%", "minimum_sessions": TRUST_MINIMUM_SESSIONS,
-    "weight": "1 when the interval's low end is above 0, else 0",
+    **TRUST_TEST_SHARED, "order": WIDTH_DIALS, "baseline": UNDIALED_BAND, "alpha": INTERVAL_SCORE_ALPHA,
+    "weight": 1, f"{FED_DIAL}_minimum": FED_TEST_MINIMUM,
 }
 # Phase 3: the rules every outcome and grade is stored under; a changed rule is a new version, never an edit.
 WINDOW_RULE = ("window_from_bars", "1")
@@ -309,7 +312,7 @@ NO_WINDOW_MOVE = f"{NOT_APPLICABLE} when the read had no price to measure from; 
 NO_GRADE = "the band's own reason when the decision was blind; " + NO_WINDOW_MOVE
 # A measure born on the snapshot (or the fit) and copied onto every decision that used it.
 BOTH_TABLES = "collect_observations|reads_decision_values"
-FIT_BLANK_MEANING = f"{NO_FIT_REASON} when no fit was known at the cut"
+FIT_BLANK_MEANING = f"{TOO_FEW_SESSIONS} when no fit was known at the cut"
 NO_SPEED = f"{NOT_FORMED_REASON} before the session's second bar"
 POINTS_RANGE = dict(low=1000, high=20000)
 SCAN_MISSING = "feed_missing when no native scan has landed today"
@@ -593,7 +596,8 @@ MEASURES = [
                 "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
                 blank=NO_GRADE, low=0, **OUTCOME_VALUE),
     # Phase 4: the push readings on the read's snapshot (and each lean again on every decision, with the trust applied)
-    measure_row("push_lean_probability", "a reading's own chance of up if price moves; trust 0 until earned",
+    measure_row("push_lean_probability", "a reading's lean: its chance of up if price moves, were it trusted; "
+                "trust 0 until earned",
                 "probability", "number", group="push_lean", subjects="reading", low=0, high=1,
                 blank="the input's reason: feed_missing, feed_stale, provider_refused_symbol, not_formed_yet, "
                       "no_activity, too_old", table=BOTH_TABLES, lane="push", overlap="direction_all_sources",
@@ -603,28 +607,30 @@ MEASURES = [
     measure_row("level_distance_from_price_points", "a dealer wall's price less the read price (above is positive)",
                 "points", "number", "pull", "level_distances", subjects="level_type", feed="options_scan",
                 blank=SCAN_MISSING + "; feed_missing when no bar has landed", low=-2000, high=2000),
-    # Phase 4: the closing-window ratio and the width cap, fitted with the stretch and copied onto the decisions
-    measure_row("closing_window_multiplier", "the 80% mark of |end move| in swings over windows ending in the last "
-                "15 minutes, over the all-day mark", "multiplier", "number", "pull", "band_stretch",
-                subjects="horizon", history=True, low=0, blank=FIT_BLANK_MEANING, table=BOTH_TABLES),
-    measure_row("width_cap_multiplier", "the most the stacked dials may widen the band: the history's 95% mark of "
-                "|end move| in swings over its 80% mark", "multiplier", "number", "pull", "band_stretch",
-                subjects="horizon", history=True, low=1, blank=FIT_BLANK_MEANING, table=BOTH_TABLES),
-    measure_row("closing_fit_windows_count", "closing-window windows the history fit used", "count", "whole_number",
-                "health", "fit_sample", subjects="horizon", low=0),
+    # Phase 4: the time-of-day ratios and the width cap, measured on the fit's history at read time
+    measure_row("closing_window_multiplier", "the 80% mark of |end move| in swings over unclipped windows ending in "
+                "the last 15 minutes, over the all-day mark", "multiplier", "number", "pull", "band_stretch",
+                subjects="horizon", history=True, low=0, blank=FIT_BLANK_MEANING, **DECISION_VALUE),
+    measure_row("release_window_multiplier", "the 80% mark of |end move| in swings over windows a timed release "
+                "lands in, over the all-day mark", "multiplier", "number", "pull", "band_stretch", subjects="horizon",
+                history=True, low=0, blank=f"{TOO_FEW_SESSIONS} until the history holds such a window",
+                **DECISION_VALUE),
+    measure_row("width_cap_multiplier", "the most the dials other than the Fed may widen the band: the history's 95% "
+                "mark of |end move| in swings over its 80% mark", "multiplier", "number", "pull", "band_stretch",
+                subjects="horizon", history=True, low=1, blank=FIT_BLANK_MEANING, **DECISION_VALUE),
     # Phase 4: the trust ledger's metrics (results_evaluations)
     measure_row("trust_weight_portion", "the weight a reading or dial has earned for a channel; 0 is not earned",
                 "portion", "number", "health", "trust_ledger", low=0, high=1,
-                blank=f"{NO_FIT_REASON} under the minimum live sessions", **EVALUATION_VALUE),
-    measure_row("brier_skill_portion", "1 less the lean's Brier score over even odds' 0.25; above 0 beats the coin",
-                "portion", "number", "health", "trust_ledger", blank=f"{NO_FIT_REASON} under the minimum live sessions",
-                **EVALUATION_VALUE),
+                blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
+    measure_row("brier_skill_portion", "1 less the Brier score with the lean added over the Brier score of the "
+                "earned leans alone; above 0 beats them", "portion", "number", "health", "trust_ledger",
+                blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
     measure_row("interval_score_gain_points", "band interval score without the dial less the score with it; above 0 "
                 "means the dial helped", "points", "number", "health", "trust_ledger",
-                blank=f"{NO_FIT_REASON} under the minimum live sessions", **EVALUATION_VALUE),
+                blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
     measure_row("band_coverage_portion", "share of scored windows whose end landed inside the band", "portion",
                 "number", "health", "trust_ledger", low=0, high=1,
-                blank=f"{NO_FIT_REASON} under the minimum live sessions", **EVALUATION_VALUE),
+                blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
 ]
 
 MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
@@ -634,7 +640,7 @@ WORD_LISTS = (LANES, FEED_STATUSES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAP
               SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS, DECISION_STATUSES,
               VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS, SUBJECT_KINDS,
               GRADE_START_RULE_NAMES, WIDTH_DIALS, PUSH_READINGS, EVALUATION_KINDS, EVALUATED_KINDS, VERDICTS,
-              INTERVAL_METHODS, BASELINES)
+              INTERVAL_METHODS, BASELINES, PUSH_STATUSES, WALL_TYPES, CLAUDE_SIDES)
 WORD_SHAPE = re.compile(r"^[a-z0-9_$/]+$")
 
 
@@ -667,7 +673,7 @@ def check_registry():
             raise ValueError(f"fact {group} reaches both pull and push")
 
 
-def component_row(kind, name, meaning, parameters, version="1"):
+def component_row(kind, name, meaning, parameters, version=COMPONENT_VERSION):
     """One registry_components row with the columns filled so far."""
     parameters_text = json.dumps(parameters, sort_keys=True)
     return {
@@ -704,8 +710,8 @@ def component_rows():
                 for name in PUSH_READINGS)
     rows.extend(component_row(WIDTH_DIAL_KIND, name, WIDTH_DIAL_MEANING[name], WIDTH_DIAL_PARAMETERS[name])
                 for name in WIDTH_DIALS)
-    rows.append(component_row("trust_test", LEAN_TEST[0], "a lean's Brier skill over even odds on live moved windows",
-                              LEAN_TEST_PARAMETERS, version=LEAN_TEST[1]))
+    rows.append(component_row("trust_test", LEAN_TEST[0], "a lean's Brier skill, added to the earned leans, on live "
+                              "moved windows", LEAN_TEST_PARAMETERS, version=LEAN_TEST[1]))
     rows.append(component_row("trust_test", DIAL_TEST[0], "a dial's band interval score gain on live windows, on top "
                               "of the dials earned before it", DIAL_TEST_PARAMETERS, version=DIAL_TEST[1]))
     return rows

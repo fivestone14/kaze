@@ -66,7 +66,7 @@ def close_windows(conn, day, cut_at, written_at, known_by_iso=None):
     """Outcome and grades for every range decision window of the day ended by the cut whose bars are all held (any
     window once the session is settled); returns (windows, grades)."""
     trade_date, cut_iso = day.isoformat(), session_clock.iso_utc(cut_at)
-    decisions = store.decisions_with_closed_windows(conn, trade_date, cut_iso, range_read.DECISION_KIND)
+    decisions = store.decisions_with_closed_windows(conn, trade_date, cut_iso, registry.RANGE_DECISION_KIND)
     if not decisions:
         return 0, 0
     settled = cut_at >= session_clock.session_close(day, store.half_day_sessions(conn))

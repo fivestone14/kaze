@@ -6,13 +6,13 @@ import sys
 import traceback
 from datetime import date
 
-from engine import backup, collect, grade, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry
-from engine import session_clock, store, trust
+from engine import backup, collect, grade, job_log, live_feed, mirai_files, paths, push_read, range_fit, range_read
+from engine import registry, session_clock, store, trust
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
 JOB_READ, JOB_NIGHTLY, JOB_REBUILD = "read", "nightly", "rebuild"
-RANGE_FAILED, GRADE_FAILED = "range_failed", "grade_failed"
+RANGE_FAILED, PUSH_FAILED, GRADE_FAILED = "range_failed", "push_failed", "grade_failed"
 WHOLE_SCOREBOARD = "every graded session"
 
 
@@ -22,8 +22,8 @@ def main():
     parser.add_argument("--at", metavar="YYYY-MM-DD HH:MM:SS", help="rebuild one past moment (New York time)")
     parser.add_argument("--rebuild-day", metavar="YYYY-MM-DD", help="rebuild every 5-minute read of a session")
     parser.add_argument("--backfill-bars", action="store_true", help="load every available session's SPX bars")
-    parser.add_argument("--nightly", action="store_true",
-                        help="missed slots, catch-up rebuilds, closing bars, fits, grades, parity, backup, health line")
+    parser.add_argument("--nightly", action="store_true", help="missed slots, catch-up rebuilds, closing bars, "
+                        "fits, grades, trust ledger, parity, backup, health line")
     parser.add_argument("--nightly-if-due", action="store_true",
                         help="the nightly, once a day, from 17:00 New York on, if it has not run today")
     parser.add_argument("--scoreboard", nargs="?", const=WHOLE_SCOREBOARD, metavar="YYYY-MM-DD",
@@ -99,21 +99,34 @@ def run_live():
 
 
 def write_read(conn, snapshot, observations, bars, cut_at, job):
-    """Store a read: bars, then snapshot, readings and decisions in one transaction; a failed range step is marked."""
+    """Store a read: bars, then snapshot, readings and decisions in one transaction; a failed range step is marked, a
+    failed readings step leaves the band and decisions standing with the push block empty and the read marked."""
     new_bars = store.write_bars(conn, bars)
     store.claim_snapshot_id(conn, snapshot)
     forecast, decisions, values = None, (), ()
     try:
-        forecast = range_read.forecast_read(conn, snapshot, observations, cut_at)
+        weights = store.trust_weights_known(conn, snapshot["trade_date"], snapshot["cut_at"])
+        forecast = range_read.forecast_read(conn, snapshot, observations, cut_at, weights)
+        try:
+            push_read.apply_push(forecast, push_read.readings(observations, forecast["path"]), weights)
+        except Exception:
+            log(job, "readings step FAILED\n" + traceback.format_exc().rstrip())
+            push_read.apply_push(forecast, [], weights)
+            add_status_reason(snapshot, PUSH_FAILED)
         observations.extend(range_read.reading_rows(snapshot, observations, forecast))
         decisions, values = range_read.decision_rows(snapshot, forecast)
     except Exception:
         log(job, "range step FAILED\n" + traceback.format_exc().rstrip())
         forecast, decisions, values = None, (), ()
-        reason = snapshot["snapshot_status_reason"]
-        snapshot["snapshot_status_reason"] = f"{reason},{RANGE_FAILED}" if reason else RANGE_FAILED
+        add_status_reason(snapshot, RANGE_FAILED)
     store.write_snapshot(conn, snapshot, observations, decisions, values)
     return forecast, new_bars
+
+
+def add_status_reason(snapshot, reason):
+    """Add a failed step's word to the read's status reason before it is written."""
+    stored = snapshot["snapshot_status_reason"]
+    snapshot["snapshot_status_reason"] = f"{stored},{reason}" if stored else reason
 
 
 def grade_closed_windows(conn, snapshot, day, cut_at, written_at, forecast):
@@ -286,7 +299,7 @@ def run_nightly():
                for trade_date in sessions]
     settled = []
     for trade_date in store.sessions_with_open_windows(conn, session_clock.iso_utc(written_at),
-                                                       range_read.DECISION_KIND):
+                                                       registry.RANGE_DECISION_KIND):
         windows, grades = grade.close_windows(conn, date.fromisoformat(trade_date), written_at, written_at)
         settled.append(f"{trade_date} {windows} windows ({grades} grades)")
     ledger = trust.write_ledger(conn, today, next_session, written_at)
