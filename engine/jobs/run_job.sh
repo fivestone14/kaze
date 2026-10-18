@@ -7,7 +7,7 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 job="${1:?usage: run_job.sh read|nightly|app}"
 cd "$repo" || exit 1
 if [[ ! -f .env ]]; then
-  echo "kaze $job: $repo/.env is missing; copy .env.example and fill in the two paths" >&2
+  echo "kaze $job: $repo/.env is missing; copy .env.example and fill in its five keys" >&2
   exit 1
 fi
 case "$job" in
