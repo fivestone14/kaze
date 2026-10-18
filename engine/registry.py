@@ -20,6 +20,8 @@ BAR_ARRIVAL_SECONDS = 62
 BAR_ARRIVAL_RULE = f"bar_end_plus_{BAR_ARRIVAL_SECONDS}_seconds"
 
 LANES = ("pull", "push", "trade", "label", "id", "health")
+# The design's four value columns of every long table; a row fills exactly one of them or carries a blank reason.
+VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
 VALUE_COLUMN_FOR_TYPE = {"number": "value_number", "whole_number": "value_number", "money_usd": "value_number",
                          "yes_no": "value_bool", "word": "value_text", "text": "value_text",
                          "moment": "value_at", "date": "value_at"}
@@ -50,24 +52,27 @@ DECISION_OK, DECISION_BLIND, DECISION_CLIPPED = "ok", "blind", "clipped"
 DECISION_STATUSES = (DECISION_OK, "late", "failed", "refused", DECISION_BLIND, DECISION_CLIPPED, "held_grey")
 VALUE_ROLE, RAW_ROLE, APPLIED_ROLE = "value", "raw", "applied"
 VALUE_ROLES = (VALUE_ROLE, "as_answered", "after_checks", RAW_ROLE, APPLIED_ROLE, "shown")
-# Outcome word lists (the RESULTS pillar): what happened after a read and how a decision graded.
+# Outcome word lists (the RESULTS pillar): what happened after a read and how a decision graded. Each word here
+# has a writer; a word arrives with its writer and its schema step.
 MARKET_WINDOW_KIND, FORECAST_GRADE_KIND = "market_window", "forecast_grade"
-OUTCOME_KINDS = (MARKET_WINDOW_KIND, "session_result", "level_approach_reaction", "event_reaction",
-                 FORECAST_GRADE_KIND, "chance_grade", "would_have_earned", "order_fill", "position_marks",
-                 "realized_result")
-LABEL_RESOLVED, LABEL_PARTIAL_BARS, LABEL_MISSING_BARS, LABEL_UNPRICEABLE = ("resolved", "partial_bars",
-                                                                             "missing_bars", "unpriceable")
-LABEL_STATUSES = (LABEL_RESOLVED, LABEL_PARTIAL_BARS, LABEL_MISSING_BARS, LABEL_UNPRICEABLE, "not_yet_resolved")
+OUTCOME_KINDS = (MARKET_WINDOW_KIND, FORECAST_GRADE_KIND)
+# One word for "the bars are not there": the window's label status, a value's blank reason and its value status.
+BARS_MISSING = "bars_missing"
+NOT_APPLICABLE = "not_applicable"
+LABEL_RESOLVED, LABEL_PARTIAL_BARS, LABEL_UNPRICEABLE = "resolved", "partial_bars", "unpriceable"
+LABEL_STATUSES = (LABEL_RESOLVED, LABEL_PARTIAL_BARS, BARS_MISSING, LABEL_UNPRICEABLE)
 LABELS_THAT_COUNT = (LABEL_RESOLVED, LABEL_PARTIAL_BARS)
+END_BAR_MISSING_LABEL_REASON = "end_bar_missing"
+NO_READ_PRICE_LABEL_REASON = "no_read_price"
 VALUE_STATUS_OK = "ok"
-VALUE_STATUSES = (VALUE_STATUS_OK, "missing_bars", "stale_quote", "not_applicable")
-VALUE_STATUS_FOR_BLANK = {"bars_missing": "missing_bars"}
-BLANK_VALUE_STATUS = "not_applicable"
-BARS_MISSING_REASON, NOT_APPLICABLE_REASON = "bars_missing", "not_applicable"
-NO_READ_PRICE_REASON = "no_read_price"
+VALUE_STATUSES = (VALUE_STATUS_OK, BARS_MISSING, NOT_APPLICABLE)
 BAND_SIDES = ("upper", "lower")
-# The three grade words, one home for the scoreboard, the phone block and the data map.
-GRADE_WORDS = ("ends_inside", "average_inside", "never_left")
+# The four prices a window is measured by, each with its price and move measure; the window writer and every
+# reader use these names, never a name built from parts.
+WINDOW_SIDES = ("end", "average", "high", "low")
+WINDOW_PRICE_MEASURE = {side: f"{side}_price_points" for side in WINDOW_SIDES}
+WINDOW_MOVE_MEASURE = {side: f"{side}_move_points" for side in WINDOW_SIDES}
+GRADE_START_PRICE_MEASURE = "spx_price_points"
 SPX_SYMBOL = "$SPX"
 SUBJECT_KINDS = (
     "adjustment", "band", "bucket", "builder", "cited_order", "claim", "consumer", "exit_rule", "expiry",
@@ -118,6 +123,14 @@ AVERAGE_BAND = "average_80"
 BAND_PRICE_MEASURE = {BAND: "end_price", AVERAGE_BAND: "average_price"}
 GRADE_START_RULE = "at_read"
 GRADE_START_RULE_VERSION = "1"
+GRADE_START_RULE_NAMES = (GRADE_START_RULE,)
+# The three grade words and what yes means for each: the measure, its band subject (None: the channel's own rung
+# subject) and the stored value that says yes. The scoreboard, the phone and the data map all read this.
+GRADE_WORD_MEASURE = {"ends_inside": ("was_inside_band", BAND, 1),
+                      "average_inside": ("was_inside_band", AVERAGE_BAND, 1),
+                      "never_left": ("stayed_inside_rung", None, 1)}
+GRADE_WORDS = tuple(GRADE_WORD_MEASURE)
+POOLED = "pooled"
 FIT_LOOKBACK_SESSIONS = 60
 FULL_SESSION_RULE = "every_minute_held"
 FIT_FIRST_WINDOW_MINUTE = 30
@@ -151,13 +164,14 @@ GRADE_START_RULE_PARAMETERS = {"start_price": "the read's last close", "start_ba
 WINDOW_RULE_PARAMETERS = {
     "bars": "collect_market_prices by minute, live rows preferred", "end_price": "close of the window's last bar",
     "average_price": "mean of the window's closes", "high_low": "the window's bar highs and lows",
-    "rung_points": sorted(set(RUNG_POINTS.values())), "end_bar_missing": LABEL_MISSING_BARS,
+    "rung_points": sorted(set(RUNG_POINTS.values())), "end_bar_missing": BARS_MISSING,
     "settled_after": "the session close",
 }
 GRADE_RULE_PARAMETERS = {
     "ends_inside": "|end move| <= end band half-width", "average_inside": "|average move| <= average band half-width",
     "never_left": "farthest excursion < the channel's rung", "band_miss": "points past the edge, signed, 0 inside",
-    "band_used": "excursion on each side over the end band half-width, floored at 0", "grade_start": GRADE_START_RULE,
+    "band_used": "excursion on each side over the end band half-width, floored at 0, above 1 when it broke out",
+    "grade_start": f"{GRADE_START_RULE}@{GRADE_START_RULE_VERSION}",
 }
 
 
@@ -181,12 +195,11 @@ def measure_row(name, meaning, unit, value_type, lane=None, group=None, subjects
 
 
 PUSH_LANE_DEFAULTS = dict(lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0)
-NOT_WRITTEN_YET = dict(written_since=None)
 DECISION_VALUE = dict(table="reads_decision_values", pillar="reads")
 OUTCOME_VALUE = dict(table="results_outcome_values", pillar="results")
-NO_END_BAR = f"{BARS_MISSING_REASON} when the window's last bar never reached the store"
-NO_START = f"{NOT_APPLICABLE_REASON} when the read had no price; " + NO_END_BAR
-NO_WINDOW_MOVE = f"{NOT_APPLICABLE_REASON} when the read had no price to measure from; " + NO_END_BAR
+NO_END_BAR = f"{BARS_MISSING} when the window's last bar never reached the store"
+NO_START = f"{NOT_APPLICABLE} when the read had no price; " + NO_END_BAR
+NO_WINDOW_MOVE = f"{NOT_APPLICABLE} when the read had no price to measure from; " + NO_END_BAR
 NO_GRADE = "the band's own reason when the decision was blind; " + NO_WINDOW_MOVE
 # A measure born on the snapshot (or the fit) and copied onto every decision that used it.
 BOTH_TABLES = "collect_observations|reads_decision_values"
@@ -443,38 +456,36 @@ MEASURES = [
     measure_row("grade_start_bar_at", "start of the 1-minute bar the grade measured from", "at", "moment", "id",
                 "grade_start", blank=NO_START, **OUTCOME_VALUE),
     measure_row("grade_start_rule_name", "which grading rule set the start", "word", "word", "id", "grade_start",
-                words=(GRADE_START_RULE, "read_plus_7_minutes"), **OUTCOME_VALUE),
-    measure_row("end_price_points", "close of the window's last bar", "points", "number", "label", "window_result",
-                blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
-    measure_row("average_price_points", "mean of the window's 1-minute closes", "points", "number", "label",
+                words=GRADE_START_RULE_NAMES, **OUTCOME_VALUE),
+    measure_row(WINDOW_PRICE_MEASURE["end"], "close of the window's last bar", "points", "number", "label",
                 "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
-    measure_row("high_price_points", "highest bar high inside the window", "points", "number", "label",
+    measure_row(WINDOW_PRICE_MEASURE["average"], "mean of the window's 1-minute closes", "points", "number", "label",
                 "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
-    measure_row("low_price_points", "lowest bar low inside the window", "points", "number", "label", "window_result",
-                blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
-    measure_row("end_move_points", "end price minus grade-start price", "points", "number", "label", "window_result",
-                blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
-    measure_row("average_move_points", "average price over the window minus grade-start price", "points", "number",
-                "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
-    measure_row("high_move_points", "window high minus grade-start price", "points", "number", "label",
+    measure_row(WINDOW_PRICE_MEASURE["high"], "highest bar high inside the window", "points", "number", "label",
+                "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
+    measure_row(WINDOW_PRICE_MEASURE["low"], "lowest bar low inside the window", "points", "number", "label",
+                "window_result", blank=NO_END_BAR, **POINTS_RANGE, **OUTCOME_VALUE),
+    measure_row(WINDOW_MOVE_MEASURE["end"], "end price minus grade-start price", "points", "number", "label",
                 "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
-    measure_row("low_move_points", "window low minus grade-start price", "points", "number", "label", "window_result",
-                blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row(WINDOW_MOVE_MEASURE["average"], "average price over the window minus grade-start price", "points",
+                "number", "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row(WINDOW_MOVE_MEASURE["high"], "window high minus grade-start price", "points", "number", "label",
+                "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row(WINDOW_MOVE_MEASURE["low"], "window low minus grade-start price", "points", "number", "label",
+                "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("minutes_covered_count", "window minutes with a bar held in the store", "count", "whole_number",
                 "health", "window_coverage", blank=NO_END_BAR, low=0, high=390, **OUTCOME_VALUE),
-    measure_row("did_leave_rung", "price touched either edge of the rung during the window", "yes_no", "yes_no",
-                "label", "rung_grade", subjects="rung_points", blank=NO_GRADE, **OUTCOME_VALUE),
+    measure_row("stayed_inside_rung", "price never reached either edge of the rung during the window", "yes_no",
+                "yes_no", "label", "rung_grade", subjects="rung_points", blank=NO_GRADE, **OUTCOME_VALUE),
     # Phase 3: how each range decision graded (forecast_grade outcomes)
     measure_row("was_inside_band", "the band's price (end or average) landed inside the band", "yes_no", "yes_no",
                 "label", "band_grade", subjects="band", blank=NO_GRADE, **OUTCOME_VALUE),
     measure_row("band_miss_points", "points the band's price landed past the edge: above the top positive, below the "
                 "bottom negative, 0 inside", "points", "number", "label", "band_grade", subjects="band",
                 blank=NO_GRADE, **OUTCOME_VALUE),
-    measure_row("band_used_portion", "farthest excursion on this side over the end band's half-width; above 1 broke "
-                "out", "ratio", "number", "label", "band_grade", subjects="band|side", blank=NO_GRADE, low=0,
-                **OUTCOME_VALUE),
-    measure_row("official_close_points", "the session's official close", "points", "number", "label", "window_result",
-                table="results_outcome_values", pillar="results", **POINTS_RANGE, **NOT_WRITTEN_YET),
+    measure_row("band_used_ratio", "farthest excursion on this side over the end band's half-width; above 1 means "
+                "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
+                blank=NO_GRADE, low=0, **OUTCOME_VALUE),
 ]
 
 MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}

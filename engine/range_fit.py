@@ -22,8 +22,8 @@ HISTORY_CACHE = {}
 
 def minute_series(bars, trade_date):
     """Closes, highs and lows placed by minute of the session (NaN where a bar is missing), up to the last bar held."""
-    open_at = session_clock.session_open(date.fromisoformat(trade_date))
-    minutes = [int((session_clock.parse_iso(bar["priced_at"]) - open_at).total_seconds() // 60) for bar in bars]
+    day = date.fromisoformat(trade_date)
+    minutes = [session_clock.session_minute(session_clock.parse_iso(bar["priced_at"]), day) for bar in bars]
     series = np.full((3, minutes[-1] + 1 if minutes else 0), np.nan)
     for minute, bar in zip(minutes, bars):
         series[:, minute] = (bar["close"], bar["high"], bar["low"])

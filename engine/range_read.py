@@ -16,7 +16,7 @@ NO_EFFECT = 1.0
 BAND_EDGES = ("half_width", "low", "high")
 
 
-def value_of(observations, measure_name, subject_key="whole"):
+def value_of(observations, measure_name, subject_key=store.WHOLE):
     """The value of one observation in a read's list, or None when it is absent or blank."""
     for observation in observations:
         if observation["measure_name"] == measure_name and observation["subject_key"] == subject_key:
@@ -27,7 +27,7 @@ def value_of(observations, measure_name, subject_key="whole"):
 def stored_fit(conn, fit_snapshot):
     """A stored fit's multipliers and counts by horizon, in the shape multipliers_from_history returns."""
     fits = {name: range_fit.horizon_fit(None, None, None, None) for name in registry.HORIZON_MINUTES}
-    for observation in store.snapshot_observations(conn, fit_snapshot["snapshot_id"]):
+    for observation in store.snapshot_observations(conn, fit_snapshot["snapshot_rowid"]):
         subject = registry.subject_parts(observation["subject_key"])
         fit = fits[subject["horizon"]]
         if observation["measure_name"] == "band_multiplier":
@@ -44,7 +44,7 @@ def stored_fit(conn, fit_snapshot):
 def forecast_read(conn, snapshot, observations, cut_at):
     """Work the read out from the store; returns the forecast its readings, decisions and phone block come from."""
     day = session_clock.to_eastern(cut_at).date()
-    bars = store.session_bars(conn, day.isoformat(), snapshot["cut_at"])
+    bars = store.session_bars(conn, day.isoformat(), snapshot["cut_at"], store.bars_known_by(snapshot, cut_at))
     closes = range_fit.minute_series(bars, day.isoformat())[0]
     speed = range_fit.speed(closes)
     speed_fast = range_fit.speed(closes, registry.FAST_SPEED_HALF_LIFE_MINUTES)
@@ -186,7 +186,8 @@ def decision_rows(snapshot, forecast):
     for name, channel in forecast["channels"].items():
         fields = {
             "horizon_name": name, "horizon_minutes": channel["minutes"], "graded_price_measure": GRADED_PRICE,
-            "grade_start_rule_version": registry.GRADE_START_RULE,
+            "grade_start_rule_name": registry.GRADE_START_RULE,
+            "grade_start_rule_version": registry.GRADE_START_RULE_VERSION,
             "grade_window_starts_at": session_clock.iso_utc(forecast["window_from"]),
             "grade_window_ends_at": session_clock.iso_utc(channel["ends_at"]),
             "decision_status": channel["status"], "decision_status_reason": channel["reason"],
@@ -211,7 +212,7 @@ def value_rows(decision, forecast, name, variant):
     band_blank = not_formed if channel["swing"] is None else no_fit
     horizon = registry.subject_key(horizon=name)
 
-    def add(measure_name, value, subject_key="whole", blank=None, **extra):
+    def add(measure_name, value, subject_key=store.WHOLE, blank=None, **extra):
         """One value row of this decision, rounded."""
         rows.append(store.decision_value_row(decision, measure_name, store.rounded(value), subject_key,
                                              blank_reason=blank, **extra))

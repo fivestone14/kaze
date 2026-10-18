@@ -1,19 +1,18 @@
 # The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, grades, live feed) and
-# the nightly (fits, rebuild, grades, parity); by hand it rebuilds a moment or a session, grades the stored history,
-# backfills bars, or prints the scoreboard or the range pass test.
+# the nightly (catch-up rebuilds, fits, every open window settled, parity, backup); by hand it rebuilds a moment or a
+# session, backfills bars, or prints the scoreboard or the range pass test.
 import argparse
 import sys
 import traceback
-from datetime import date, timedelta
+from datetime import date
 
-from engine import collect, grade, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry
+from engine import backup, collect, grade, job_log, live_feed, mirai_files, paths, range_fit, range_read, registry
 from engine import session_clock, store
 
-BAR_WAIT_SECONDS = 100
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
 JOB_READ, JOB_NIGHTLY, JOB_REBUILD = "read", "nightly", "rebuild"
-RANGE_FAILED = "range_failed"
+RANGE_FAILED, GRADE_FAILED = "range_failed", "grade_failed"
 WHOLE_SCOREBOARD = "every graded session"
 
 
@@ -24,16 +23,15 @@ def main():
     parser.add_argument("--rebuild-day", metavar="YYYY-MM-DD", help="rebuild every 5-minute read of a session")
     parser.add_argument("--backfill-bars", action="store_true", help="load every available session's SPX bars")
     parser.add_argument("--nightly", action="store_true",
-                        help="missed slots, closing bars, history fits, rebuild, parity, health line")
-    parser.add_argument("--nightly-if-due", action="store_true", help="the nightly, only in the 17:00 New York hour")
-    parser.add_argument("--grade-history", action="store_true",
-                        help="rebuild every stored session that has no reads, then grade every window still open")
+                        help="missed slots, catch-up rebuilds, closing bars, fits, grades, parity, backup, health line")
+    parser.add_argument("--nightly-if-due", action="store_true",
+                        help="the nightly, once a day, from 17:00 New York on, if it has not run today")
     parser.add_argument("--scoreboard", nargs="?", const=WHOLE_SCOREBOARD, metavar="YYYY-MM-DD",
                         help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
-    if args.at or args.rebuild_day or args.backfill_bars or args.grade_history or args.scoreboard or args.pass_test:
+    if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test:
         job = JOB_REBUILD
     try:
         if args.nightly_if_due:
@@ -46,8 +44,6 @@ def main():
             run_rebuild_day(date.fromisoformat(args.rebuild_day))
         elif args.backfill_bars:
             run_backfill_bars()
-        elif args.grade_history:
-            run_grade_history()
         elif args.scoreboard:
             run_scoreboard(None if args.scoreboard == WHOLE_SCOREBOARD else args.scoreboard)
         elif args.pass_test:
@@ -68,6 +64,8 @@ def log(job, line):
         print(line)
 
 
+# ---- The live read -------------------------------------------------------------------------------------------------
+
 def run_live():
     """One live read for the slot launchd fired on; outside the session's slots it writes nothing but a log line."""
     now = session_clock.now_utc()
@@ -86,7 +84,7 @@ def run_live():
         conn, cut_at, "live_frozen", written_at, slot, slot_status, calendar, half_days,
         login=mirai_files.read_login_state(), bar_arrived=bar_arrived)
     forecast, new_bars = write_read(conn, snapshot, observations, bars, cut_at, JOB_READ)
-    graded = grade_closed_windows(conn, day, cut_at, session_clock.now_utc(), forecast)
+    graded = grade_closed_windows(conn, snapshot, day, cut_at, session_clock.now_utc(), forecast)
     live_feed.write_live_feed(snapshot, observations, feed_states, forecast)
     reason = f", {snapshot['snapshot_status_reason']}" if snapshot["snapshot_status_reason"] else ""
     build = f"{snapshot['row_origin']} b{snapshot['build_attempt_number']}"
@@ -94,20 +92,6 @@ def run_live():
                   f"cut {session_clock.iso_eastern(cut_at)}: {len(observations)} observations, {new_bars} new bars, "
                   f"status {snapshot['snapshot_status']}{reason}, {band_summary(forecast)}, {graded}, "
                   f"built in {snapshot['build_seconds']} s")
-
-
-def grade_closed_windows(conn, day, cut_at, written_at, forecast):
-    """After a live read: close the day's ended windows and put the windows block on the forecast; a crash is logged."""
-    try:
-        windows, grades = grade.close_windows(conn, day, cut_at, written_at)
-        if forecast is not None:
-            forecast[grade.WINDOWS] = grade.phone_block(conn, day, cut_at)
-    except Exception:
-        log(JOB_READ, "grading step FAILED\n" + traceback.format_exc().rstrip())
-        if forecast is not None:
-            forecast[grade.WINDOWS] = None
-        return "grading step failed"
-    return f"{windows} windows closed ({grades} grades)"
 
 
 def write_read(conn, snapshot, observations, bars, cut_at, job):
@@ -128,6 +112,23 @@ def write_read(conn, snapshot, observations, bars, cut_at, job):
     return forecast, new_bars
 
 
+def grade_closed_windows(conn, snapshot, day, cut_at, written_at, forecast):
+    """After a live read: close the day's ended windows and put the windows block on the forecast; a crash is logged,
+    stamped grade_failed on the stored read and carried to the phone."""
+    known_by = store.bars_known_by(snapshot, cut_at)
+    try:
+        windows, grades = grade.close_windows(conn, day, cut_at, written_at, known_by)
+        if forecast is not None:
+            forecast[live_feed.WINDOWS] = live_feed.windows_block(conn, day, cut_at, known_by)
+    except Exception as failure:
+        log(JOB_READ, "grading step FAILED\n" + traceback.format_exc().rstrip())
+        store.mark_snapshot_reason(conn, snapshot, GRADE_FAILED)
+        if forecast is not None:
+            forecast[live_feed.WINDOWS] = live_feed.failed_windows_block(failure)
+        return "grading step failed"
+    return f"{windows} windows closed ({grades} grades)"
+
+
 def band_summary(forecast):
     """The headline band in one phrase for a log line."""
     if forecast is None:
@@ -143,7 +144,7 @@ def band_summary(forecast):
 def wait_for_bar(day, cut_at):
     """Poll the bars file until the bar for the cut's minute has landed or the wait after that minute runs out."""
     wanted = cut_at.replace(second=0, microsecond=0)
-    deadline = cut_at + timedelta(seconds=1 + BAR_WAIT_SECONDS)
+    deadline = session_clock.bar_deadline(cut_at)
     while True:
         bars = mirai_files.read_spx_bars(day, cut_at)
         if bars and bars[-1]["at"] == wanted:
@@ -152,6 +153,8 @@ def wait_for_bar(day, cut_at):
             return False
         session_clock.sleep_seconds(BAR_POLL_SECONDS)
 
+
+# ---- Rebuilds by hand ----------------------------------------------------------------------------------------------
 
 def rebuild_read(conn, cut_at, slot, calendar, half_days):
     """Rebuild one read at a cut (history_rebuilt) with its bars and forecast; returns snapshot, forecast, new bars."""
@@ -193,18 +196,6 @@ def run_rebuild_day(day):
                      f"({grades} grades)")
 
 
-def run_grade_history():
-    """Rebuild every stored session that has no reads yet, then close every window of every session still open."""
-    calendar, half_days = mirai_files.session_calendar()
-    conn = store.open_store()
-    now = session_clock.now_utc()
-    for trade_date, _ in store.sessions_with_bars(conn):
-        day = date.fromisoformat(trade_date)
-        reads = 0 if store.session_has_reads(conn, trade_date) else rebuild_session(conn, day, calendar, half_days)[0]
-        windows, grades = grade.close_windows(conn, day, now, now)
-        log(JOB_REBUILD, f"graded {day}: {reads} reads rebuilt, {windows} windows closed ({grades} grades)")
-
-
 def run_scoreboard(day):
     """Print the scoreboard for one session (or every graded session) and the pooled last 20 sessions."""
     print("\n".join(grade.scoreboard_lines(store.open_store(), day)))
@@ -243,30 +234,62 @@ def run_backfill_bars():
     log(JOB_REBUILD, f"backfilled bars: {sessions} sessions found, {bars_total} new bars stored")
 
 
+# ---- The nightly ---------------------------------------------------------------------------------------------------
+
 def run_nightly_if_due():
-    """The nightly, but only in the 17:00 New York hour (launchd fires this hourly, whatever the box's time zone)."""
+    """The nightly once a day: from 17:00 New York to midnight, the first launch on a day it has not run yet."""
     now = session_clock.now_utc()
-    if session_clock.to_eastern(now).hour != session_clock.NIGHTLY_HOUR_EASTERN:
-        log(JOB_NIGHTLY, f"not the nightly hour at {session_clock.iso_eastern(now)}; nothing done")
+    today = session_clock.to_eastern(now).date().isoformat()
+    marker = paths.nightly_done_file()
+    done = marker.read_text().strip() if marker.exists() else None
+    if session_clock.to_eastern(now).hour < session_clock.NIGHTLY_HOUR_EASTERN or done == today:
+        log(JOB_NIGHTLY, f"nightly not due at {session_clock.iso_eastern(now)} (last done {done}); nothing done")
         return
     run_nightly()
 
 
 def run_nightly():
-    """Missed slots (on the session's own day), the session's bars once, history fits, rebuild, parity, one line."""
+    """Missed slots (on the session's own day), bars and rebuilds for today and any live day never rebuilt, history
+    fits, every open window of every session settled, parity, the backup, the health line, the done marker."""
     conn = store.open_store()
     calendar, half_days = mirai_files.session_calendar()
     written_at = session_clock.now_utc()
     today = session_clock.latest_trading_day(session_clock.to_eastern(written_at).date())
     own_session = today == session_clock.to_eastern(written_at).date()
     missed = write_missed_slots(conn, today, half_days, written_at) if own_session else 0
-    live_reads = store.live_reads_count(conn, today.isoformat())
-    bars_origin = "live_frozen" if live_reads else "history_rebuilt"
-    session_bars = write_session_bars(conn, today, bars_origin, half_days, written_at)
+    sessions = sorted({today.isoformat(), *store.live_sessions_not_rebuilt(conn)})
+    bars_added = {}
+    for trade_date in sessions:
+        origin = "live_frozen" if store.live_reads_count(conn, trade_date) else "history_rebuilt"
+        bars_added[trade_date] = (write_session_bars(conn, date.fromisoformat(trade_date), origin, half_days,
+                                                     written_at), origin)
     next_session = session_clock.next_trading_day(today)
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
-    rebuilt_reads, _ = rebuild_session(conn, today, calendar, half_days)
-    windows, grades = grade.close_windows(conn, today, written_at, written_at)
+    rebuilt = [f"{trade_date} {rebuild_session(conn, date.fromisoformat(trade_date), calendar, half_days)[0]} reads"
+               for trade_date in sessions]
+    settled = []
+    for trade_date in store.sessions_with_open_windows(conn, session_clock.iso_utc(written_at),
+                                                       range_read.DECISION_KIND):
+        windows, grades = grade.close_windows(conn, date.fromisoformat(trade_date), written_at, written_at)
+        settled.append(f"{trade_date} {windows} windows ({grades} grades)")
+    parity = parity_summaries(conn, half_days, written_at)
+    packed, pruned, same_disk = backup.write_backup(conn, today)
+    if same_disk:
+        log(JOB_NIGHTLY, f"warning: {paths.BACKUP_KEY} is not set, so the backup {packed} sits on the store's own disk")
+    conn.execute("PRAGMA optimize")
+    live_bars = store.bar_count(conn, today.isoformat(), "live_frozen")
+    bars = "; ".join(f"{trade_date} {added} {origin} bars added" for trade_date, (added, origin) in bars_added.items())
+    fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
+    log(JOB_NIGHTLY, f"nightly {today}: {store.live_reads_count(conn, today.isoformat())} live reads, {missed} missed "
+                     f"slots marked, {store.snapshots_with_reason(conn, today.isoformat(), GRADE_FAILED)} reads with a "
+                     f"failed grading step, {live_bars} live bars ({bars}); rebuilt {', '.join(rebuilt)}; {fits}; "
+                     f"settled {', '.join(settled) or 'nothing open'}; parity: {parity}; "
+                     f"backup {packed.name} ({pruned} older removed)")
+    paths.nightly_done_file().write_text(session_clock.to_eastern(written_at).date().isoformat() + "\n")
+
+
+def parity_summaries(conn, half_days, written_at):
+    """Compare live with rebuilt reads for every session that has both, write the check rows, log the mismatches."""
     summaries = []
     for day in store.days_with_live_and_rebuilt_reads(conn):
         compared, mismatches, tolerated = store.parity_result(conn, day)
@@ -275,16 +298,9 @@ def run_nightly():
                          f"{len(tolerated)} tape/scan differences tolerated")
         for mismatch in mismatches[:MISMATCH_LINES_LOGGED]:
             log(JOB_NIGHTLY, f"mismatch {day} {mismatch['cut_at']} {mismatch['measure_name']} "
-                             f"{mismatch['subject_key']}: "
-                             f"live {store.parity_side_value(mismatch, 'live')} "
+                             f"{mismatch['subject_key']}: live {store.parity_side_value(mismatch, 'live')} "
                              f"rebuilt {store.parity_side_value(mismatch, 'rebuilt')}")
-    live_bars = store.bar_count(conn, today.isoformat(), "live_frozen")
-    parity = "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
-    fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
-    log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, "
-                     f"{rebuilt_reads} reads rebuilt, {windows} windows closed ({grades} grades), "
-                     f"{live_bars} live bars ({session_bars} {bars_origin} bars added at the close); {fits}; "
-                     f"parity: {parity}")
+    return "; ".join(summaries) if summaries else "no session with both live and rebuilt reads yet"
 
 
 def run_pass_test():
@@ -323,7 +339,7 @@ def write_parity_check(conn, day, compared, mismatches, tolerated, half_days, wr
         store.observation_row(snapshot, "tolerated_mismatches_count", len(tolerated)),
         store.observation_row(snapshot, "rebuild_identical_portion", identical,
                               subject_key=registry.subject_key(table_column="collect_observations.value"),
-                              blank_reason=None if identical is not None else "not_applicable"),
+                              blank_reason=None if identical is not None else registry.NOT_APPLICABLE),
     ]
     store.write_snapshot(conn, snapshot, observations)
 

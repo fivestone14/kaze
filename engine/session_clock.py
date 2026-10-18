@@ -14,6 +14,7 @@ SLOT_MINUTES = 5
 SLOT_CUT_SECOND = 59
 BAR_LENGTH_SECONDS = 60
 LATE_LAUNCH_MINUTES = 1
+BAR_WAIT_SECONDS = 100
 HEADLINE_SLOT_MINUTES = (5, 35)
 LANE_HEADLINE = "headline_30"
 LANE_EVERY_5 = "range_every_5_minutes"
@@ -103,10 +104,19 @@ def session_minutes(day, half_days):
     return int((session_close(day, half_days) - session_open(day)).total_seconds() // 60)
 
 
+def session_minute(moment, day):
+    """Which minute of the session a moment falls in, counting from 0 at the open (12:35:59 is minute 185)."""
+    return int((moment - session_open(day)).total_seconds() // 60)
+
+
 def minutes_since_open(cut_at):
     """Whole session minutes finished by the cut (the 12:35:59 cut has 186 of them)."""
-    local = to_eastern(cut_at)
-    return int((local - session_open(local.date())).total_seconds() // 60) + 1
+    return session_minute(cut_at, to_eastern(cut_at).date()) + 1
+
+
+def bar_deadline(cut_at):
+    """The last moment a read at this cut waits for its own bar: the minute after the cut plus the bar wait."""
+    return cut_at + timedelta(seconds=1 + BAR_WAIT_SECONDS)
 
 
 def day_slots(day, half_days):

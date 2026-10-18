@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".env"
 REQUIRED_KEYS = ("KAZE_MIRAI_HOME", "KAZE_DATA")
+BACKUP_KEY = "KAZE_BACKUP_DIR"
 
 
 def read_env_file(path=ENV_FILE):
@@ -22,7 +23,7 @@ def read_env_file(path=ENV_FILE):
     missing = [key for key in REQUIRED_KEYS if not values.get(key)]
     if missing:
         raise SystemExit(f"kaze: {path} lacks {', '.join(missing)}")
-    for key in REQUIRED_KEYS:
+    for key in REQUIRED_KEYS + ((BACKUP_KEY,) if values.get(BACKUP_KEY) else ()):
         if not Path(values[key]).is_dir():
             raise SystemExit(f"kaze: {key}={values[key]} in {path} is not a folder that exists")
     return values
@@ -31,6 +32,7 @@ def read_env_file(path=ENV_FILE):
 ENV = read_env_file()
 MIRAI_HOME = Path(ENV["KAZE_MIRAI_HOME"])
 KAZE_DATA = Path(ENV["KAZE_DATA"])
+BACKUP_DIR = Path(ENV[BACKUP_KEY]) if ENV.get(BACKUP_KEY) else None
 
 
 def mirai_data(*parts):
@@ -56,3 +58,13 @@ def live_feed_file():
 def logs_folder():
     """Where the jobs write their one-line logs."""
     return KAZE_DATA / "logs"
+
+
+def backup_folder():
+    """Where the nightly puts its dated copies of the store: KAZE_BACKUP_DIR, or backups/ beside the store if unset."""
+    return BACKUP_DIR if BACKUP_DIR is not None else KAZE_DATA / "backups"
+
+
+def nightly_done_file():
+    """The one-line file that says which New York day the nightly last finished."""
+    return KAZE_DATA / "nightly_done.txt"
