@@ -1,9 +1,15 @@
-// Fetches /latest.json and /bars.json every 30 s and draws the three views from them; nothing on screen comes from
-// anywhere else. One fetch, one render per block (each in its own guard), one number formatter, one clock.
+// Fetches /latest.json and /bars.json every 30 s, and holds /price.stream open for SPX's live price while the page is
+// shown; it draws the three views from those three and nothing else. One fetch, one render per block (each in its own
+// guard), one number formatter, one clock, one home for the live window's maths.
 "use strict";
 
 const CHANNELS = { "5_minutes": 5, "30_minutes": 30, "60_minutes": 60 };
-const FRESH_SECONDS = 6 * 60;
+const FRESH_SECONDS = 8 * 60;
+const TICK_FRESH_SECONDS = 10;
+const BAR_CLOSE_SECOND_MS = 59000;
+const STREAM_REOPEN_MS = 1000;
+const STREAM_BACKOFF_MS = 5000;
+const STREAM_BACKOFF_MAX_MS = 60000;
 const CLOSE_GRACE_SECONDS = 60;
 const FIRST_READ_SECONDS = 5 * 60;
 const POLL_MS = 30000;
@@ -26,17 +32,23 @@ const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 
 const PUSH_LABELS = { price_trend: "Price Trend", straightness: "Straightness", breadth: "Breadth",
                       big_tech_vs_rest: "Big Tech vs Rest", options_buyers: "Options Buyers",
                       yield_change: "10-Year Yield", mirai_claude: "Claude" };
-const FEED_LABELS = { spx_bars: "SPX Bars", watchlist_quotes: "Quotes", nyse_breadth: "Breadth",
-                      options_scan: "Options Scan", options_tape: "Options Tape", futures_bars: "Futures",
+const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchlist_quotes: "Quotes",
+                      nyse_breadth: "Breadth", options_scan: "Options Scan", options_tape: "Options Tape",
+                      futures_bars: "Futures",
                       event_calendar: "Calendar", news_headlines: "News", claude_forecast: "Claude",
                       schwab_login: "Schwab Login" };
+// What a once-a-day or hand-kept feed's row says instead of an age, from its as_of.
+const AS_OF_WORDS = { futures_bars: (at) => `Night · ${clock(at)}`, schwab_login: (at) => `Checked ${clock(at)}`,
+                      event_calendar: (day) => `To ${monthDay(day)}` };
+const QUIET_CADENCES = ["once_a_day", "hand_kept"];
 const DIAL_LABELS = { fed_window: "Fed", release_window: "News", closing_window: "Close",
                       acceleration: "Fast vs Slow", options_vs_tape: "Options vs Tape" };
 const REPLY_WORDS = { 401: "Sign-In Refused (401) · Check The Token",
                       404: "No Live Feed Yet · The Engine Has Not Written One",
-                      503: "The Mac's Server Can't Read The Store (503)" };
+                      503: "The Mac's Server Can't Answer Right Now (503)" };
 const state = { feed: null, bars: [], channel: "30_minutes", fetchedAt: null, unreachable: false, unreadable: false,
-                feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false };
+                feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false,
+                tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null };
 
 // ---- the one number formatter, the one clock formatter, small text helpers ------------------------------------------
 
@@ -49,9 +61,19 @@ function fmt(value, decimals = 0, signed = false) {
   return signed ? "+" + text : text;
 }
 
-function clock(iso) {
+function clock(iso, seconds = false) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const parts = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+  return new Date(iso).toLocaleTimeString([], seconds ? { ...parts, second: "2-digit" } : parts);
+}
+
+/** "12-31" for a bare date, read as the day it names. */
+function monthDay(day) {
+  return day ? day.slice(5, 10) : "—";
+}
+
+function ms(iso) {
+  return new Date(iso).getTime();
 }
 
 /** "Fri 10-16" for a moment or a bare date; a bare date is read as a local day, never as UTC midnight. */
@@ -202,6 +224,65 @@ function isLive() {
   return feedState() === "live";
 }
 
+/** True while the session the feed describes is open: the read is live or late, not closed. */
+function sessionOpen() {
+  return ["live", "late"].includes(feedState());
+}
+
+/** The live tick when it belongs to the feed's session (a tick from the next morning never meets an old read). */
+function sessionTick() {
+  const cut = state.feed && state.feed.cut_at;
+  return state.tick && cut && state.tick.at.slice(0, 10) === cut.slice(0, 10) ? state.tick : null;
+}
+
+/** True while ticks arrive: the newest one traded less than ten seconds ago. */
+function tickFresh() {
+  const tick = sessionTick();
+  return Boolean(tick) && (Date.now() - ms(tick.at)) / 1000 < TICK_FRESH_SECONDS;
+}
+
+/** The newest price the page holds and when it was the price: the live tick, a minute's close or the read's price. */
+function latestPrice() {
+  const block = range();
+  const bar = state.bars[state.bars.length - 1];
+  const tick = sessionTick();
+  const known = [block ? { price: block.price, atMs: ms(block.read_at) } : null,
+                 bar ? { price: bar.close, atMs: ms(bar.at) + BAR_CLOSE_SECOND_MS } : null,
+                 tick ? { price: tick.price, atMs: ms(tick.at) } : null]
+    .filter((entry) => entry && entry.price !== null);
+  return known.reduce((newest, entry) => (!newest || entry.atMs >= newest.atMs ? entry : newest), null);
+}
+
+/** The live window measured now, the grade's way: its minute closes from window_from (the live tick standing in for
+ *  the minute still trading), the move and running average from the read price, and whether that average sits inside
+ *  its band. The one home for this maths: the chart's line, the strip and the list's live row all read it. */
+function liveNow(current) {
+  const fromMs = ms(current.window_from), endMs = ms(current.ends_at);
+  const series = state.bars.filter((bar) => ms(bar.at) >= fromMs && ms(bar.at) < endMs)
+    .map((bar) => ({ at: bar.at, close: bar.close }));
+  const tick = sessionTick();
+  const tickMinuteMs = tick ? Math.floor(ms(tick.at) / 60000) * 60000 : null;
+  const lastMs = series.length ? ms(series[series.length - 1].at) : -Infinity;
+  if (tick && tickMinuteMs >= fromMs && tickMinuteMs < endMs && tickMinuteMs > lastMs) {
+    series.push({ at: new Date(tickMinuteMs).toISOString(), close: tick.price });
+  }
+  if (!series.length || current.price === null) {
+    return { ...current.now, average_inside: current.average_inside, series, averages: [] };
+  }
+  let sum = 0;
+  const averages = series.map((point, index) => {
+    sum += point.close;
+    return sum / (index + 1);
+  });
+  const move = series[series.length - 1].close - current.price;
+  const averageMove = averages[averages.length - 1] - current.price;
+  const averageHalf = halfWidth(current.bands, "average_80");
+  return { move, average_move: averageMove,
+           farthest_up: Math.max(current.now.farthest_up || 0, move, 0),
+           farthest_down: Math.max(current.now.farthest_down || 0, -move, 0),
+           average_inside: averageHalf === null ? null : Math.abs(averageMove) <= averageHalf, series, averages };
+}
+
 /** The read a channel's screens explain: the live window's own read (its chain travels with it), else the newest
  *  read's channel block (the same read when the newest read is the headline one). One shape for Sight and Steps. */
 function explainedRead() {
@@ -244,11 +325,67 @@ function newestReadDiffers(read) {
 
 // ---- the fetch, the poll and the render ----------------------------------------------------------------------------
 
-function fetchWithTimeout(path) {
-  const control = new AbortController();
+/** One request to the Mac (same origin, so the shell's sign-in rides along), given up when its reply has not begun
+ *  within ten seconds; the control given aborts it later too. */
+function fetchWithTimeout(path, control = new AbortController()) {
   const timer = setTimeout(() => control.abort(), FETCH_TIMEOUT_MS);
   return fetch(location.origin + path, { cache: "no-store", signal: control.signal })
     .finally(() => clearTimeout(timer));
+}
+
+/** Hold /price.stream open while the page is shown: each event is a tick; the stream ending (the server closes it
+ *  after 30 minutes) reopens it in a second, a failure in a growing wait. Without ticks the 30 s poll carries on. */
+async function openPriceStream() {
+  if (state.stream || document.hidden) return;
+  const control = new AbortController();
+  state.stream = control;
+  try {
+    const reply = await fetchWithTimeout("/price.stream", control);
+    if (!reply.ok || !reply.body) throw new Error(`price stream ${reply.status}`);
+    const reader = reply.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      state.streamFailures = 0;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      events.forEach(takePriceEvent);
+    }
+  } catch (failure) {
+    if (state.stream === control) state.streamFailures += 1;
+  }
+  if (state.stream !== control) return;
+  state.stream = null;
+  clearTimeout(state.streamTimer);
+  const wait = state.streamFailures
+    ? Math.min(STREAM_BACKOFF_MS * 2 ** (state.streamFailures - 1), STREAM_BACKOFF_MAX_MS) : STREAM_REOPEN_MS;
+  state.streamTimer = setTimeout(openPriceStream, wait);
+}
+
+function closePriceStream() {
+  clearTimeout(state.streamTimer);
+  const control = state.stream;
+  state.stream = null;
+  if (control) control.abort();
+}
+
+/** One server-sent event: a data line is a tick ({price, at}); a comment line only keeps the connection open. */
+function takePriceEvent(text) {
+  const data = text.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5)).join("");
+  if (!data) return;
+  try {
+    const tick = JSON.parse(data);
+    if (typeof tick.price !== "number" || !tick.at) return;
+    state.tick = tick;
+  } catch (failure) {
+    return;
+  }
+  renderLive();
+  clearTimeout(state.tickTimer);
+  state.tickTimer = setTimeout(renderLive, TICK_FRESH_SECONDS * 1000);
 }
 
 async function loadFeed() {
@@ -300,6 +437,15 @@ function guarded(draw, noteId) {
   }
 }
 
+/** What a tick moves: the header, the chart's line, the strip, the list's live row and the feeds card. */
+function renderLive() {
+  guarded(renderClock, "clock-note");
+  guarded(renderRead, "chart-note");
+  guarded(renderStrip, "strip-note");
+  guarded(renderReadsList, "list-note");
+  guarded(renderFeeds, "feeds-note");
+}
+
 function render() {
   guarded(renderClock, "clock-note");
   guarded(renderNotice, "notice");
@@ -326,15 +472,21 @@ function renderClock() {
                   closed: `Closed · Last Read ${clock(cut)}`,
                   no_read_today: `No Read Yet Today · Last Read ${dayWord(cut)} ${clock(cut)}`,
                   late: `Late · Last Read ${clock(cut)} · ${ago(feedAgeSeconds())} Ago`,
-                  live: `Live · ${clock(cut)}` };
+                  live: `Read ${clock(cut)} · Price ${tickFresh() ? "Live" : priceMoment()}` };
   document.querySelectorAll(".clock-text").forEach((node) => { node.textContent = words[kind]; });
   document.querySelectorAll(".clock-dot").forEach((node) => { node.className = `clock-dot ${kind}`; });
-  const block = range();
+  const latest = latestPrice();
   const priorClose = valueOf("prior_close_points");
-  const change = block && priorClose ? (block.price - priorClose) / priorClose * 100 : null;
-  el("price").textContent = block ? fmt(block.price, 2) : "—";
+  const change = latest && priorClose ? (latest.price - priorClose) / priorClose * 100 : null;
+  el("price").textContent = latest ? fmt(latest.price, 2) : "—";
   el("change").textContent = change === null ? "—" : `${fmt(change, 2, true)}%`;
   el("change").className = "change " + (change === null ? "faint" : change < 0 ? "down" : "up");
+}
+
+/** When the header's price was the price, to the second, on the phone's clock. */
+function priceMoment() {
+  const latest = latestPrice();
+  return latest ? clock(new Date(latest.atMs).toISOString(), true) : "—";
 }
 
 function renderNotice() {
@@ -389,12 +541,14 @@ function renderChart(current, finished, minutes) {
   if (!anchorEnd) return;
   const span = CHART.right - CHART.left;
   const pxPerMinute = CHART.liveShare * span / minutes;
-  const endMs = new Date(anchorEnd).getTime();
+  const endMs = ms(anchorEnd);
   const startMs = endMs - span / pxPerMinute * 60000;
-  const ms = (iso) => new Date(iso).getTime();
   const x = (iso) => CHART.left + (ms(iso) - startMs) / 60000 * pxPerMinute;
   const boxes = finished.filter((window) => ms(window.window_from) >= startMs && window.half_width !== null);
-  const bars = state.bars.filter((bar) => ms(bar.at) >= startMs && ms(bar.at) <= endMs);
+  const fromMs = current ? ms(current.window_from) : Infinity;
+  const before = state.bars.filter((bar) => ms(bar.at) >= startMs && ms(bar.at) <= endMs && ms(bar.at) < fromMs);
+  const now = current ? liveNow(current) : null;
+  const bars = before.concat(now ? now.series : []);
   const liveHalf = current ? halfWidth(current.bands, "80") : null;
   const prices = [];
   boxes.forEach((window) => prices.push(window.price + window.half_width, window.price - window.half_width,
@@ -408,7 +562,7 @@ function renderChart(current, finished, minutes) {
   const y = (price) => CHART.top + (high - price) / (high - low) * (CHART.bottom - CHART.top);
   const parts = boxes.map((window) => readBox(window, x, y));
   if (liveHalf !== null) parts.push(liveCone(current, x, y));
-  parts.push(priceLines(current, bars, x, y), axisLabels(current, boxes, bars, x));
+  parts.push(priceLines(current, before, now, x, y), axisLabels(current, boxes, bars, x));
   chart.innerHTML = parts.join("");
 }
 
@@ -456,11 +610,12 @@ function liveCone(current, x, y) {
        + svgText(xe, y(current.price - endHalf) + 11, fmt(current.price - endHalf), label);
 }
 
-function priceLines(current, bars, x, y) {
+/** The day's line before the live window in ink; inside it, the window's closes (the live tick last) in blue with
+ *  their running average dashed, both from liveNow, and the live dot at the line's end. */
+function priceLines(current, before, now, x, y) {
+  const after = now ? now.series : [];
+  const bars = before.concat(after);
   if (!bars.length) return "";
-  const fromMs = current ? new Date(current.window_from).getTime() : Infinity;
-  const before = bars.filter((bar) => new Date(bar.at).getTime() < fromMs);
-  const after = bars.filter((bar) => new Date(bar.at).getTime() >= fromMs);
   const point = (bar) => `${x(bar.at).toFixed(1)},${y(bar.close).toFixed(1)}`;
   const round = `stroke-linejoin="round" stroke-linecap="round"`;
   const parts = [];
@@ -469,19 +624,14 @@ function priceLines(current, bars, x, y) {
   const lastX = x(last.at), lastY = y(last.close);
   if (current && after.length) {
     const start = `${x(current.read_at).toFixed(1)},${y(current.price).toFixed(1)}`;
-    const averages = [];
-    let sum = 0;
-    after.forEach((bar, index) => {
-      sum += bar.close;
-      averages.push(`${x(bar.at).toFixed(1)},${y(sum / (index + 1)).toFixed(1)}`);
-    });
+    const averages = after.map((bar, index) => `${x(bar.at).toFixed(1)},${y(now.averages[index]).toFixed(1)}`);
     parts.push(svgPolyline([start].concat(after.map(point)), COLOUR.blue, 2.6, round),
                svgPolyline([start].concat(averages), COLOUR.ink, 1.8, `stroke-dasharray="4 2.5"`),
                `<circle cx="${lastX}" cy="${lastY}" r="9" fill="${COLOUR.blue}" fill-opacity="0.15"/>`,
                `<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
                + `stroke-width="2"/>`,
-               `<circle cx="${lastX}" cy="${y(sum / after.length)}" r="4.5" fill="${COLOUR.cream}" `
-               + `stroke="${COLOUR.ink}" stroke-width="2"/>`);
+               `<circle cx="${lastX}" cy="${y(now.averages[now.averages.length - 1])}" r="4.5" `
+               + `fill="${COLOUR.cream}" stroke="${COLOUR.ink}" stroke-width="2"/>`);
   } else {
     parts.push(`<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
                + `stroke-width="2"/>`);
@@ -517,8 +667,9 @@ function renderStrip() {
   const scale = STRIP.reach / endHalf;
   const edgeLeft = STRIP.centre - STRIP.reach, edgeRight = STRIP.centre + STRIP.reach;
   const at = (move) => clamp(STRIP.centre + move * scale, STRIP.edge, STRIP.width - STRIP.edge);
-  const move = current.now.move, averageMove = current.now.average_move;
-  const inside = current.average_inside;
+  const now = liveNow(current);
+  const move = now.move, averageMove = now.average_move;
+  const inside = now.average_inside;
   verdict.textContent = inside === null ? "—" : inside ? "Inside ✓" : "Outside ✗";
   verdict.className = inside === null ? "faint" : inside ? "inside" : "outside";
   const liveX = at(move || 0), averageX = averageMove === null ? null : at(averageMove);
@@ -563,8 +714,9 @@ function renderReadsList() {
   const rows = [];
   if (current && halfWidth(current.bands, "80") !== null) {
     const word = isLive() ? "Live" : current.ended ? "Ended" : "Last";
-    rows.push(readRow(current.read_at, halfWidth(current.bands, "80"), current.now.farthest_up,
-                      current.now.farthest_down, current.now.move, word, "live"));
+    const now = liveNow(current);
+    rows.push(readRow(current.read_at, halfWidth(current.bands, "80"), now.farthest_up, now.farthest_down, now.move,
+                      word, "live"));
   }
   finished.forEach((window) => {
     const inside = window.grades.ends_inside;
@@ -810,21 +962,41 @@ function renderPush() {
   el("push-call").textContent = directionWords(direction);
 }
 
+/** The live price's row as the page sees it now: Live while ticks arrive, else its age while the session is open,
+ *  else the moment of its last trade; the read's own row is the fallback for a page that never had a tick. */
+function livePriceRow(feed) {
+  const tick = sessionTick();
+  const at = tick ? tick.at : feed.as_of;
+  if (tickFresh()) return { status: "live", words: "Live" };
+  if (!at) return { status: feed.status, words: titleCase(feed.status) };
+  if (sessionOpen()) return { status: "partial", words: `Partial · ${ago((Date.now() - ms(at)) / 1000)}` };
+  return { status: feed.status, words: `Last ${clock(at, true)}` };
+}
+
+/** One feed row's dot and words: an age for live and minute feeds, the as_of words for the once-a-day and hand-kept
+ *  ones (a grey dot while they are fresh for their kind), the status word first whenever a feed is not fresh. */
+function feedRow(name, feed) {
+  if (feed.cadence === "live") return livePriceRow(feed);
+  const age = feed.age_s === null || feed.age_s === undefined ? "" : ago(feed.age_s);
+  const asOf = AS_OF_WORDS[name] && feed.as_of ? AS_OF_WORDS[name](feed.as_of) : "";
+  const quiet = QUIET_CADENCES.includes(feed.cadence);
+  const when = quiet ? asOf || age : age;
+  const words = [feed.status === "live" ? "" : titleCase(feed.status), when, feed.note || ""].filter(Boolean);
+  return { status: feed.status === "live" && quiet ? "quiet" : feed.status, words: words.join(" · ") || "Live" };
+}
+
 function renderFeeds() {
   const feeds = state.feed && state.feed.feeds ? state.feed.feeds : {};
   const names = Object.keys(feeds);
-  const live = names.filter((name) => feeds[name].status === "live").length;
+  const rows = names.map((name) => feedRow(name, feeds[name]));
+  const fresh = rows.filter((row) => row.status === "live" || row.status === "quiet").length;
   note("feeds-note", names.length ? "" : emptyReason());
-  el("feeds-pill").textContent = names.length ? `${live} Of ${names.length} Live` : "—";
-  el("feeds-pill").className = "pill " + (live === names.length ? "pill-green" : "pill-purple");
-  el("feeds-grid").innerHTML = names.map((name) => {
-    const feed = feeds[name];
-    const age = feed.age_s === null || feed.age_s === undefined ? "" : ago(feed.age_s);
-    const standing = feed.status === "live" ? age || "Live" : `${titleCase(feed.status)}${age ? " · " + age : ""}`;
-    const words = feed.note ? `${standing} · ${feed.note}` : standing;
-    return `<div class="feed"><span class="name"><i class="feed-dot ${esc(feed.status)}"></i>`
-         + `${esc(FEED_LABELS[name] || titleCase(name))}</span><span class="age">${esc(words)}</span></div>`;
-  }).join("");
+  el("feeds-pill").textContent = names.length ? `${fresh} Of ${names.length} OK` : "—";
+  el("feeds-pill").className = "pill " + (fresh === names.length ? "pill-green" : "pill-purple");
+  el("feeds-grid").innerHTML = names.map((name, index) =>
+    `<div class="feed"><span class="name"><i class="feed-dot ${esc(rows[index].status)}"></i>`
+    + `${esc(FEED_LABELS[name] || titleCase(name))}</span><span class="age">${esc(rows[index].words)}</span></div>`
+  ).join("");
   const login = state.feed && state.feed.login;
   if (!login || !login.state) {
     el("login-line").textContent = "Schwab Login · —";
@@ -1004,7 +1176,15 @@ document.addEventListener("click", (event) => {
     render();
   }
 });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) loadFeed(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    closePriceStream();
+  } else {
+    loadFeed();
+    openPriceStream();
+  }
+});
 state.channel = CHANNELS[remembered("channel", state.channel)] ? remembered("channel", state.channel) : state.channel;
 showTab(["read", "sight", "steps"].includes(remembered("tab", "read")) ? remembered("tab", "read") : "read");
 loadFeed();
+openPriceStream();

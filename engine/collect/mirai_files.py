@@ -1,5 +1,6 @@
-# How to read each of Mirai's files as it stood at a moment: bars, quotes, scans, the options tape, futures, the event
-# calendar, Claude's forecast, headlines and the auth watch's login line. Read-only; nothing here imports Mirai's code.
+# How to read each of Mirai's files as it stood at a moment: the live price, bars, quotes, scans, the options tape,
+# futures, the event calendar, Claude's forecast, headlines and the auth watch's login line. Read-only; nothing here
+# imports Mirai's code.
 import gzip
 import json
 import os
@@ -93,6 +94,17 @@ def rows_at_or_before(template, day, cut, time_field="ts", max_bytes=None):
 def newest_row_with(rows, field):
     """The last row that carries a non-empty field, or None."""
     return next((row for row in reversed(rows) if row.get(field)), None)
+
+
+def read_live_price(now=None):
+    """SPX's last streamed trade: price, trade time and its age in seconds at now; None when absent or partial."""
+    try:
+        row = json.loads(paths.mirai_data(FILES["spx_live_price"]).read_text())
+        price, at = float(row["price"]), parse_iso(row["at"])
+        age = ((now or datetime.now(timezone.utc)) - at).total_seconds()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return {"price": price, "at": at, "age_s": round(age, 3)}
 
 
 def read_spx_bars(day, cut):

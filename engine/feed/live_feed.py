@@ -1,7 +1,8 @@
 # Writes the small JSON file the phone reads after every live read: the read's status and values, each feed's status
-# (live, partial or blind) with its age and any note, the Schwab login, the session's clock, the nightly's standing,
-# the range block (the phone's part of the forecast) and the windows block (the live window per channel with its
-# read's own chain, today's finished windows with their grades, the score). The keys written here are the phone's
+# (live, partial or blind) with its age, newest input, cadence and any note (the live price's row first), the Schwab
+# login, the session's clock, the nightly's standing, the range block (the phone's part of the forecast) and the
+# windows block (the live window per channel with its read's own chain, today's finished windows with their grades,
+# the score). The keys written here are the phone's
 # whole contract (docs/data_map.md, "The phone feed"); a failed job writes a failed document so the phone never keeps
 # an old file in silence.
 import json
@@ -109,13 +110,34 @@ def calendar_feed_status(calendar, day, collected_status):
     return status, " · ".join(notes) or None
 
 
-def feeds_block(feed_states, calendar, day):
-    """Each feed's phone status, age and note; the calendar feed also warns about the two horizons."""
-    feeds = {name: {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"], "note": None}
-             for name, state in feed_states.items()}
+def feed_entry(name, state):
+    """One feed's phone row: status word, age, note, the moment of its newest input and how often it lands."""
+    as_of = state["market_at"]
+    return {"status": PHONE_WORD_FOR_FEED_STATUS[state["status"]], "age_s": state["age"], "note": None,
+            "as_of": session_clock.iso_eastern(session_clock.parse_iso(as_of)) if as_of else None,
+            "cadence": registry.feed_cadence(name)}
+
+
+def live_price_entry(live_price):
+    """The live price's phone row as the feed is written: live inside its stale limit, partial past it, blind absent."""
+    entry = {"status": PHONE_BLIND, "age_s": None, "note": None, "as_of": None,
+             "cadence": registry.feed_cadence(registry.LIVE_PRICE_FEED)}
+    if live_price is not None:
+        fresh = live_price["age_s"] <= registry.feed_stale_limit_seconds(registry.LIVE_PRICE_FEED)
+        entry.update(status=PHONE_LIVE if fresh else PHONE_PARTIAL, age_s=live_price["age_s"],
+                     as_of=session_clock.iso_eastern(live_price["at"]))
+    return entry
+
+
+def feeds_block(feed_states, calendar, day, live_price):
+    """Each feed's phone row, the live price first; the calendar's as_of is its last covered day, with horizon notes."""
+    feeds = {registry.LIVE_PRICE_FEED: live_price_entry(live_price)}
+    feeds.update((name, feed_entry(name, state)) for name, state in feed_states.items())
     if CALENDAR_FEED in feeds:
         status, note = calendar_feed_status(calendar, day, feeds[CALENDAR_FEED]["status"])
         feeds[CALENDAR_FEED].update(status=status, note=note)
+        if calendar is not None:
+            feeds[CALENDAR_FEED]["as_of"] = mirai_files.calendar_covers_through(calendar).isoformat()
     return feeds
 
 
@@ -144,7 +166,7 @@ def write_live_feed(snapshot, observations, feed_states, forecast, calendar, hal
     return write_document({
         "status": snapshot["snapshot_status"], "status_reason": snapshot["snapshot_status_reason"],
         "cut_at": session_clock.iso_eastern(session_clock.parse_iso(snapshot["cut_at"])),
-        "feeds": feeds_block(feed_states, calendar, day), "login": login,
+        "feeds": feeds_block(feed_states, calendar, day, mirai_files.read_live_price()), "login": login,
         "session": session_block(day, half_days), "nightly": nightly_block(nightly_done, day),
         "range": range_block(forecast), "values": values,
     })

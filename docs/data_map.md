@@ -37,27 +37,35 @@ not catch (a missing `.env`, an import error, a port already taken).
 Mirai's files Kaze reads (the templates are in `engine/paths.py`, the readers in `engine/collect/mirai_files.py`;
 gzipped copies of older days read the same way):
 
-| Feed | Mirai file (under `data/` unless said) | Stale after |
-|---|---|---|
-| `spx_bars` | `market/spx_price_bars_by_minute/{day}.jsonl` | 180 s |
-| `watchlist_quotes` | `market/watchlist_quotes_by_minute/{day}.jsonl` | 180 s |
-| `nyse_breadth` | the quotes rows' `bars` field (`$ADVN`, `$DECN`) | 240 s |
-| `options_scan` | `spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl` | 300 s |
-| `options_tape` | `market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl` | 180 s |
-| `futures_bars` | `market/futures_price_bars_by_minute/{day}.jsonl` | 1 day |
-| `event_calendar` | `settings/market_event_calendar_by_event.json` | 100 days |
-| `claude_forecast` | `spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl` | 40 min |
-| `news_headlines` | `market/news_headlines_by_article/{day}.jsonl` | 30 min |
-| `schwab_login` | `operations/logs/auth_watch_output_log.txt` | 2 days |
+| Feed | Mirai file (under `data/` unless said) | Stale after | Cadence |
+|---|---|---|---|
+| `spx_live_price` | `market/spx_live_price_latest.json` | 10 s | live |
+| `spx_bars` | `market/spx_price_bars_by_minute/{day}.jsonl` | 180 s | minute |
+| `watchlist_quotes` | `market/watchlist_quotes_by_minute/{day}.jsonl` | 180 s | minute |
+| `nyse_breadth` | the quotes rows' `bars` field (`$ADVN`, `$DECN`) | 240 s | minute |
+| `options_scan` | `spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl` | 300 s | minute |
+| `options_tape` | `market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl` | 180 s | minute |
+| `futures_bars` | `market/futures_price_bars_by_minute/{day}.jsonl` | 1 day | once_a_day |
+| `event_calendar` | `settings/market_event_calendar_by_event.json` | 100 days | hand_kept |
+| `claude_forecast` | `spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl` | 40 min | minute |
+| `news_headlines` | `market/news_headlines_by_article/{day}.jsonl` | 30 min | minute |
+| `schwab_login` | `operations/logs/auth_watch_output_log.txt` | 2 days | once_a_day |
 
-Notes per feed: a bar counts once its start is at or before the cut and its age is the cut minus the newest bar's
-start; the quotes feed takes the newest row with quotes at or before the cut; the scan feed takes native-chain scans
-only and the straddle needs a ruler with quality ok; the tape is in arrival order, so windows are cut by trade time,
-gap markers are counted, and a rebuild reads the live read's byte prefix; the futures file gives /ES 1-minute bars
-only; the calendar is copied into the store at every read and supplies the half-day closes (it lists no holidays:
-those are in `engine/session_clock.py`); the Claude feed takes the newest live final forecast written at or before
-the cut; the login feed reads the auth watch's `left=N.NNd` line plus the log's modified time (`?` gives
-`login_state = unknown`), live reads only.
+The cadence (`registry.FEEDS`, also in each feed's component parameters) says how often a feed lands: `live` (a tick
+about every second), `minute` (through the session, judged by its age), `once_a_day` (the night's futures, the
+login check) or `hand_kept` (the calendar, extended by hand).
+
+Notes per feed: the live price is `{price, at, written_at}` (`at` the trade's own time, both ET ISO), rewritten whole at
+most once a second by Mirai's lob-collector while its Schwab stream is up (market hours), so out of hours it simply goes
+old; it is no read's input, only the phone's (`mirai_files.read_live_price`: price, trade time, age; an absent or
+half-written file is None); a bar counts once its start is at or before the cut and its age is the cut minus the newest
+bar's start; the quotes feed takes the newest row with quotes at or before the cut; the scan feed takes native-chain
+scans only and the straddle needs a ruler with quality ok; the tape is in arrival order, so windows are cut by trade
+time, gap markers are counted, and a rebuild reads the live read's byte prefix; the futures file gives /ES 1-minute bars
+only; the calendar is copied into the store at every read and supplies the half-day closes (it lists no holidays: those
+are in `engine/session_clock.py`); the Claude feed takes the newest live final forecast written at or before the cut;
+the login feed reads the auth watch's `left=N.NNd` line plus the log's modified time (`?` gives `login_state =
+unknown`), live reads only.
 
 ## 2. The clock
 
@@ -468,16 +476,21 @@ the session the row is in force for and `applies_from_at` its open; `test_family
 
 `live/latest.json` is written by the live read job after every read (atomic replace) and read by the phone through
 `app/server/app_server.py`, which also serves `/bars.json` (`{trade_date, bars: [{at, close}]}`, the session's
-1-minute SPX closes from the store). The keys below are the whole contract: `engine/feed/live_feed.py` writes exactly
+1-minute SPX closes read straight from Mirai's bar file, rebuilt each time that file grows, so the price line moves
+every minute between reads) and `/price.stream` (server-sent events, one `data: {"price", "at"}` each time the live
+price file changes, polled every 250 ms, a comment line every 15 s, at most four streams at once, each closed after
+30 minutes). The keys below are the whole contract: `engine/feed/live_feed.py` writes exactly
 these and `app/web/app.js` reads nothing else. Floats are at six decimals, moments on the New York clock.
 
-Top level: `status` (`built`, `blind`, `thin`) and `status_reason` (`cut_bar_missing`, `range_failed`,
-`push_failed`, `grade_failed`, comma-joined), `cut_at`, `feeds` (per feed: `status` live / partial / blind, `age_s`,
-`note`: the calendar feed's horizon words, null elsewhere), `login` (`state`, `hours_left`, `expires_at`), `session`
+Top level: `status` (`built`, `blind`, `thin`) and `status_reason` (`cut_bar_missing`, `range_failed`, `push_failed`,
+`grade_failed`, comma-joined), `cut_at`, `feeds` (per feed, the live price first: `status` live / partial / blind,
+`age_s`, `as_of` (the newest input's moment; for the calendar, the last day it covers), `cadence` (live, minute,
+once_a_day, hand_kept) and `note`: the calendar feed's horizon words, null elsewhere; the live price's row is filled
+from its file as the feed is written, live inside 10 s), `login` (`state`, `hours_left`, `expires_at`), `session`
 (`closes_at`, `next_session_opens_at`: so the phone can tell closed from no read today), `nightly` (`done_for`,
-`expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values`
-(every observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes
-the file is replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent.
+`expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
+observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes the file is
+replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent.
 
 `range`: `price`, `read_at`, `minutes_left`, `speed`, `speed_fast`, `speed_slow`, `straddle`, `releases` (the day's
 timed economic releases known at the cut, each `name` and `at`), `band_portion` (0.8, the share the band promises),
@@ -511,8 +524,12 @@ step crashed); the 5-minute channel follows every read, the 30- and 60-minute ch
 What the phone works out itself and the feed does not carry: the percent change in the header (price against
 `values.prior_close_points`), the colour of a score (its share against `band_portion`, or `stays_inside_share` for
 never left), "N of M past windows" (`stays_inside_share` x `fit_windows`, rounded), the dial gauge's angle, and the
-header's words from `session` and its own clock (`Live` within six minutes of `cut_at`, `Late`, `Closed`,
-`No Read Yet Today` once `next_session_opens_at` plus eleven minutes has passed with no newer read).
+header's words from `session` and its own clock (`Read 12:35 · Price Live` within eight minutes of `cut_at` while
+ticks arrive, `Read 12:35 · Price 12:41:07` once the newest tick is 10 s old, `Late`, `Closed`, `No Read Yet Today`
+once `next_session_opens_at` plus thirteen minutes has passed with no newer read), the live price and its percent
+change, the live window's move and running average from its minute closes plus the newest tick, and the Feeds card's
+words (an age for live and minute feeds, `Night · 09:27` from the futures' `as_of`, `To 12-31` from the calendar's,
+`Checked 08:00` from the login's, a grey dot for a once-a-day or hand-kept feed fresh for its kind, `n Of m OK`).
 
 ## 10. Operations
 
@@ -598,7 +615,10 @@ Then `rm nightly_done.txt` if the restored session is older than the file says, 
   Feeds card says `Nightly Not Done For <session>` until then.
 - A full disk: the read fails; even the failed feed may not write. Seen in `read_log.txt`; the phone says `Late`.
 - The app server restarts mid-request: one dropped fetch. The phone says `Can't Reach The Mac` for a poll, then
-  recovers.
+  recovers; the price stream reopens on its own within seconds.
+- Mirai's live price stops (the lob-collector down, the Schwab login lapsed): no ticks. The header says
+  `Price 12:41:07` (the newest price's time), the Feeds card's `SPX Price` row says `Partial` with its age and the
+  pill drops one; the price and the line keep moving each minute from the bar file and the 30 s poll.
 - A nightly crash: hourly retries until midnight; no backup, no ledger, no marker. Seen in `nightly_log.txt` and on
   the Feeds card's nightly line.
 

@@ -1,35 +1,44 @@
-# The Kaze web server the phone talks to: it serves the three screens in app/web, the live feed file fresh on every
-# request and today's 1-minute closes from the store, all behind one Basic-auth token, on 127.0.0.1 for a tunnel.
+# The Kaze web server the phone talks to: the three screens in app/web, the live feed file fresh on every request,
+# today's 1-minute closes from Mirai's bar file and SPX's live price as a stream of server-sent events. Everything sits
+# behind one Basic-auth token on 127.0.0.1, for a tunnel to reach.
 import hmac
 import json
-import sqlite3
 import sys
 import threading
 import time
 from base64 import b64decode
+from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from engine import paths, session_clock
+from engine.collect import mirai_files
 from engine.jobs import job_log
-from engine.store import store, store_queries
 
 JOB = "app"
 WEB_FOLDER = (paths.REPO_ROOT / "app" / "web").resolve()
-FEED_ROUTE, BARS_ROUTE = "/latest.json", "/bars.json"
+FEED_ROUTE, BARS_ROUTE, PRICE_ROUTE = "/latest.json", "/bars.json", "/price.stream"
 PORT_KEY, TOKEN_KEY, DEFAULT_PORT = "KAZE_APP_PORT", "KAZE_APP_TOKEN", 8791
 AUTH_USER = "kaze"
 BASIC_PREFIX = "Basic "
-BARS_CACHE_SECONDS = 20
 HANDLER_TIMEOUT_SECONDS = 15
+# The price stream: the file polled four times a second, a comment line every 15 s so the tunnel (which drops a
+# connection quiet for 100 s) keeps it, at most four open at once, each closed after 30 minutes for the page to reopen.
+PRICE_POLL_SECONDS = 0.25
+PRICE_HEARTBEAT_SECONDS = 15
+PRICE_STREAMS_MAX = 4
+PRICE_STREAM_SECONDS = 30 * 60
+EVENT_STREAM = "text/event-stream"
 LOGGED_ROUTE_CHARS = 120
 NO_STORE = "no-store"
 PAGE_POLICY = "default-src 'self'"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".json": "application/json", ".woff2": "font/woff2",
                  ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
-bars_cache = {"trade_date": None, "built_at": 0.0, "body": b""}
+bars_cache = {"key": None, "body": b""}
 bars_lock = threading.Lock()
+price_streams = {"open": 0}
+price_streams_lock = threading.Lock()
 
 
 def read_settings():
@@ -83,44 +92,46 @@ def feed_trade_date():
     return session_clock.today_eastern().isoformat()
 
 
-class StoreMissing(Exception):
-    """The store file is not there: /bars.json answers 503 and the log says so by name."""
-
-
-def read_only_store():
-    """A connection that only reads an existing store, never creating one."""
-    # Opened read-only when the WAL sidecars exist (SQLite refuses a read-only open of a WAL store without them, as
-    # after a restore from backup), else opened without create and only ever queried.
-    file = paths.store_file()
-    if not file.is_file():
-        raise StoreMissing(f"no store at {file.name}")
-    mode = "ro" if file.with_name(file.name + "-wal").exists() else "rw"
-    conn = sqlite3.connect(f"file:{file}?mode={mode}", uri=True, timeout=store.BUSY_TIMEOUT_SECONDS)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def bars_document():
-    """The session's 1-minute closes as JSON bytes, from a read-only store connection, rebuilt at most every 20 s."""
+    """The session's 1-minute closes from Mirai's bar file as JSON bytes, rebuilt only when that file has grown."""
     with bars_lock:
         trade_date = feed_trade_date()
-        fresh = time.monotonic() - bars_cache["built_at"] < BARS_CACHE_SECONDS
-        if fresh and bars_cache["trade_date"] == trade_date:
+        day = date.fromisoformat(trade_date)
+        key = (trade_date, mirai_files.file_bytes(mirai_files.FILES["spx_bars"], day))
+        if bars_cache["key"] == key:
             return bars_cache["body"]
-        conn = read_only_store()
-        try:
-            bars = [{"at": session_clock.iso_eastern(session_clock.parse_iso(bar["priced_at"])), "close": bar["close"]}
-                    for bar in store_queries.session_bars(conn, trade_date)]
-        finally:
-            conn.close()
+        bars = [{"at": session_clock.iso_eastern(bar["at"]), "close": bar["close"]}
+                for bar in mirai_files.read_spx_bars(day, session_clock.now_utc()) if bar.get("close") is not None]
         body = json.dumps({"trade_date": trade_date, "bars": bars}).encode()
-        bars_cache.update(trade_date=trade_date, built_at=time.monotonic(), body=body)
+        bars_cache.update(key=key, body=body)
         return body
 
 
+def price_tick():
+    """The live price as the stream sends it ({price, at} on the New York clock), or None while Mirai has none."""
+    live = mirai_files.read_live_price()
+    return None if live is None else {"price": live["price"], "at": session_clock.iso_eastern(live["at"])}
+
+
+def take_price_stream():
+    """Count one more open price stream; False when four are already open."""
+    with price_streams_lock:
+        if price_streams["open"] >= PRICE_STREAMS_MAX:
+            return False
+        price_streams["open"] += 1
+        return True
+
+
+def release_price_stream():
+    """Count one price stream closed."""
+    with price_streams_lock:
+        price_streams["open"] -= 1
+
+
 class AppHandler(BaseHTTPRequestHandler):
-    """One request: the token first, then one of the five things this server serves, never a traceback."""
-    # A crash inside is a 503 and one log line; a client gone mid-reply is one log line.
+    """One request: the token first, then one of the six things this server serves, never a traceback."""
+    # A crash inside is a 503 and one log line; a client gone mid-reply is one log line. The 15 s timeout bounds each
+    # read and each write, so a price stream lives on while every write lands and ends when a client stops reading.
     timeout = HANDLER_TIMEOUT_SECONDS
     status_sent = None
 
@@ -163,6 +174,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send(HTTPStatus.OK, document, CONTENT_TYPES[".json"], NO_STORE)
         elif route == BARS_ROUTE:
             self.send(HTTPStatus.OK, bars_document(), CONTENT_TYPES[".json"], NO_STORE)
+        elif route == PRICE_ROUTE:
+            self.stream_price()
         else:
             file = web_file(route)
             if file is None:
@@ -170,6 +183,37 @@ class AppHandler(BaseHTTPRequestHandler):
             else:
                 headers = {"Content-Security-Policy": PAGE_POLICY} if file.suffix == ".html" else None
                 self.send(HTTPStatus.OK, file.read_bytes(), CONTENT_TYPES[file.suffix], "no-cache", headers)
+
+    def stream_price(self):
+        """Server-sent events: the live price each time it changes, a comment every 15 s, closed after 30 minutes."""
+        if not take_price_stream():
+            self.send_plain(HTTPStatus.SERVICE_UNAVAILABLE, "Kaze: too many price streams", {"Retry-After": "30"})
+            return
+        try:
+            self.status_sent = HTTPStatus.OK.value
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", EVENT_STREAM)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.send_price_events()
+        finally:
+            release_price_stream()
+
+    def send_price_events(self):
+        """Poll the price file four times a second and write each change as one event, or a heartbeat when quiet."""
+        started = last_write = time.monotonic()
+        sent = None
+        while time.monotonic() - started < PRICE_STREAM_SECONDS:
+            tick = price_tick()
+            if tick is not None and tick != sent:
+                self.wfile.write(f"data: {json.dumps(tick)}\n\n".encode())
+                sent, last_write = tick, time.monotonic()
+            elif time.monotonic() - last_write >= PRICE_HEARTBEAT_SECONDS:
+                self.wfile.write(b": still here\n\n")
+                last_write = time.monotonic()
+            time.sleep(PRICE_POLL_SECONDS)
 
     def send(self, status, body, content_type, cache_control, headers=None):
         """Send one response: status, any extra headers, content type, cache rule, length; HEAD sends headers only."""

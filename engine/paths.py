@@ -9,10 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".env"
 REQUIRED_KEYS = ("KAZE_MIRAI_HOME", "KAZE_DATA")
 BACKUP_KEY = "KAZE_BACKUP_DIR"
-# Mirai's files as the feeds name them: templates under Mirai's data folder ({day} is the session), the auth watch's
-# log beside them, and the event calendar under Mirai's settings folder. mirai_files.py reads them; registry.py lists
-# them on the feed rows.
+# Mirai's files as the feeds name them: templates under Mirai's data folder ({day} is the session), the live price
+# Mirai's Schwab stream rewrites about once a second, the auth watch's log, and the event calendar under Mirai's
+# settings folder. mirai_files.py reads them; registry.py lists them on the feed rows.
 MIRAI_FILES = {
+    "spx_live_price": "market/spx_live_price_latest.json",
     "spx_bars": "market/spx_price_bars_by_minute/{day}.jsonl",
     "watchlist_quotes": "market/watchlist_quotes_by_minute/{day}.jsonl",
     "options_scan": "spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl",

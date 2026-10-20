@@ -88,24 +88,33 @@ SUBJECT_KINDS = (
     "adjustment", "band", "consumer", "feed", "horizon", "impact", "kind", "level_type", "login", "reading",
     "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole", "window_minutes")
 
-# Feeds: name, what it is, Mirai's file (the template mirai_files reads), and how old its newest input may be.
+# Feeds: name, what it is, Mirai's file (the template mirai_files reads), how old its newest input may be, and how
+# often it lands: live (a tick about every second), minute (through the session, judged by its age), once_a_day (the
+# night's futures, the login check) or hand_kept (the calendar). The live price is no read's input: only the phone's
+# feed row and its stream read it.
+FEED_CADENCES = ("live", "minute", "once_a_day", "hand_kept")
+LIVE_PRICE_FEED = "spx_live_price"
 FEEDS = (
-    ("spx_bars", "SPX 1-minute bars", paths.MIRAI_FILES["spx_bars"], 180),
+    (LIVE_PRICE_FEED, "SPX's last trade, streamed by Mirai's lob-collector", paths.MIRAI_FILES[LIVE_PRICE_FEED], 10,
+     "live"),
+    ("spx_bars", "SPX 1-minute bars", paths.MIRAI_FILES["spx_bars"], 180, "minute"),
     ("watchlist_quotes", "one minute's quotes for the watchlist (SPX, VIX family, funds, stocks, rates)",
-     paths.MIRAI_FILES["watchlist_quotes"], 180),
+     paths.MIRAI_FILES["watchlist_quotes"], 180, "minute"),
     ("nyse_breadth", "NYSE advancers and decliners carried in the quotes rows' bars field",
-     paths.MIRAI_FILES["watchlist_quotes"], 240),
+     paths.MIRAI_FILES["watchlist_quotes"], 240, "minute"),
     ("options_scan", "the same-day SPX options scan: walls, VWAP, straddle ruler, dealer gamma",
-     paths.MIRAI_FILES["options_scan"], 300),
+     paths.MIRAI_FILES["options_scan"], 300, "minute"),
     ("options_tape", "every same-day SPX option trade with its quote at the time", paths.MIRAI_FILES["options_tape"],
-     180),
-    ("futures_bars", "/ES 1-minute bars through the night", paths.MIRAI_FILES["futures_bars"], 86400),
-    ("event_calendar", "the hand-kept calendar of scheduled market events", paths.EVENT_CALENDAR_FILE, 100 * 86400),
+     180, "minute"),
+    ("futures_bars", "/ES 1-minute bars through the night", paths.MIRAI_FILES["futures_bars"], 86400, "once_a_day"),
+    ("event_calendar", "the hand-kept calendar of scheduled market events", paths.EVENT_CALENDAR_FILE, 100 * 86400,
+     "hand_kept"),
     ("claude_forecast", "Mirai's 30-minute Claude forecast, the newest final answer",
-     paths.MIRAI_FILES["claude_forecast"], 2400),
-    ("news_headlines", "headlines captured from the news feeds", paths.MIRAI_FILES["news_headlines"], 1800),
+     paths.MIRAI_FILES["claude_forecast"], 2400, "minute"),
+    ("news_headlines", "headlines captured from the news feeds", paths.MIRAI_FILES["news_headlines"], 1800,
+     "minute"),
     ("schwab_login", "the Schwab sign-in every Schwab feed depends on (7-day login)",
-     paths.MIRAI_FILES["schwab_login"], 2 * 86400),
+     paths.MIRAI_FILES["schwab_login"], 2 * 86400, "once_a_day"),
 )
 FEED_NAMES = tuple(feed[0] for feed in FEEDS)
 FEEDS_WITH_LINE_COUNTS = ("spx_bars", "watchlist_quotes", "options_scan", "options_tape", "claude_forecast",
@@ -470,10 +479,10 @@ MEASURES = [
 MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
 
 
-WORD_LISTS = (LANES, FEED_STATUSES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAPSHOT_KINDS, SNAPSHOT_STATUSES,
-              SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS, DECISION_STATUSES,
-              VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS, SUBJECT_KINDS,
-              components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS, components.PUSH_READINGS,
+WORD_LISTS = (LANES, FEED_STATUSES, FEED_CADENCES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAPSHOT_KINDS,
+              SNAPSHOT_STATUSES, SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS,
+              DECISION_STATUSES, VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS,
+              SUBJECT_KINDS, components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS, components.PUSH_READINGS,
               components.EVALUATION_KINDS, components.EVALUATED_KINDS, components.VERDICTS,
               components.INTERVAL_METHODS, components.BASELINES, components.WALL_TYPES, components.CLAUDE_SIDES,
               components.OPTIONS_CHECK_WORDS)
@@ -482,12 +491,15 @@ WORD_SHAPE = re.compile(r"^[a-z0-9_$/]+$")
 
 def check_registry():
     """Refuse a registry that breaks the rules: prose for a word, duplicates, unknown lanes, subjects or feeds."""
-    # And one fact reaching both the pull lane and the push lane.
+    # And a feed with an unknown cadence, or one fact reaching both the pull lane and the push lane.
     for words in WORD_LISTS:
         if len(set(words)) != len(words) or not all(WORD_SHAPE.match(word) for word in words):
             raise ValueError(f"registry word list {words} must be distinct lowercase single words")
     if len(MEASURES_BY_NAME) != len(MEASURES):
         raise ValueError("duplicate measure name in the registry")
+    for name, _, _, _, cadence in FEEDS:
+        if cadence not in FEED_CADENCES:
+            raise ValueError(f"feed {name}: unknown cadence {cadence}")
     lanes_by_group = defaultdict(set)
     for row in MEASURES:
         name = row["measure_name"]
@@ -523,8 +535,9 @@ def component_row(kind, name, meaning, parameters, version=components.COMPONENT_
 
 def component_rows():
     """Every feed, the login, the builder, the range engine, the read lanes, the rules, readings, dials and tests."""
-    rows = [component_row("feed", name, meaning, {"mirai_file": mirai_file, "stale_limit_seconds": stale_limit})
-            for name, meaning, mirai_file, stale_limit in FEEDS]
+    rows = [component_row("feed", name, meaning, {"mirai_file": mirai_file, "stale_limit_seconds": stale_limit,
+                                                  "cadence": cadence})
+            for name, meaning, mirai_file, stale_limit, cadence in FEEDS]
     rows.extend(component_row("login", name, "the 7-day Schwab sign-in",
                               {"renew_warning_days": LOGIN_RENEW_WARNING_DAYS})
                 for name in LOGIN_NAMES)
@@ -559,6 +572,11 @@ def component_rows():
 def feed_stale_limit_seconds(feed_name):
     """How old a feed's newest input may be at the cut before its status is stale."""
     return next(feed[3] for feed in FEEDS if feed[0] == feed_name)
+
+
+def feed_cadence(feed_name):
+    """How often a feed lands: one of FEED_CADENCES."""
+    return next(feed[4] for feed in FEEDS if feed[0] == feed_name)
 
 
 def subject_parts(key):
