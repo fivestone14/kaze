@@ -3,6 +3,8 @@
 # behind one Basic-auth token on 127.0.0.1, for a tunnel to reach.
 import hmac
 import json
+import select
+import socket
 import sys
 import threading
 import time
@@ -131,7 +133,7 @@ def release_price_stream():
 class AppHandler(BaseHTTPRequestHandler):
     """One request: the token first, then one of the six things this server serves, never a traceback."""
     # A crash inside is a 503 and one log line; a client gone mid-reply is one log line. The 15 s timeout bounds each
-    # read and each write, so a price stream lives on while every write lands and ends when a client stops reading.
+    # read and write; a price stream ends when the phone closes its end (checked each poll) or after 30 minutes.
     timeout = HANDLER_TIMEOUT_SECONDS
     status_sent = None
 
@@ -213,7 +215,17 @@ class AppHandler(BaseHTTPRequestHandler):
             elif time.monotonic() - last_write >= PRICE_HEARTBEAT_SECONDS:
                 self.wfile.write(b": still here\n\n")
                 last_write = time.monotonic()
+            if self.client_gone():
+                return
             time.sleep(PRICE_POLL_SECONDS)
+
+    def client_gone(self):
+        """True once the phone has closed its end: a socket that is readable but holds nothing is a closed one."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
 
     def send(self, status, body, content_type, cache_control, headers=None):
         """Send one response: status, any extra headers, content type, cache rule, length; HEAD sends headers only."""

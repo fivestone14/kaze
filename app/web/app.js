@@ -8,6 +8,7 @@ const FRESH_SECONDS = 8 * 60;
 const TICK_FRESH_SECONDS = 10;
 const BAR_CLOSE_SECOND_MS = 59000;
 const STREAM_REOPEN_MS = 1000;
+const STREAM_SILENCE_MS = 40000;   // no tick and no heartbeat this long: a stalled connection, reopen it
 const STREAM_BACKOFF_MS = 5000;
 const STREAM_BACKOFF_MAX_MS = 60000;
 const CLOSE_GRACE_SECONDS = 60;
@@ -345,9 +346,12 @@ async function openPriceStream() {
     const reader = reply.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let watchdog = setTimeout(() => control.abort(), STREAM_SILENCE_MS);
     for (;;) {
       const { value, done } = await reader.read();
+      clearTimeout(watchdog);
       if (done) break;
+      watchdog = setTimeout(() => control.abort(), STREAM_SILENCE_MS);
       state.streamFailures = 0;
       buffer += decoder.decode(value, { stream: true });
       const events = buffer.split("\n\n");
@@ -963,14 +967,15 @@ function renderPush() {
 }
 
 /** The live price's row as the page sees it now: Live while ticks arrive, else its age while the session is open,
- *  else the moment of its last trade; the read's own row is the fallback for a page that never had a tick. */
+ *  else the moment of its last trade (a grey dot: closed, not broken); a page that never had a tick shows the
+ *  read's own row. */
 function livePriceRow(feed) {
   const tick = sessionTick();
   const at = tick ? tick.at : feed.as_of;
   if (tickFresh()) return { status: "live", words: "Live" };
   if (!at) return { status: feed.status, words: titleCase(feed.status) };
   if (sessionOpen()) return { status: "partial", words: `Partial · ${ago((Date.now() - ms(at)) / 1000)}` };
-  return { status: feed.status, words: `Last ${clock(at, true)}` };
+  return { status: "quiet", words: `Last ${clock(at, true)}` };
 }
 
 /** One feed row's dot and words: an age for live and minute feeds, the as_of words for the once-a-day and hand-kept

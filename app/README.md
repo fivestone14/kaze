@@ -35,8 +35,8 @@ its `cut_at`), today's New York date when there is no feed, and a missing file i
 (`text/event-stream`, no compression) polls `market/spx_live_price_latest.json` under Mirai's data folder every 250 ms
 and sends an event only when the price or its trade time changes (the current one at once on connect), a comment line
 every 15 s so the tunnel (which drops a connection quiet for 100 s) keeps it, and closes after 30 minutes for the page
-to reopen; a fifth stream at once is a 503 with `Retry-After: 30`. The handler's 15 s timeout bounds each write, so a
-stream lives while the phone reads it and ends when it stops. The page is sent with `Content-Security-Policy:
+to reopen; a fifth stream at once is a 503 with `Retry-After: 30`. A stream ends when the phone closes its end (the
+server checks four times a second) or after the 30 minutes. The page is sent with `Content-Security-Policy:
 default-src 'self'` (no inline styles or scripts anywhere), so nothing but the Mac's own files can run in it. Any method
 but GET and HEAD is a 401 without the token and a 405 with it. A crash inside a request is a 503 and one log line; a
 client that drops the connection mid-reply is one log line; nothing prints a traceback (the server's error hook is one
