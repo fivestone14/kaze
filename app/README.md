@@ -112,6 +112,19 @@ and Feeds cards are the newest read's. Where the feed has no value the page show
 so (`failed`, `range_failed`, `push_failed`, `grade_failed`) in the banner at the top and in the block the failure
 empties; each block draws inside its own guard, so one bad field empties that block with its reason, never the page.
 
+The Read chart's time axis ends at the live window's end and spans a fixed time per channel, 75 minutes for 5 Min,
+4 hours for 30 Min and 4 hours 30 for 60 Min (`PAST_SPAN_MINUTES` in `app.js`), never starting before the session's
+open: about fifteen 5-minute boxes at about 20 px each on a 360 px phone, eight 30-minute windows at about 38 px and
+nine overlapping 60-minute ones at about 68 px, so no box shrinks to a sliver and no width goes to time before the
+open. The first time label says `Open` while the axis starts at the open, else the start's time; the other labels are
+the finished boxes' read times, left out where they would touch Now or each other. The price axis fits what is on
+screen (the line, the boxes, the live cone) with a few pixels of room, plus the room the cone's lower price label
+needs above the time labels; a cone label that would touch the live dot moves further out or left of it. Past reads
+draw as boxes with a gauge of how much of the band the window used; windows still running (`windows.running`) draw as
+dashed blue boxes with a hollow mark and a blue used-so-far gauge, and as blue Running rows in the list between the
+live row and the finished ones; they carry no time label, since their middle is where Now sits. Where finished
+windows overlap (60 Min), every other one from the day's first gets a thin outline so neighbours read apart.
+
 The page holds `/price.stream` open while it is shown (a `fetch` with a streaming reader, signed in like every other
 request), closes it when the page is hidden and reopens it when shown; each tick moves the header's price and percent
 change, the end of the price line with its live dot, the running average and the Average Since The Read strip (the

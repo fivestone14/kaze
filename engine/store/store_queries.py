@@ -250,6 +250,17 @@ def sessions_with_open_windows(conn, cut_at_iso, decision_kind):
     return [row["trade_date"] for row in rows]
 
 
+def running_decisions(conn, trade_date, cut_at_iso, horizon_name, read_lane, decision_kind):
+    """The base decisions of a horizon whose window has not ended by the cut, newest read first, with its rowid."""
+    # From the session's first-built live reads at or before the cut, in one lane or any (read_lane None).
+    return conn.execute(
+        f"SELECT d.*, s.snapshot_rowid FROM reads_decisions d JOIN ({FIRST_BUILT_LIVE_READS_SQL}) s "
+        "ON s.snapshot_id = d.snapshot_id WHERE d.trade_date = ? AND d.decision_kind = ? AND d.horizon_name = ? "
+        "AND d.variant_name IS NULL AND s.cut_at <= ? AND d.grade_window_ends_at > ? "
+        "AND (? IS NULL OR s.read_lane = ?) ORDER BY s.cut_at DESC",
+        (trade_date, decision_kind, horizon_name, cut_at_iso, cut_at_iso, read_lane, read_lane)).fetchall()
+
+
 def decisions_of_read(conn, snapshot_id, decision_kind, horizon_name):
     """A read's decisions of one kind and horizon, the base decision first, then its variants."""
     return conn.execute("SELECT * FROM reads_decisions WHERE snapshot_id = ? AND decision_kind = ? "

@@ -18,13 +18,18 @@ const POLL_BACKOFF_MAX_MS = 5 * 60000;
 const FETCH_TIMEOUT_MS = 10000;
 const LIST_ROWS_SHOWN = 12;
 const LEAN_DEAD_ZONE = 0.01;
-const CHART_PAD_SHARE = 0.06;
+// How much time a chart spans, ending at the live window's end: about fifteen 5-minute boxes, eight 30-minute windows
+// and nine overlapping 60-minute ones, so a box stays readable on a 360 px phone; never before the session's open.
+const PAST_SPAN_MINUTES = { "5_minutes": 75, "30_minutes": 240, "60_minutes": 270 };
+const CHART_PAD = { top: 4, bottom: 6, coneLabel: 4 };
+const LABEL_CHAR_WIDTH = 6;   // a 10 px label's widest character, for the label collision checks
+const LABEL_GAP = 4;
 const CONE_STEPS = 4;
 const FONT = "Plus Jakarta Sans, sans-serif";
 const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
                  faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
                  white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
-const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, liveShare: 0.25 };
+const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, dotHalo: 9, averageDot: 4.5 };
 const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6, labelRoom: 70 };
 const RANGE_BAR = { width: 312, centre: 156, reach: 136.7 };
 const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2 };
@@ -177,6 +182,12 @@ function windowsFailure() {
 function liveWindow() {
   const block = windows();
   return block ? block.current[state.channel] : null;
+}
+
+/** The chosen channel's running or finished windows, newest first; an empty list when the feed has none. */
+function windowList(kind) {
+  const block = windows();
+  return block && block[kind] ? block[kind][state.channel] || [] : [];
 }
 
 function halfWidth(bands, name) {
@@ -528,10 +539,13 @@ function renderRead() {
   const standing = isLive() ? "" : current && current.ended ? " · Ended" : " · Last";
   el("held").textContent = current ? `${fmt(current.minutes_held)} / ${minutes} Min${standing}`
                                    : `— / ${minutes} Min`;
-  renderChart(current, windows() ? windows().finished[state.channel] : [], minutes);
+  renderChart(current, windowList("running"), windowList("finished"), minutes);
 }
 
-function renderChart(current, finished, minutes) {
+/** The day's price, each past read's band as a box (running ones dashed) and the live cone, on a time axis that ends
+ *  at the live window's end and spans the channel's PAST_SPAN_MINUTES (from the open while the day is shorter), with
+ *  a price axis fitted to what is on screen. */
+function renderChart(current, running, finished, minutes) {
   const chart = el("chart");
   const anchorEnd = current ? current.ends_at : finished[0] ? finished[0].ends_at
                   : state.bars.length ? state.bars[state.bars.length - 1].at : null;
@@ -543,47 +557,64 @@ function renderChart(current, finished, minutes) {
   chart.innerHTML = "";
   chart.hidden = !anchorEnd;
   if (!anchorEnd) return;
-  const span = CHART.right - CHART.left;
-  const pxPerMinute = CHART.liveShare * span / minutes;
   const endMs = ms(anchorEnd);
-  const startMs = endMs - span / pxPerMinute * 60000;
-  const x = (iso) => CHART.left + (ms(iso) - startMs) / 60000 * pxPerMinute;
-  const boxes = finished.filter((window) => ms(window.window_from) >= startMs && window.half_width !== null);
+  const session = state.feed && state.feed.session;
+  const openMs = session && session.opens_at ? ms(session.opens_at) : -Infinity;
+  const startMs = Math.min(Math.max(openMs, endMs - PAST_SPAN_MINUTES[state.channel] * 60000),
+                           endMs - minutes * 60000);
+  const x = (iso) => CHART.left + (ms(iso) - startMs) / (endMs - startMs) * (CHART.right - CHART.left);
+  const shown = (window) => ms(window.window_from) >= startMs && window.half_width !== null;
+  const boxes = finished.filter(shown), runs = running.filter(shown);
   const fromMs = current ? ms(current.window_from) : Infinity;
   const before = state.bars.filter((bar) => ms(bar.at) >= startMs && ms(bar.at) <= endMs && ms(bar.at) < fromMs);
   const now = current ? liveNow(current) : null;
   const bars = before.concat(now ? now.series : []);
   const liveHalf = current ? halfWidth(current.bands, "80") : null;
-  const prices = [];
-  boxes.forEach((window) => prices.push(window.price + window.half_width, window.price - window.half_width,
-                                        window.high, window.low));
-  bars.forEach((bar) => prices.push(bar.close));
+  const prices = bars.map((bar) => bar.close);
+  boxes.concat(runs).forEach((window) => prices.push(window.price + window.half_width,
+                                                     window.price - window.half_width, window.end));
   if (liveHalf !== null) prices.push(current.price + liveHalf, current.price - liveHalf);
   const known = prices.filter((p) => p !== null && p !== undefined);
   if (!known.length) return;
-  const pad = (Math.max(...known) - Math.min(...known)) * CHART_PAD_SHARE || 1;
-  const high = Math.max(...known) + pad, low = Math.min(...known) - pad;
-  const y = (price) => CHART.top + (high - price) / (high - low) * (CHART.bottom - CHART.top);
-  const parts = boxes.map((window) => readBox(window, x, y));
-  if (liveHalf !== null) parts.push(liveCone(current, x, y));
-  parts.push(priceLines(current, before, now, x, y), axisLabels(current, boxes, bars, x));
+  const top = CHART.top + CHART_PAD.top, bottom = CHART.bottom - CHART_PAD.bottom;
+  const high = Math.max(...known);
+  // the cone's lower price label hangs under its edge: that edge stays CHART_PAD.coneLabel above the bottom
+  const coneLow = liveHalf === null ? null : current.price - liveHalf;
+  const low = Math.min(...known, coneLow === null ? Infinity
+                                 : high - (high - coneLow) / (1 - CHART_PAD.coneLabel / (bottom - top)));
+  const y = (price) => top + (high - price) / (high - low || 1) * (bottom - top);
+  // where finished windows overlap (60 minutes), every other one from the day's first is outlined to tell them apart
+  const overlapping = finished.some((window, index) => index + 1 < finished.length
+                                                       && ms(finished[index + 1].ends_at) > ms(window.window_from));
+  const outlined = (window) => overlapping && (finished.length - 1 - finished.indexOf(window)) % 2 === 1;
+  const parts = boxes.map((window) => readBox(window, x, y, outlined(window)));
+  runs.forEach((window) => parts.push(runningBox(window, x, y)));
+  if (liveHalf !== null) parts.push(liveCone(current, x, y, liveMarks(bars, now, x, y)));
+  parts.push(priceLines(current, before, now, x, y),
+             axisLabels(current, boxes, bars, x, startMs === openMs ? "Open" : clock(new Date(startMs).toISOString())));
   chart.innerHTML = parts.join("");
 }
 
-function readBox(window, x, y) {
-  const x0 = x(window.window_from), x1 = x(window.ends_at);
-  const y0 = y(window.price + window.half_width), y1 = y(window.price - window.half_width), yRead = y(window.price);
-  const inside = window.grades.ends_inside;
-  const colour = inside === null ? COLOUR.grey : inside ? COLOUR.green : COLOUR.rust;
-  const gaugeX = x1 - 10;
-  const parts = [svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, COLOUR.ink, 0.045),
-                 svgRect(gaugeX, y0 + 20, 5, Math.max(0, y1 - y0 - 26), 2.5, COLOUR.ink, 0.08)];
-  if (window.end !== null) {
-    const yEnd = y(window.end);
+/** A window's gauge on its box's right edge: the track, the part used from the read price to yEnd, and a tick there. */
+function gauge(gaugeX, y0, y1, yRead, yEnd, colour) {
+  const parts = [svgRect(gaugeX, y0 + 20, 5, Math.max(0, y1 - y0 - 26), 2.5, COLOUR.ink, 0.08)];
+  if (yEnd !== null) {
     const usedTop = Math.min(yRead, yEnd), usedBottom = Math.max(yRead, yEnd);
     parts.push(svgRect(gaugeX, usedTop, 5, usedBottom - usedTop, 2.5, colour, 0.75),
                svgLine(gaugeX - 3, yEnd, gaugeX + 8, yEnd, COLOUR.ink, 1.6));
   }
+  return parts.join("");
+}
+
+function readBox(window, x, y, outlined) {
+  const x0 = x(window.window_from), x1 = x(window.ends_at);
+  const y0 = y(window.price + window.half_width), y1 = y(window.price - window.half_width);
+  const inside = window.grades.ends_inside;
+  const colour = inside === null ? COLOUR.grey : inside ? COLOUR.green : COLOUR.rust;
+  const gaugeX = x1 - 10;
+  const outline = outlined ? `stroke="${COLOUR.sand}" stroke-width="1"` : "";
+  const parts = [svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, COLOUR.ink, 0.045, outline),
+                 gauge(gaugeX, y0, y1, y(window.price), window.end === null ? null : y(window.end), colour)];
   const cx = gaugeX + 2.5, cy = y0 + 8;
   parts.push(`<circle cx="${cx}" cy="${cy}" r="6" fill="${colour}"/>`);
   if (inside === true) {
@@ -596,7 +627,52 @@ function readBox(window, x, y) {
   return parts.join("");
 }
 
-function liveCone(current, x, y) {
+/** A window still running: a dashed blue outline, a hollow dashed mark at its top right, the used-so-far gauge. */
+function runningBox(window, x, y) {
+  const x0 = x(window.window_from), x1 = x(window.ends_at);
+  const y0 = y(window.price + window.half_width), y1 = y(window.price - window.half_width);
+  const gaugeX = x1 - 10;
+  return svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, "none", 1,
+                 `stroke="${COLOUR.blue}" stroke-opacity="0.6" stroke-width="1.2" stroke-dasharray="4 3"`)
+       + gauge(gaugeX, y0, y1, y(window.price), window.end === null ? null : y(window.end), COLOUR.blue)
+       + `<circle cx="${gaugeX + 2.5}" cy="${y0 + 8}" r="5" fill="${COLOUR.cream}" stroke="${COLOUR.blue}" `
+       + `stroke-width="2" stroke-dasharray="3 2"/>`;
+}
+
+/** Where priceLines puts the live dot and the running average's dot, with the room each takes. */
+function liveMarks(bars, now, x, y) {
+  const last = bars[bars.length - 1];
+  if (!last) return [];
+  const marks = [{ x: x(last.at), y: y(last.close), r: CHART.dotHalo }];
+  if (now && now.averages.length) {
+    marks.push({ x: x(last.at), y: y(now.averages[now.averages.length - 1]), r: CHART.averageDot });
+  }
+  return marks;
+}
+
+/** True when a 10 px label ending at right on baseline would touch one of the marks. */
+function labelTouches(text, right, baseline, marks) {
+  const left = right - text.length * LABEL_CHAR_WIDTH;
+  return marks.some((mark) => left < mark.x + mark.r && right > mark.x - mark.r
+                              && baseline - 10 < mark.y + mark.r && baseline + 3 > mark.y - mark.r);
+}
+
+/** One of the cone's price labels at its end; when it would touch the live dot it moves further out (above the upper
+ *  edge, below the lower one) while that stays clear of the chart's top and the time labels, else left of the dot. */
+function coneLabel(text, right, baseline, outward, marks) {
+  // a cream halo keeps the label legible where a narrow cone's label overhangs a box or gauge
+  const attrs = `font-size="10" text-anchor="end" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" stroke-width="3" `
+              + `paint-order="stroke"`;
+  if (!labelTouches(text, right, baseline, marks)) return svgText(right, baseline, text, attrs);
+  const reach = outward < 0 ? Math.min(...marks.map((mark) => mark.y - mark.r - 4))
+                            : Math.max(...marks.map((mark) => mark.y + mark.r + 11));
+  if (reach >= 10 && reach <= CHART.labelY - 10 && !labelTouches(text, right, reach, marks)) {
+    return svgText(right, reach, text, attrs);
+  }
+  return svgText(Math.min(...marks.map((mark) => mark.x - mark.r - 2)), baseline, text, attrs);
+}
+
+function liveCone(current, x, y, marks) {
   const xr = x(current.read_at), xe = x(current.ends_at);
   const cone = (reachAtEnd, opacity) => {
     const upper = [], lower = [];
@@ -608,33 +684,35 @@ function liveCone(current, x, y) {
     return `<polygon points="${upper.concat(lower).join(" ")}" fill="${COLOUR.blue}" fill-opacity="${opacity}"/>`;
   };
   const endHalf = halfWidth(current.bands, "80"), averageHalf = halfWidth(current.bands, "average_80");
-  const label = `font-size="10" text-anchor="end" fill="${COLOUR.blue}"`;
+  const upper = current.price + endHalf, lower = current.price - endHalf;
   return cone(endHalf, 0.12) + (averageHalf !== null ? cone(averageHalf, 0.2) : "")
-       + svgText(xe, y(current.price + endHalf) - 4, fmt(current.price + endHalf), label)
-       + svgText(xe, y(current.price - endHalf) + 11, fmt(current.price - endHalf), label);
+       + coneLabel(fmt(upper), xe, y(upper) - 4, -1, marks) + coneLabel(fmt(lower), xe, y(lower) + 11, 1, marks);
 }
 
-/** The day's line before the live window in ink; inside it, the window's closes (the live tick last) in blue with
- *  their running average dashed, both from liveNow, and the live dot at the line's end. */
+/** The day's line before the live window in ink, up to the read's price at the read; inside it, the window's closes
+ *  (the live tick last) in blue with their running average dashed, both from liveNow, and the live dot at the end. */
 function priceLines(current, before, now, x, y) {
   const after = now ? now.series : [];
   const bars = before.concat(after);
   if (!bars.length) return "";
   const point = (bar) => `${x(bar.at).toFixed(1)},${y(bar.close).toFixed(1)}`;
   const round = `stroke-linejoin="round" stroke-linecap="round"`;
+  const start = current && current.price !== null
+              ? `${x(current.read_at).toFixed(1)},${y(current.price).toFixed(1)}` : null;
   const parts = [];
-  if (before.length) parts.push(svgPolyline(before.map(point), COLOUR.ink, 2, round));
+  if (before.length) {
+    parts.push(svgPolyline(before.map(point).concat(start && after.length ? [start] : []), COLOUR.ink, 2, round));
+  }
   const last = bars[bars.length - 1];
   const lastX = x(last.at), lastY = y(last.close);
-  if (current && after.length) {
-    const start = `${x(current.read_at).toFixed(1)},${y(current.price).toFixed(1)}`;
+  if (start && after.length) {
     const averages = after.map((bar, index) => `${x(bar.at).toFixed(1)},${y(now.averages[index]).toFixed(1)}`);
     parts.push(svgPolyline([start].concat(after.map(point)), COLOUR.blue, 2.6, round),
                svgPolyline([start].concat(averages), COLOUR.ink, 1.8, `stroke-dasharray="4 2.5"`),
-               `<circle cx="${lastX}" cy="${lastY}" r="9" fill="${COLOUR.blue}" fill-opacity="0.15"/>`,
+               `<circle cx="${lastX}" cy="${lastY}" r="${CHART.dotHalo}" fill="${COLOUR.blue}" fill-opacity="0.15"/>`,
                `<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
                + `stroke-width="2"/>`,
-               `<circle cx="${lastX}" cy="${y(now.averages[now.averages.length - 1])}" r="4.5" `
+               `<circle cx="${lastX}" cy="${y(now.averages[now.averages.length - 1])}" r="${CHART.averageDot}" `
                + `fill="${COLOUR.cream}" stroke="${COLOUR.ink}" stroke-width="2"/>`);
   } else {
     parts.push(`<circle cx="${lastX}" cy="${lastY}" r="5" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" `
@@ -643,14 +721,26 @@ function priceLines(current, before, now, x, y) {
   return parts.join("");
 }
 
-function axisLabels(current, boxes, bars, x) {
-  const parts = boxes.map((window) => svgText((x(window.window_from) + x(window.ends_at)) / 2, CHART.labelY,
-                                              clock(window.read_at),
-                                              `font-size="10" text-anchor="middle" fill="${COLOUR.faint}"`));
+/** The time labels: Now (or Last) first, then the axis's start (Open, or its time), then each finished box's read
+ *  time at its middle, newest first, each left out where it would touch one already placed. Running boxes get none:
+ *  their middle is where Now sits. */
+function axisLabels(current, boxes, bars, x, startWord) {
   const last = bars[bars.length - 1];
   const nowX = clamp(last ? x(last.at) : current ? x(current.read_at) : CHART.width - 12, 12, CHART.width - 12);
-  parts.push(svgText(nowX, CHART.labelY, isLive() ? "Now" : "Last",
-                     `font-size="10" text-anchor="middle" fill="${COLOUR.ink}" font-weight="700"`));
+  const faint = `font-size="10" fill="${COLOUR.faint}"`;
+  const labels = [{ x: nowX, text: isLive() ? "Now" : "Last", anchor: "middle",
+                    attrs: `font-size="10" fill="${COLOUR.ink}" font-weight="700"` },
+                  { x: CHART.left, text: startWord, anchor: "start", attrs: faint }];
+  boxes.forEach((window) => labels.push({ x: (x(window.window_from) + x(window.ends_at)) / 2,
+                                          text: clock(window.read_at), anchor: "middle", attrs: faint }));
+  const placed = [], parts = [];
+  labels.forEach((label) => {
+    const width = label.text.length * LABEL_CHAR_WIDTH;
+    const left = label.anchor === "start" ? label.x : label.x - width / 2;
+    if (placed.some(([from, to]) => left < to + LABEL_GAP && left + width > from - LABEL_GAP)) return;
+    placed.push([left, left + width]);
+    parts.push(svgText(label.x, CHART.labelY, label.text, `${label.attrs} text-anchor="${label.anchor}"`));
+  });
   return parts.join("");
 }
 
@@ -714,7 +804,6 @@ function renderStrip() {
 
 function renderReadsList() {
   const current = liveWindow();
-  const finished = windows() ? windows().finished[state.channel] : [];
   const rows = [];
   if (current && halfWidth(current.bands, "80") !== null) {
     const word = isLive() ? "Live" : current.ended ? "Ended" : "Last";
@@ -722,7 +811,11 @@ function renderReadsList() {
     rows.push(readRow(current.read_at, halfWidth(current.bands, "80"), now.farthest_up, now.farthest_down, now.move,
                       word, "live"));
   }
-  finished.forEach((window) => {
+  windowList("running").forEach((window) => {
+    rows.push(readRow(window.read_at, window.half_width, window.farthest_up, window.farthest_down, window.end_move,
+                      "Running", "running"));
+  });
+  windowList("finished").forEach((window) => {
     const inside = window.grades.ends_inside;
     const word = inside === null ? titleCase(window.status || "pending") : inside ? "Inside" : "Outside";
     rows.push(readRow(window.read_at, window.half_width, window.farthest_up, window.farthest_down, window.end_move,
@@ -734,14 +827,18 @@ function renderReadsList() {
   el("reads-list").innerHTML = shown.join("") + more || `<p class="block-note">${esc(emptyReason())}</p>`;
 }
 
+/** One list row: the read's time, a mini bar of how far price went each way against the band (dashed with a hollow
+ *  end dot for a running window), the numbers and the word. */
 function readRow(readAt, half, up, down, endMove, word, kind) {
-  const colour = kind === "live" ? COLOUR.blue : kind === "inside" ? COLOUR.green
+  const colour = kind === "live" || kind === "running" ? COLOUR.blue : kind === "inside" ? COLOUR.green
                : kind === "outside" ? COLOUR.rust : COLOUR.grey;
   const scale = half ? ROW.reach / half : 0;
   const spanLeft = clamp(ROW.centre - (down || 0) * scale, 2, ROW.width - 2);
   const spanRight = clamp(ROW.centre + (up || 0) * scale, 2, ROW.width - 2);
   const bar = [svgRect(ROW.trackLeft, 2, ROW.trackRight - ROW.trackLeft, 6, 3, COLOUR.track)];
-  if (up !== null && down !== null && half) {
+  if (kind === "running" && up !== null && down !== null && half) {
+    bar.push(svgLine(spanLeft, 5, spanRight, 5, colour, 3, `stroke-dasharray="3 2" stroke-opacity="0.7"`));
+  } else if (up !== null && down !== null && half) {
     const innerLeft = Math.max(spanLeft, ROW.trackLeft), innerRight = Math.min(spanRight, ROW.trackRight);
     if (innerRight > innerLeft) bar.push(svgRect(innerLeft, 3.5, innerRight - innerLeft, 3, 1.5, colour, 0.45));
     if (spanLeft < ROW.trackLeft) bar.push(svgRect(spanLeft, 3.5, ROW.trackLeft - spanLeft, 3, 1.5, colour, 0.6));
@@ -751,7 +848,9 @@ function readRow(readAt, half, up, down, endMove, word, kind) {
   }
   if (endMove !== null && half) {
     const dotX = clamp(ROW.centre + endMove * scale, 5, ROW.width - 5);
-    bar.push(`<circle cx="${dotX}" cy="5" r="3.5" fill="${colour}"/>`);
+    bar.push(kind === "running" ? `<circle cx="${dotX}" cy="5" r="3" fill="${COLOUR.cream}" stroke="${colour}" `
+                                  + `stroke-width="1.5"/>`
+                                : `<circle cx="${dotX}" cy="5" r="3.5" fill="${colour}"/>`);
   }
   const travelled = up === null || down === null ? "—" : `${fmt(up, 0, true)} −${fmt(down)}`;
   const span = half ? `${travelled} · ±${fmt(half)}` : "—";

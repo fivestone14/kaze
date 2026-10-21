@@ -487,7 +487,8 @@ Top level: `status` (`built`, `blind`, `thin`) and `status_reason` (`cut_bar_mis
 `age_s`, `as_of` (the newest input's moment; for the calendar, the last day it covers), `cadence` (live, minute,
 once_a_day, hand_kept) and `note`: the calendar feed's horizon words, null elsewhere; the live price's row is filled
 from its file as the feed is written, live inside 10 s), `login` (`state`, `hours_left`, `expires_at`), `session`
-(`closes_at`, `next_session_opens_at`: so the phone can tell closed from no read today), `nightly` (`done_for`,
+(`opens_at`, where the Read chart's time axis may start; `closes_at`, `next_session_opens_at`: so the phone can tell
+closed from no read today), `nightly` (`done_for`,
 `expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
 observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes the file is
 replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent.
@@ -515,6 +516,12 @@ step crashed); the 5-minute channel follows every read, the 30- and 60-minute ch
   `fit_sessions`, `fit_windows`, `stays_inside_share`, `dials`, `dials_product`, `straddle`, `minutes_left`,
   `options_swing`, `options_check`, `chance_up_if_moves`, `trust_applied`). Null when the day has no live read yet
   for that lane.
+- `running[channel]`: the channel's earlier windows whose read is written but whose window has not ended at the cut
+  (the live window's own read left out), newest first, what the Read page draws as dashed boxes and Running rows:
+  `read_at`, `price`, `window_from`, `ends_at`, `half_width`, `bands`, `minutes_held`, and so far, measured the
+  grade's way over the bars from `window_from` to the cut, `end` (the newest close), `high`, `low`, `end_move`,
+  `farthest_up`, `farthest_down`; no grades. Usually 0-1 entries for 5 and 30 minutes, 0-2 for 60 (its windows overlap
+  by half).
 - `finished[channel]`: today's closed windows of the channel, newest first, what the Read page draws as past-read
   boxes and the list: `read_at`, `price`, `window_from`, `ends_at`, `status` (the window's label status),
   `half_width`, `end`, `high`, `low`, `end_move`, `farthest_up`, `farthest_down`, `grades` (`ends_inside`,

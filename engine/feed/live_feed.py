@@ -1,10 +1,10 @@
 # Writes the small JSON file the phone reads after every live read: the read's status and values, each feed's status
 # (live, partial or blind) with its age, newest input, cadence and any note (the live price's row first), the Schwab
 # login, the session's clock, the nightly's standing, the range block (the phone's part of the forecast) and the
-# windows block (the live window per channel with its read's own chain, today's finished windows with their grades,
-# the score). The keys written here are the phone's
-# whole contract (docs/data_map.md, "The phone feed"); a failed job writes a failed document so the phone never keeps
-# an old file in silence.
+# windows block (the live window per channel with its read's own chain, the earlier windows still running, today's
+# finished windows with their grades, the score). The keys written here are the phone's whole contract
+# (docs/data_map.md, "The phone feed"); a failed job writes a failed document so the phone never keeps an old file in
+# silence.
 import json
 import os
 from datetime import date, datetime, timedelta
@@ -20,7 +20,7 @@ PHONE_LIVE, PHONE_PARTIAL, PHONE_BLIND = "live", "partial", "blind"
 CALENDAR_FEED = "event_calendar"
 LOGIN_FIELD_SHORT_NAMES = {"login_state": "state", "login_hours_until_expiry": "hours_left",
                            "login_expires_at": "expires_at"}
-WINDOWS, CURRENT, FINISHED, SCORE = "windows", "current", "finished", "score"
+WINDOWS, CURRENT, RUNNING, FINISHED, SCORE = "windows", "current", "running", "finished", "score"
 FAILED = "failed"
 # The forecast keys the phone reads, at the top of the range block, per channel and per push reading.
 RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases")
@@ -57,17 +57,17 @@ def write_document(document):
 
 
 def session_block(day, half_days):
-    """The session's clock for the phone: when this session closes and the next one opens, so closed reads as closed."""
+    """The session's clock for the phone: when it opens and closes and the next one opens, so closed reads as closed."""
     # Past the holiday list's horizon the clock cannot answer for the day or the next; both are left null rather
     # than crashing the feed, so a failed read past the horizon still reaches the phone as a failed document.
-    closes_at, next_open = None, None
+    opens_at, closes_at, next_open = None, None, None
     try:
         if session_clock.is_trading_day(day):
-            closes_at = session_clock.session_close(day, half_days)
+            opens_at, closes_at = session_clock.session_open(day), session_clock.session_close(day, half_days)
         next_open = session_clock.session_open(session_clock.next_trading_day(day))
     except ValueError:
         pass
-    return for_phone({"closes_at": closes_at, "next_session_opens_at": next_open})
+    return for_phone({"opens_at": opens_at, "closes_at": closes_at, "next_session_opens_at": next_open})
 
 
 def nightly_block(done_for, day):
@@ -184,7 +184,7 @@ def failed_windows_block(failure):
     return {"status": FAILED, "reason": f"{type(failure).__name__}: {failure}"}
 
 
-# ---- The windows block: the live window per channel, today's finished windows per channel, the score -------------
+# ---- The windows block: per channel the live window, the earlier windows still running, today's finished ones ----
 
 def windows_block(conn, day, cut_at, known_by_iso):
     """The windows block of the phone's range feed, built from the store after the read and its grades are written."""
@@ -192,11 +192,14 @@ def windows_block(conn, day, cut_at, known_by_iso):
     bars = store_queries.session_bars(conn, trade_date, cut_iso, known_by_iso)
     series = range_fit.minute_series(bars, trade_date)
     live = bars[-1]["close"] if bars else None
-    current = {name: live_window(conn, day, cut_at, name, minutes, series, live)
-               for name, minutes in components.HORIZON_MINUTES.items()}
-    finished = {name: finished_windows(conn, trade_date, name, lane_for_channel(minutes))
-                for name, minutes in components.HORIZON_MINUTES.items()}
-    return {CURRENT: current, FINISHED: finished,
+    current, running, finished = {}, {}, {}
+    for name, minutes in components.HORIZON_MINUTES.items():
+        lane = lane_for_channel(minutes)
+        read = store_queries.newest_live_read(conn, trade_date, cut_iso, lane)
+        current[name] = live_window(conn, day, cut_at, name, read, series, live)
+        running[name] = running_windows(conn, day, cut_iso, name, lane, read, series)
+        finished[name] = finished_windows(conn, trade_date, name, lane)
+    return {CURRENT: current, RUNNING: running, FINISHED: finished,
             SCORE: {name: score_counts(entries) for name, entries in finished.items()}}
 
 
@@ -205,12 +208,18 @@ def lane_for_channel(minutes):
     return session_clock.LANE_HEADLINE if minutes >= session_clock.READ_LANES[session_clock.LANE_HEADLINE] else None
 
 
-def live_window(conn, day, cut_at, channel, minutes, series, live):
+def facts_so_far(decision, day, series):
+    """A window's bars held so far, measured the grade's way from its first minute to the newest bar, or None."""
+    first, last = grade.window_minute_span(decision, day)
+    last_held = min(last, series[0].size - 1)
+    return range_fit.window_facts(*series, first, last_held) if last_held >= first else None
+
+
+def live_window(conn, day, cut_at, channel, read, series, live):
     """The channel's newest window at the cut: its read, bands, the bars held so far measured the grade's way."""
     # With the moves from the read price and whether the running average sits inside its band; ended once the cut has
     # passed the window's end.
     cut_iso = session_clock.iso_utc(cut_at)
-    read = store_queries.newest_live_read(conn, day.isoformat(), cut_iso, lane_for_channel(minutes))
     decisions = store_queries.decisions_of_read(conn, read["snapshot_id"], components.RANGE_DECISION_KIND, channel) \
         if read else ()
     if not decisions:
@@ -218,9 +227,7 @@ def live_window(conn, day, cut_at, channel, minutes, series, live):
     base = decisions[0]
     bands = grade.decision_bands(conn, base)[0]
     price = store_queries.read_price_and_bar(conn, read["snapshot_rowid"])[0]
-    first, last = grade.window_minute_span(base, day)
-    last_held = min(last, series[0].size - 1)
-    facts = range_fit.window_facts(*series, first, last_held) if last_held >= first else None
+    facts = facts_so_far(base, day, series)
     moves = grade.signed_moves(price, facts)
     rung = components.RUNG_POINTS[channel]
     move = None if live is None or price is None else live - price
@@ -292,6 +299,29 @@ def farthest_moves(moves):
 def inside_half(move, half_width):
     """True when a move sits inside a half-width; None when either is missing."""
     return None if move is None or half_width is None else abs(move) <= half_width
+
+
+def running_windows(conn, day, cut_iso, channel, read_lane, live_read, series):
+    """The channel's earlier windows still running at the cut, newest first, measured so far; no grades yet."""
+    entries = []
+    for decision in store_queries.running_decisions(conn, day.isoformat(), cut_iso, channel, read_lane,
+                                                    components.RANGE_DECISION_KIND):
+        if decision["snapshot_id"] == live_read["snapshot_id"]:
+            continue
+        bands = grade.decision_bands(conn, decision)[0]
+        price = store_queries.read_price_and_bar(conn, decision["snapshot_rowid"])[0]
+        facts = facts_so_far(decision, day, series)
+        moves = grade.signed_moves(price, facts)
+        entries.append({
+            "read_at": session_clock.parse_iso(decision["cut_at"]), "price": price,
+            "window_from": session_clock.parse_iso(decision["grade_window_starts_at"]),
+            "ends_at": session_clock.parse_iso(decision["grade_window_ends_at"]),
+            "half_width": bands[components.BAND]["half_width"], "bands": bands,
+            "minutes_held": facts["minutes"] if facts else 0,
+            **{side: facts and facts[side] for side in ("end", "high", "low")},
+            "end_move": moves and moves["end"], **farthest_moves(moves),
+        })
+    return entries
 
 
 def finished_windows(conn, trade_date, channel, read_lane):

@@ -116,6 +116,7 @@ main {
 .range-line { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
 .chart, .strip, .range-bar { width: 100%; height: auto; display: block; }
 .chart[hidden], .strip[hidden], .range-bar[hidden] { display: none; }
+.chart { overflow: visible; }
 .strip-card { padding: 10px 12px 8px; gap: 4px; }
 .legend { display: flex; gap: 12px; font-size: 10px; color: var(--faint); }
 .legend span { display: flex; align-items: center; gap: 4px; }
@@ -137,6 +138,7 @@ main {
 .read-row svg { width: 100%; max-width: 110px; height: 10px; display: block; }
 .read-row .span { font-size: 10px; color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; }
 .read-row .word { font-size: 11px; font-weight: 700; text-align: right; }
+.read-row .word.running { color: var(--blue); }
 .scores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .score {
   background: var(--cream);
