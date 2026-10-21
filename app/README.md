@@ -133,10 +133,12 @@ the card's edge, where they would touch. Sight's Which Way card asks each readin
 engine's short answer (`Since Yesterday · Up 37 Pts`, `Path · Choppy`; the words and their thresholds are the
 engine's, `docs/data_map.md` section 8); each row is a button, and a tap shows the exact figure under the answer
 (`+37 Since Close`). The engine's width dials are Band Wideners on every screen: Sight's How Far card lists all five
-with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed day, `Active ×2.6`; `Data Release In The
-Window · None Due` or `Due 10:00 ×1.4`; `Last 15 Minutes Of The Day · From 15:45` or `Active ×1.36`; `Price Speeding
+with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed day, `Due ×2.6 · Not Counted Yet`; `Data
+Release In The Window · None Due` or `Due 10:00 ×1.4 · Not Counted Yet`; `Last 15 Minutes Of The Day · From 15:45` or
+`Due ×1.36 · Not Counted Yet`; any of them `Counted ×n` once the ledger gives it weight; `Price Speeding
 Up` and `Options Expect More Movement · Watching · Not Counted Yet` until the ledger gives them weight, then `Counted
-×n`), and Steps row 7 names the ones on now with the applied product beside them (`×1.00` until one is counted). Rows
+×n`), and Steps row 7 names only the counted ones with the applied product beside them (`×1.00` and `None Counted
+Yet` until one is). Rows
 grow with their text instead of clipping it: nothing on the three screens is cut off with an ellipsis at 360 px.
 
 The shell pins the WebView's text zoom at 100% (`textZoom` in `MainActivity.kt`): the page lays its boxes out in px,

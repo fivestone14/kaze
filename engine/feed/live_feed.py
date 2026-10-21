@@ -60,7 +60,7 @@ def write_document(document):
 def session_block(day, half_days):
     """The session's clock for the phone: open, close, the closing dial's start and the next open."""
     # So the phone can tell closed from no read today. Past the holiday list's horizon the clock cannot answer for the
-    # day or the next; both are left null rather than crashing the feed, so a failed read past the horizon still
+    # day or the next; all are left null rather than crashing the feed, so a failed read past the horizon still
     # reaches the phone as a failed document.
     opens_at, closes_at, next_open = None, None, None
     try:

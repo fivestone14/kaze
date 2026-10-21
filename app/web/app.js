@@ -482,7 +482,9 @@ function render() {
   guarded(renderReadsList, "list-note");
   guarded(renderScores, "list-note");
   guarded(renderSight, "sight-note");
+  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.push : null;
   guarded(renderPush, "push-note");
+  keepFocus(focused);
   guarded(renderFeeds, "feeds-note");
   guarded(renderSteps, "steps-note");
   guarded(renderAnswer, "steps-note");
@@ -1096,23 +1098,21 @@ function times(value) {
   return `×${fmt(value, 2).replace(/(\.\d)0$/, "$1")}`;
 }
 
-/** One band widener's standing on a read: on (raw off 1.00, or for the always-reading two, a weight earned) with its
- *  multiplier, or the plain words for when it would be. The Sight list and the Steps line both read it. */
+/** One band widener's standing on a read: on only once it has earned weight (then the multiplier the band used), else
+ *  what it would add and that it is not counted yet, or when it next applies. Sight's list and Steps' line read it. */
 function widenerStatus(name, read) {
   const dial = read.dials ? read.dials[name] : null;
   const raw = dial ? dial.raw : null;
   const moved = raw !== null && raw !== undefined && raw !== 1;
-  if (COUNTED_WIDENERS.includes(name)) {
-    return dial && dial.weight ? { on: true, by: times(dial.applied), words: `Counted ${times(dial.applied)}` }
-                               : { on: false, words: "Watching · Not Counted Yet" };
-  }
+  if (dial && dial.weight) return { on: true, by: times(dial.applied), words: `Counted ${times(dial.applied)}` };
+  if (COUNTED_WIDENERS.includes(name)) return { on: false, words: "Watching · Not Counted Yet" };
   if (moved && name === "release_window") {
     // the newest release before the window's end is one overlapping it whenever any does
     const due = (range() && range().releases || []).filter((release) => ms(release.at) < ms(read.ends_at))
       .reduce((newest, release) => (!newest || ms(release.at) > ms(newest.at) ? release : newest), null);
-    return { on: true, by: times(raw), words: `Due ${due ? `${clock(due.at)} ` : ""}${times(raw)}` };
+    return { on: false, words: `Due ${due ? `${clock(due.at)} ` : ""}${times(raw)} · Not Counted Yet` };
   }
-  if (moved) return { on: true, by: times(raw), words: `Active ${times(raw)}` };
+  if (moved) return { on: false, words: `Due ${times(raw)} · Not Counted Yet` };
   const fedAt = range() && range().fed_decision_at;
   const session = state.feed && state.feed.session;
   const closingFrom = session && session.closing_window_from;
@@ -1146,6 +1146,12 @@ function directionWords(direction) {
   if (!direction || direction.chance_up_if_moves === null || direction.chance_up_if_moves === undefined) return "—";
   const words = direction.trust_applied === 0 || !direction.text ? "Coin Flip" : titleCase(direction.text);
   return `Up ${fmt(direction.chance_up_if_moves * 100)}% · ${words}`;
+}
+
+/** Give keyboard focus back to the push row that held it, since re-rendering the rows replaces the buttons. */
+function keepFocus(name) {
+  const row = name && document.querySelector(`[data-push="${CSS.escape(name)}"]`);
+  if (row) row.focus();
 }
 
 function renderPush() {
@@ -1320,7 +1326,7 @@ function widenersLine(read) {
   const on = Object.keys(WIDENER_NAMES).map((name) => [name, widenerStatus(name, read)])
     .filter(([, status]) => status.on);
   return on.length ? on.map(([name, status]) => `${WIDENER_NAMES[name]} ${status.by}`).join(" · ")
-                   : "Widen the band for known busy moments · None active now";
+                   : "Widen The Band For Known Busy Moments · None Counted Yet";
 }
 
 function renderStepChecks(read, minutes) {
@@ -1393,6 +1399,7 @@ document.addEventListener("click", (event) => {
   if (pushRow) {
     if (!state.openPush.delete(pushRow.dataset.push)) state.openPush.add(pushRow.dataset.push);
     guarded(renderPush, "push-note");
+    keepFocus(pushRow.dataset.push);
   }
 });
 document.addEventListener("visibilitychange", () => {

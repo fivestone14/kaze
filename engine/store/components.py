@@ -103,9 +103,9 @@ PUSH_READING_MEANING = {
     MIRAI_CLAUDE: "Mirai's Claude 30-minute forecast, up over up plus down",
 }
 # What the phone shows for each reading: a short question and a short answer from the reading's fixed words. A lean
-# within EVEN_LEAN_ZONE of even (0.47 to 0.53) answers Flat or Even, else the sign of the reading picks up or down; a
-# straightness under STEADY_STRAIGHTNESS is Choppy (a random 30-minute walk scores about 0.18, one way is 1). A blank
-# input has no answer. Breadth answers with its share alone.
+# within EVEN_LEAN_ZONE of even (0.47 to 0.53) answers Flat or Even (Choppy for the path), else the sign of the reading
+# picks up or down; a path leaning one way is Steady at STEADY_STRAIGHTNESS or more, else Drifting (a random 30-minute
+# walk scores about 0.18, one way is 1). A blank input has no answer. Breadth answers with its share alone.
 EVEN_LEAN_ZONE = 0.03
 STEADY_STRAIGHTNESS = 0.4
 PUSH_READING_LABEL = {PRICE_TREND: "Since Yesterday", STRAIGHTNESS: "Path", BREADTH: "Stocks Rising",
@@ -114,7 +114,7 @@ PUSH_READING_LABEL = {PRICE_TREND: "Since Yesterday", STRAIGHTNESS: "Path", BREA
 # Each reading's answers as (up, down, even); {points} is the move in whole points, {share} a percent.
 PUSH_ANSWER_WORDS = {
     PRICE_TREND: ("Up {points} Pts", "Down {points} Pts", "Flat"),
-    STRAIGHTNESS: ("Steady Up", "Steady Down", "Choppy"),
+    STRAIGHTNESS: ("Steady Up", "Steady Down", "Choppy", "Drifting Up", "Drifting Down"),
     BREADTH: ("{share}",),
     BIG_TECH_VS_REST: ("Ahead", "Behind", "Even"),
     OPTIONS_BUYERS: ("More Calls", "More Puts", "Even"),

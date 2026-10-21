@@ -394,14 +394,14 @@ scale), so they never lean past 0.3 or 0.7 (the scales are in `components.LEAN_S
 The phone asks each reading a plain question and shows its answer; the words live in `components.py`
 (`PUSH_READING_LABEL`, `PUSH_ANSWER_WORDS`) and travel on the reading's registry row with the thresholds. A lean
 within 0.03 of even (0.47 to 0.53, `EVEN_LEAN_ZONE`) answers Flat or Even, else the reading's sign picks the side;
-that is a move under 1.5 points, a QQQ-over-RSP gap under 0.08 points, a yield change under 0.8 bp. Straightness
-under 0.4 (`STEADY_STRAIGHTNESS`: the net move under 40% of the path walked; a random 30-minute walk scores about
-0.18) is Choppy.
+that is a move under 1.5 points, a QQQ-over-RSP gap under 0.08 points, a yield change under 0.8 bp. The path is
+Choppy inside that even zone; leaning one way it is Steady at a straightness of 0.4 or more (`STEADY_STRAIGHTNESS`:
+the net move at least 40% of the path walked; a random 30-minute walk scores about 0.18), else Drifting.
 
 | Reading | Question | Answers |
 |---|---|---|
 | `price_trend` | Since Yesterday | `Up 37 Pts`, `Down 12 Pts` (whole points), `Flat` |
-| `straightness` | Path | `Steady Up`, `Steady Down`, `Choppy` |
+| `straightness` | Path | `Steady Up`, `Steady Down`, `Drifting Up`, `Drifting Down`, `Choppy` |
 | `breadth` | Stocks Rising | the share, `45%` |
 | `big_tech_vs_rest` | Big Tech | `Ahead`, `Behind`, `Even` (against the average stock) |
 | `options_buyers` | Options Bets | `More Calls`, `More Puts`, `Even` |
@@ -690,5 +690,5 @@ Then `rm nightly_done.txt` if the restored session is older than the file says, 
    card says `Schwab Login Renew Soon` all Monday (correct, not a fault) and Tuesday's first read shows
    `Good Until Mon 10-26`. The login lapses weekly from then on.
 10. Wed 10-28 is an FOMC day (14:00): reads whose window ends after the decision carry an `owner_rule` variant and
-    the phone shows Fed Decision Day `From 14:00`, then `Active ×2.6` (Sight's Band Wideners, Steps row 7); the
-    first real test of the Fed path.
+    the phone shows Fed Decision Day `From 14:00`, then `Due ×2.6 · Not Counted Yet` (Sight's Band Wideners; the
+    base band stays ×1.00 until the ledger gives the Fed widener weight); the first real test of the Fed path.

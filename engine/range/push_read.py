@@ -110,7 +110,7 @@ def readings(observations, path_moves):
 
 
 def straightness_reading(path, price_row):
-    """The 30-minute straightness as a lean signed by the net move, answered steady up, steady down or choppy."""
+    """The 30-minute straightness as a lean signed by the net move, answered steady, drifting (up or down) or choppy."""
     if path is None:
         reason = price_row["blank_reason"] if price_row is not None and price_row["blank_reason"] \
             else registry.NOT_FORMED_REASON
@@ -119,8 +119,13 @@ def straightness_reading(path, price_row):
     if path["straightness"] is None:
         return reading_entry(components.STRAIGHTNESS, None, None, None, "no_activity", price_row)
     lean = tilted_lean(path["straightness"] * (1 if net > 0 else -1 if net < 0 else 0))
-    up, down, choppy = components.PUSH_ANSWER_WORDS[components.STRAIGHTNESS]
-    answer = choppy if path["straightness"] < components.STEADY_STRAIGHTNESS else up if net > 0 else down
+    up, down, choppy, drift_up, drift_down = components.PUSH_ANSWER_WORDS[components.STRAIGHTNESS]
+    if abs(lean - 0.5) <= components.EVEN_LEAN_ZONE:
+        answer = choppy
+    elif path["straightness"] >= components.STEADY_STRAIGHTNESS:
+        answer = up if net > 0 else down
+    else:
+        answer = drift_up if net > 0 else drift_down
     return reading_entry(components.STRAIGHTNESS, f"{path['straightness']:.2f} Straight, Net {net:+.1f}", answer, lean,
                          None, price_row)
 
