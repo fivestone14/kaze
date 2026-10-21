@@ -547,7 +547,7 @@ function renderRead() {
  *  a price axis fitted to what is on screen. */
 function renderChart(current, running, finished, minutes) {
   const chart = el("chart");
-  const anchorEnd = current ? current.ends_at : finished[0] ? finished[0].ends_at
+  const anchorEnd = current ? current.ends_at : running[0] ? running[0].ends_at : finished[0] ? finished[0].ends_at
                   : state.bars.length ? state.bars[state.bars.length - 1].at : null;
   const notes = anchorEnd && current ? [] : [emptyReason()];
   if (!state.bars.length && state.barsReply && state.barsReply !== 200) {
@@ -559,7 +559,8 @@ function renderChart(current, running, finished, minutes) {
   if (!anchorEnd) return;
   const endMs = ms(anchorEnd);
   const session = state.feed && state.feed.session;
-  const openMs = session && session.opens_at ? ms(session.opens_at) : -Infinity;
+  const openMs = session && session.opens_at ? ms(session.opens_at)
+               : state.bars.length ? ms(state.bars[0].at) : -Infinity;
   const startMs = Math.min(Math.max(openMs, endMs - PAST_SPAN_MINUTES[state.channel] * 60000),
                            endMs - minutes * 60000);
   const x = (iso) => CHART.left + (ms(iso) - startMs) / (endMs - startMs) * (CHART.right - CHART.left);
@@ -589,9 +590,10 @@ function renderChart(current, running, finished, minutes) {
   const outlined = (window) => overlapping && (finished.length - 1 - finished.indexOf(window)) % 2 === 1;
   const parts = boxes.map((window) => readBox(window, x, y, outlined(window)));
   runs.forEach((window) => parts.push(runningBox(window, x, y)));
-  if (liveHalf !== null) parts.push(liveCone(current, x, y, liveMarks(bars, now, x, y)));
+  const marks = liveMarks(bars, now, x, y).concat(runs.map((window) => runningGaugeArea(window, x, y)));
+  if (liveHalf !== null) parts.push(liveCone(current, x, y, marks));
   parts.push(priceLines(current, before, now, x, y),
-             axisLabels(current, boxes, bars, x, startMs === openMs ? "Open" : clock(new Date(startMs).toISOString())));
+             axisLabels(current, boxes, bars, x, startMs === openMs ? "Open" : ""));
   chart.innerHTML = parts.join("");
 }
 
@@ -628,10 +630,17 @@ function readBox(window, x, y, outlined) {
 }
 
 /** A window still running: a dashed blue outline, a hollow dashed mark at its top right, the used-so-far gauge. */
+/** The strip a running box's gauge takes on its right edge, for drawing it and for keeping labels off it. */
+function runningGaugeArea(window, x, y) {
+  const right = x(window.ends_at) - 5;
+  const half = window.half_width;
+  return { left: right - 5, right, top: y(window.price + half), bottom: y(window.price - half) };
+}
+
 function runningBox(window, x, y) {
   const x0 = x(window.window_from), x1 = x(window.ends_at);
   const y0 = y(window.price + window.half_width), y1 = y(window.price - window.half_width);
-  const gaugeX = x1 - 10;
+  const gaugeX = runningGaugeArea(window, x, y).left;
   return svgRect(x0 + 1, y0, x1 - x0 - 2, y1 - y0, 6, "none", 1,
                  `stroke="${COLOUR.blue}" stroke-opacity="0.6" stroke-width="1.2" stroke-dasharray="4 3"`)
        + gauge(gaugeX, y0, y1, y(window.price), window.end === null ? null : y(window.end), COLOUR.blue)
@@ -639,22 +648,23 @@ function runningBox(window, x, y) {
        + `stroke-width="2" stroke-dasharray="3 2"/>`;
 }
 
-/** Where priceLines puts the live dot and the running average's dot, with the room each takes. */
+/** The room priceLines' live dot and running-average dot take, as boxes the cone's labels keep off. */
 function liveMarks(bars, now, x, y) {
   const last = bars[bars.length - 1];
   if (!last) return [];
-  const marks = [{ x: x(last.at), y: y(last.close), r: CHART.dotHalo }];
+  const dot = (cx, cy, r) => ({ left: cx - r, right: cx + r, top: cy - r, bottom: cy + r });
+  const marks = [dot(x(last.at), y(last.close), CHART.dotHalo)];
   if (now && now.averages.length) {
-    marks.push({ x: x(last.at), y: y(now.averages[now.averages.length - 1]), r: CHART.averageDot });
+    marks.push(dot(x(last.at), y(now.averages[now.averages.length - 1]), CHART.averageDot));
   }
   return marks;
 }
 
-/** True when a 10 px label ending at right on baseline would touch one of the marks. */
+/** True when a 10 px label ending at right on baseline would touch one of the marks (boxes: left/right/top/bottom). */
 function labelTouches(text, right, baseline, marks) {
   const left = right - text.length * LABEL_CHAR_WIDTH;
-  return marks.some((mark) => left < mark.x + mark.r && right > mark.x - mark.r
-                              && baseline - 10 < mark.y + mark.r && baseline + 3 > mark.y - mark.r);
+  return marks.some((mark) => left < mark.right && right > mark.left
+                              && baseline - 10 < mark.bottom && baseline + 3 > mark.top);
 }
 
 /** One of the cone's price labels at its end; when it would touch the live dot it moves further out (above the upper
@@ -664,12 +674,12 @@ function coneLabel(text, right, baseline, outward, marks) {
   const attrs = `font-size="10" text-anchor="end" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" stroke-width="3" `
               + `paint-order="stroke"`;
   if (!labelTouches(text, right, baseline, marks)) return svgText(right, baseline, text, attrs);
-  const reach = outward < 0 ? Math.min(...marks.map((mark) => mark.y - mark.r - 4))
-                            : Math.max(...marks.map((mark) => mark.y + mark.r + 11));
+  const reach = outward < 0 ? Math.min(...marks.map((mark) => mark.top - 4))
+                            : Math.max(...marks.map((mark) => mark.bottom + 11));
   if (reach >= 10 && reach <= CHART.labelY - 10 && !labelTouches(text, right, reach, marks)) {
     return svgText(right, reach, text, attrs);
   }
-  return svgText(Math.min(...marks.map((mark) => mark.x - mark.r - 2)), baseline, text, attrs);
+  return svgText(Math.min(...marks.map((mark) => mark.left - 2)), baseline, text, attrs);
 }
 
 function liveCone(current, x, y, marks) {
