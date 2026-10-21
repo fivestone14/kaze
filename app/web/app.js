@@ -23,21 +23,25 @@ const LEAN_DEAD_ZONE = 0.01;
 const PAST_SPAN_MINUTES = { "5_minutes": 75, "30_minutes": 240, "60_minutes": 270 };
 const CHART_PAD = { top: 4, bottom: 6, coneLabel: 4 };
 const LABEL_CHAR_WIDTH = 6;   // a 10 px label's widest character, for the label collision checks
+const BOLD_CHAR_WIDTH = 7.5;  // the same for a bold one
 const LABEL_GAP = 4;
+const AXIS_LABEL_CLEAR = 14;  // a cone label's baseline stays this far above the time labels' baseline
+const BODY_FONT_PX = 12;      // app.css's body size: the chart's label sizes grow with the page's text when it does
 const CONE_STEPS = 4;
 const FONT = "Plus Jakarta Sans, sans-serif";
 const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
                  faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
                  white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
 const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, dotHalo: 9, averageDot: 4.5 };
-const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6, labelRoom: 70 };
+// The strip: the two numbers on its top line at the card's edges, each after its key; every needle ends 4 px above
+// the average band's bottom, so the labels under the strip keep clear of them.
+const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6, inset: 2, topY: 10, keyY: 6.5, keyRadius: 3.5,
+                keyGap: 8, bandTop: 21, bandBottom: 43, ringRadius: 6, labelY: 60 };
+STRIP.needleEnd = STRIP.bandBottom - 4;
 const RANGE_BAR = { width: 312, centre: 156, reach: 136.7 };
-const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2 };
+const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2, nameY: 62, memoryY: 75 };
 const METER = { width: 86, small: 50 };
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
-const PUSH_LABELS = { price_trend: "Price Trend", straightness: "Straightness", breadth: "Breadth",
-                      big_tech_vs_rest: "Big Tech vs Rest", options_buyers: "Options Buyers",
-                      yield_change: "10-Year Yield", mirai_claude: "Claude" };
 const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchlist_quotes: "Quotes",
                       nyse_breadth: "Breadth", options_scan: "Options Scan", options_tape: "Options Tape",
                       futures_bars: "Futures",
@@ -47,14 +51,17 @@ const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchli
 const AS_OF_WORDS = { futures_bars: (at) => `Night · ${clock(at)}`, schwab_login: (at) => `Checked ${clock(at)}`,
                       event_calendar: (day) => `To ${monthDay(day)}` };
 const QUIET_CADENCES = ["once_a_day", "hand_kept"];
-const DIAL_LABELS = { fed_window: "Fed", release_window: "News", closing_window: "Close",
-                      acceleration: "Fast vs Slow", options_vs_tape: "Options vs Tape" };
+// The band wideners' plain names, keyed by the feed's dial names in the engine's order: the one home for these words.
+const WIDENER_NAMES = { fed_window: "Fed Decision Day", release_window: "Data Release In The Window",
+                        closing_window: "Last 15 Minutes Of The Day", acceleration: "Price Speeding Up",
+                        options_vs_tape: "Options Expect More Movement" };
+const COUNTED_WIDENERS = ["acceleration", "options_vs_tape"];   // always reading: on only once they have weight
 const REPLY_WORDS = { 401: "Sign-In Refused (401) · Check The Token",
                       404: "No Live Feed Yet · The Engine Has Not Written One",
                       503: "The Mac's Server Can't Answer Right Now (503)" };
 const state = { feed: null, bars: [], channel: "30_minutes", fetchedAt: null, unreachable: false, unreadable: false,
                 feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false,
-                tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null };
+                tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null, openPush: new Set() };
 
 // ---- the one number formatter, the one clock formatter, small text helpers ------------------------------------------
 
@@ -136,6 +143,11 @@ function svgLine(x1, y1, x2, y2, stroke, width, extra = "") {
 
 function svgPolyline(points, stroke, width, extra = "") {
   return `<polyline points="${points.join(" ")}" fill="none" stroke="${stroke}" stroke-width="${width}" ${extra}/>`;
+}
+
+/** How much larger the page's text is drawn than app.css asks (1 unless a text size setting enlarges it). */
+function textScale() {
+  return parseFloat(getComputedStyle(document.body).fontSize) / BODY_FONT_PX || 1;
 }
 
 function clamp(value, low, high) {
@@ -662,21 +674,25 @@ function liveMarks(bars, now, x, y) {
 
 /** True when a 10 px label ending at right on baseline would touch one of the marks (boxes: left/right/top/bottom). */
 function labelTouches(text, right, baseline, marks) {
-  const left = right - text.length * LABEL_CHAR_WIDTH;
+  const scale = textScale();
+  const left = right - text.length * LABEL_CHAR_WIDTH * scale;
   return marks.some((mark) => left < mark.right && right > mark.left
-                              && baseline - 10 < mark.bottom && baseline + 3 > mark.top);
+                              && baseline - 10 * scale < mark.bottom && baseline + 3 * scale > mark.top);
 }
 
-/** One of the cone's price labels at its end; when it would touch the live dot it moves further out (above the upper
- *  edge, below the lower one) while that stays clear of the chart's top and the time labels, else left of the dot. */
-function coneLabel(text, right, baseline, outward, marks) {
+/** One of the cone's price labels at its end, never down into the time labels' row; when it would touch the live dot
+ *  it moves further out (above the upper edge, below the lower one) while that stays clear of the chart's top and the
+ *  time labels, else left of the dot. */
+function coneLabel(text, right, wanted, outward, marks) {
   // a cream halo keeps the label legible where a narrow cone's label overhangs a box or gauge
   const attrs = `font-size="10" text-anchor="end" fill="${COLOUR.blue}" stroke="${COLOUR.cream}" stroke-width="3" `
               + `paint-order="stroke"`;
+  const lowest = CHART.labelY - AXIS_LABEL_CLEAR * textScale();
+  const baseline = Math.min(wanted, lowest);
   if (!labelTouches(text, right, baseline, marks)) return svgText(right, baseline, text, attrs);
   const reach = outward < 0 ? Math.min(...marks.map((mark) => mark.top - 4))
                             : Math.max(...marks.map((mark) => mark.bottom + 11));
-  if (reach >= 10 && reach <= CHART.labelY - 10 && !labelTouches(text, right, reach, marks)) {
+  if (reach >= 10 && reach <= lowest && !labelTouches(text, right, reach, marks)) {
     return svgText(right, reach, text, attrs);
   }
   return svgText(Math.min(...marks.map((mark) => mark.left - 2)), baseline, text, attrs);
@@ -736,16 +752,17 @@ function priceLines(current, before, now, x, y) {
  *  their middle is where Now sits. */
 function axisLabels(current, boxes, bars, x, startWord) {
   const last = bars[bars.length - 1];
-  const nowX = clamp(last ? x(last.at) : current ? x(current.read_at) : CHART.width - 12, 12, CHART.width - 12);
+  const room = 12 * textScale();
+  const nowX = clamp(last ? x(last.at) : current ? x(current.read_at) : CHART.width - room, room, CHART.width - room);
   const faint = `font-size="10" fill="${COLOUR.faint}"`;
-  const labels = [{ x: nowX, text: isLive() ? "Now" : "Last", anchor: "middle",
+  const labels = [{ x: nowX, text: isLive() ? "Now" : "Last", anchor: "middle", charWidth: BOLD_CHAR_WIDTH,
                     attrs: `font-size="10" fill="${COLOUR.ink}" font-weight="700"` },
                   { x: CHART.left, text: startWord, anchor: "start", attrs: faint }];
   boxes.forEach((window) => labels.push({ x: (x(window.window_from) + x(window.ends_at)) / 2,
                                           text: clock(window.read_at), anchor: "middle", attrs: faint }));
   const placed = [], parts = [];
   labels.forEach((label) => {
-    const width = label.text.length * LABEL_CHAR_WIDTH;
+    const width = label.text.length * (label.charWidth || LABEL_CHAR_WIDTH) * textScale();
     const left = label.anchor === "start" ? label.x : label.x - width / 2;
     if (placed.some(([from, to]) => left < to + LABEL_GAP && left + width > from - LABEL_GAP)) return;
     placed.push([left, left + width]);
@@ -754,6 +771,8 @@ function axisLabels(current, boxes, bars, x, startWord) {
   return parts.join("");
 }
 
+/** The Average Since The Read strip: the live and average numbers at the top line's edges, each after its key, the
+ *  bands, the needles, and under it the read's price with the band-edge numbers, laid out so no two labels touch. */
 function renderStrip() {
   const current = liveWindow();
   const strip = el("strip");
@@ -777,39 +796,76 @@ function renderStrip() {
   verdict.textContent = inside === null ? "—" : inside ? "Inside ✓" : "Outside ✗";
   verdict.className = inside === null ? "faint" : inside ? "inside" : "outside";
   const liveX = at(move || 0), averageX = averageMove === null ? null : at(averageMove);
-  // the live label sits on the side away from the average, unless the marker is pinned at an edge of the strip:
-  // then it sits on the inside, so the words never run past the strip's reach
-  const liveLeft = liveX <= STRIP.labelRoom ? false : liveX >= STRIP.width - STRIP.labelRoom ? true
-                 : averageX === null || liveX <= averageX;
   const small = `font-size="10" text-anchor="middle"`;
   const bold = `font-size="10" font-weight="700"`;
   const dashed = `stroke-dasharray="3 2"`;
+  const ringY = STRIP.needleEnd - STRIP.ringRadius - 1;
   const parts = [
-    svgText(liveX + (liveLeft ? 3 : -3), 10, `${isLive() ? "Live" : "Last"} ${fmt(move, 1, true)}`,
-            `${bold} text-anchor="${liveLeft ? "end" : "start"}" fill="${COLOUR.blue}"`),
-    svgLine(0, 32, STRIP.width, 32, COLOUR.sand, 1),
+    `<circle cx="${STRIP.inset + STRIP.keyRadius}" cy="${STRIP.keyY}" r="${STRIP.keyRadius}" fill="${COLOUR.blue}"/>`,
+    svgText(STRIP.inset + STRIP.keyRadius + STRIP.keyGap, STRIP.topY,
+            `${isLive() ? "Live" : "Last"} ${fmt(move, 1, true)}`, `${bold} fill="${COLOUR.blue}"`),
+    svgLine(0, ringY, STRIP.width, ringY, COLOUR.sand, 1),
   ];
+  const under = [];
   if (averageHalf !== null) {
     const bandLeft = STRIP.centre - averageHalf * scale, bandRight = STRIP.centre + averageHalf * scale;
-    parts.push(svgRect(bandLeft, 21, bandRight - bandLeft, 22, 5, COLOUR.band),
-               svgText(bandLeft, 60, fmt(-averageHalf, 1), `${small} fill="${COLOUR.faint}"`),
-               svgText(bandRight, 60, fmt(averageHalf, 1, true), `${small} fill="${COLOUR.faint}"`));
+    parts.push(svgRect(bandLeft, STRIP.bandTop, bandRight - bandLeft, STRIP.bandBottom - STRIP.bandTop, 5,
+                       COLOUR.band));
+    under.push(svgText(bandLeft, STRIP.labelY, fmt(-averageHalf, 1), `${small} fill="${COLOUR.faint}" data-under="-1"`),
+               svgText(bandRight, STRIP.labelY, fmt(averageHalf, 1, true),
+                       `${small} fill="${COLOUR.faint}" data-under="1"`));
   }
-  parts.push(svgLine(edgeLeft, 20, edgeLeft, 44, COLOUR.rust, 1.5, dashed),
-             svgLine(edgeRight, 20, edgeRight, 44, COLOUR.rust, 1.5, dashed),
-             svgLine(STRIP.centre, 17, STRIP.centre, 47, COLOUR.ink, 2.5),
-             svgLine(liveX, 15, liveX, 49, COLOUR.blue, 3));
+  parts.push(svgLine(edgeLeft, STRIP.bandTop - 1, edgeLeft, STRIP.bandBottom + 1, COLOUR.rust, 1.5, dashed),
+             svgLine(edgeRight, STRIP.bandTop - 1, edgeRight, STRIP.bandBottom + 1, COLOUR.rust, 1.5, dashed),
+             svgLine(STRIP.centre, 17, STRIP.centre, STRIP.needleEnd, COLOUR.ink, 2.5),
+             svgLine(liveX, 15, liveX, STRIP.needleEnd, COLOUR.blue, 3));
   if (averageX !== null) {
-    parts.push(svgText(averageX + (liveLeft ? -4 : 4), 10, `Average ${fmt(averageMove, 1, true)}`,
-                       `${bold} text-anchor="${liveLeft ? "start" : "end"}" fill="${COLOUR.ink}"`),
-               `<circle cx="${averageX}" cy="32" r="6" fill="${COLOUR.cream}" stroke="${COLOUR.ink}" `
-               + `stroke-width="2" ${dashed}/>`);
+    parts.push(svgText(STRIP.width - STRIP.inset, STRIP.topY, `Average ${fmt(averageMove, 1, true)}`,
+                       `${bold} text-anchor="end" fill="${COLOUR.ink}" data-average-label`),
+               `<circle data-average-key cx="0" cy="${STRIP.keyY}" r="${STRIP.keyRadius}" fill="${COLOUR.cream}" `
+               + `stroke="${COLOUR.ink}" stroke-width="1.5" stroke-dasharray="2 1.5"/>`,
+               `<circle cx="${averageX}" cy="${ringY}" r="${STRIP.ringRadius}" fill="${COLOUR.cream}" `
+               + `stroke="${COLOUR.ink}" stroke-width="2" ${dashed}/>`);
   }
-  parts.push(svgText(STRIP.centre, 60, `Read ${fmt(current.price, 1)}`,
-                     `${bold} text-anchor="middle" fill="${COLOUR.ink}"`),
-             svgText(edgeLeft, 60, fmt(-endHalf, 1), `${small} fill="${COLOUR.rust}"`),
-             svgText(edgeRight, 60, fmt(endHalf, 1, true), `${small} fill="${COLOUR.rust}"`));
-  strip.innerHTML = parts.join("");
+  under.push(svgText(edgeLeft, STRIP.labelY, fmt(-endHalf, 1), `${small} fill="${COLOUR.rust}" data-under="-1"`),
+             svgText(edgeRight, STRIP.labelY, fmt(endHalf, 1, true), `${small} fill="${COLOUR.rust}" data-under="1"`),
+             svgText(STRIP.centre, STRIP.labelY, `Read ${fmt(current.price, 1)}`,
+                     `${bold} text-anchor="middle" fill="${COLOUR.ink}" data-under="0"`));
+  strip.innerHTML = parts.concat(under).join("");
+  const averageLabel = strip.querySelector("[data-average-label]");
+  if (averageLabel) {
+    const keyX = STRIP.width - STRIP.inset - textWidth(averageLabel) - STRIP.keyGap;
+    strip.querySelector("[data-average-key]").setAttribute("cx", keyX.toFixed(1));
+  }
+  spreadUnder(strip);
+}
+
+/** A strip label's width: measured once it is drawn on screen, else (a hidden tab) a widest-character estimate. */
+function textWidth(node) {
+  const measured = node.getComputedTextLength();
+  return measured > 0 ? measured : node.textContent.length * LABEL_CHAR_WIDTH;
+}
+
+/** The labels under the strip: the read's price at the centre, each band-edge number at its edge, moved out past the
+ *  one nearer the centre where they would touch, then in from the card's edge where they would leave it. */
+function spreadUnder(strip) {
+  const readHalf = textWidth(strip.querySelector('[data-under="0"]')) / 2;
+  [-1, 1].forEach((side) => {
+    const labels = Array.from(strip.querySelectorAll(`[data-under="${side}"]`))
+      .map((node) => ({ node, x: Number(node.getAttribute("x")), half: textWidth(node) / 2 }))
+      .sort((a, b) => side * (a.x - b.x));
+    let inner = STRIP.centre + side * (readHalf + LABEL_GAP);
+    labels.forEach((label) => {
+      label.x = side < 0 ? Math.min(label.x, inner - label.half) : Math.max(label.x, inner + label.half);
+      inner = label.x + side * (label.half + LABEL_GAP);
+    });
+    let outer = side < 0 ? STRIP.inset : STRIP.width - STRIP.inset;
+    labels.slice().reverse().forEach((label) => {
+      label.x = side < 0 ? Math.max(label.x, outer + label.half) : Math.min(label.x, outer - label.half);
+      outer = label.x - side * (label.half + LABEL_GAP);
+    });
+    labels.forEach((label) => label.node.setAttribute("x", label.x.toFixed(1)));
+  });
 }
 
 function renderReadsList() {
@@ -915,6 +971,7 @@ function renderSight() {
   renderChain(usable ? read : null, minutes);
   renderRangeBar(usable ? read : null);
   renderSightChecks(usable ? read : null);
+  renderWideners(usable ? read : null);
 }
 
 function renderSpeedBars(read) {
@@ -929,8 +986,9 @@ function renderSpeedBars(read) {
     return svgRect(x, y, SPEED.barWidth, height, 5, COLOUR.blue, opacity)
          + svgText(middle, SPEED.baseline - 6, fmt(value, 2),
                    `font-size="10" font-weight="700" text-anchor="middle" fill="${inkOrWhite}"`)
-         + svgText(middle, 62, name, `font-size="9.5" font-weight="700" text-anchor="middle" fill="${COLOUR.faint}"`)
-         + svgText(middle, 72, memory, `font-size="8.5" text-anchor="middle" fill="${COLOUR.faint}"`);
+         + svgText(middle, SPEED.nameY, name,
+                   `font-size="9.5" font-weight="700" text-anchor="middle" fill="${COLOUR.faint}"`)
+         + svgText(middle, SPEED.memoryY, memory, `font-size="8" text-anchor="middle" fill="${COLOUR.faint}"`);
   });
   if (read && read.speed !== null) {
     const usedY = SPEED.baseline - barHeight(read.speed);
@@ -940,16 +998,16 @@ function renderSpeedBars(read) {
   el("speed-bars").innerHTML = parts.join("");
 }
 
-function dialsApplied(read) {
+function widenersApplied(read) {
   return read && read.dials_product ? read.dials_product.applied : null;
 }
 
 function renderChain(read, minutes) {
   const bandHalf = read ? halfWidth(read.bands, "80") : null;
-  const applied = dialsApplied(read);
+  const applied = widenersApplied(read);
   el("chain").innerHTML = `<span class="box">${read ? fmt(read.speed, 2) : "—"}</span>`
     + `<span class="arrow">× √${minutes} →</span><span class="box">${plusMinus(read && read.swing)} Swing</span>`
-    + `<span class="arrow">× ${read ? fmt(read.stretch, 2) : "—"} × ${fmt(applied, 2)} Dials →</span>`
+    + `<span class="arrow">× ${read ? fmt(read.stretch, 2) : "—"} × ${fmt(applied, 2)} Band Wideners →</span>`
     + `<span class="box box-blue">${plusMinus(bandHalf)}</span>`;
 }
 
@@ -1033,6 +1091,45 @@ function renderSightChecks(read) {
                share === null ? "—" : `${fmt(share * 100)}% At Today's Speed`, "");
 }
 
+/** A multiplier in words: ×2.6, ×1.36. */
+function times(value) {
+  return `×${fmt(value, 2).replace(/(\.\d)0$/, "$1")}`;
+}
+
+/** One band widener's standing on a read: on (raw off 1.00, or for the always-reading two, a weight earned) with its
+ *  multiplier, or the plain words for when it would be. The Sight list and the Steps line both read it. */
+function widenerStatus(name, read) {
+  const dial = read.dials ? read.dials[name] : null;
+  const raw = dial ? dial.raw : null;
+  const moved = raw !== null && raw !== undefined && raw !== 1;
+  if (COUNTED_WIDENERS.includes(name)) {
+    return dial && dial.weight ? { on: true, by: times(dial.applied), words: `Counted ${times(dial.applied)}` }
+                               : { on: false, words: "Watching · Not Counted Yet" };
+  }
+  if (moved && name === "release_window") {
+    // the newest release before the window's end is one overlapping it whenever any does
+    const due = (range() && range().releases || []).filter((release) => ms(release.at) < ms(read.ends_at))
+      .reduce((newest, release) => (!newest || ms(release.at) > ms(newest.at) ? release : newest), null);
+    return { on: true, by: times(raw), words: `Due ${due ? `${clock(due.at)} ` : ""}${times(raw)}` };
+  }
+  if (moved) return { on: true, by: times(raw), words: `Active ${times(raw)}` };
+  const fedAt = range() && range().fed_decision_at;
+  const session = state.feed && state.feed.session;
+  const closingFrom = session && session.closing_window_from;
+  return { on: false, words: { fed_window: fedAt ? `From ${clock(fedAt)}` : "Not Today", release_window: "None Due",
+                               closing_window: closingFrom ? `From ${clock(closingFrom)}` : "Not Today" }[name] };
+}
+
+/** Sight's list of every band widener with its standing, the one place all of them are named. */
+function renderWideners(read) {
+  el("sight-wideners").hidden = !read;
+  el("widener-rows").innerHTML = read ? Object.keys(WIDENER_NAMES).map((name) => {
+    const status = widenerStatus(name, read);
+    return `<div class="widener"><span class="name">${WIDENER_NAMES[name]}</span>`
+         + `<span class="status ${status.on ? "on" : ""}">${esc(status.words)}</span></div>`;
+  }).join("") : "";
+}
+
 function leanMeter(lean, width = METER.width) {
   const mid = width / 2;
   const track = svgRect(0, 4, width, 4, 2, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
@@ -1061,11 +1158,15 @@ function renderPush() {
   const failed = reasons().includes("push_failed");
   const rows = (push || []).map((entry) => {
     const entryWeight = entry.weight_by_channel ? entry.weight_by_channel[state.channel] : 0;
-    const value = entry.reason ? titleCase(entry.reason) : entry.value;
-    const label = PUSH_LABELS[entry.name] || titleCase(entry.name);
-    return `<div class="push-row"><span>${esc(label)}${entryWeight ? ` · ${fmt(entryWeight, 2)}` : ""}</span>`
+    const answer = entry.reason ? `— · ${titleCase(entry.reason)}` : entry.answer || "—";
+    const open = state.openPush.has(entry.name);
+    return `<button class="push-row" type="button" data-push="${esc(entry.name)}" aria-expanded="${open}">`
+         + `<span class="label">${esc(entry.label || titleCase(entry.name))}`
+         + `${entryWeight ? ` · ${fmt(entryWeight, 2)}` : ""}</span>`
          + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true">${leanMeter(entry.lean_if_trusted)}</svg>`
-         + `<span class="value">${esc(value)}</span></div>`;
+         + `<span class="short">${esc(answer)}</span>`
+         + `<span class="figure"${open ? "" : " hidden"}>${esc(entry.value || "No Figure On This Read")}</span>`
+         + `</button>`;
   });
   const empty = failed ? "Readings Failed On This Read" : block ? "No Readings On This Read" : "";
   el("push-rows").innerHTML = rows.join("") || (empty ? `<p class="block-note">${empty}</p>` : "");
@@ -1188,8 +1289,8 @@ function renderStepBars(read, minutes) {
     + stepBar(2, "Swing", "today", plusMinus(swing), `Over ${minutes} Minutes · ${fmt(speed, 2)} × √${minutes}`,
               bar(funnel(speed, swing) + rect(swing, 0.35) + centreLine))
     + stepBar("3–4", bandName, "history", plusMinus(bandHalf),
-              `Stretched By Past Days · ${fmt(swing, 1)} × ${fmt(read.stretch, 2)} × ${fmt(dialsApplied(read), 2)} `
-              + "Dials",
+              `Stretched By Past Days · ${fmt(swing, 1)} × ${fmt(read.stretch, 2)} `
+              + `× ${fmt(widenersApplied(read), 2)} Band Wideners`,
               bar(funnel(swing, bandHalf) + rect(bandHalf, 0.18) + centreLine
                   + svgText(edge(bandHalf), 34, fmt(read.bands["80"].low), bold)
                   + svgText(farEdge(bandHalf), 34, fmt(read.bands["80"].high), bold), 36))
@@ -1200,7 +1301,7 @@ function renderStepBars(read, minutes) {
               neverSub, bar(dashedBox + centreLine));
 }
 
-function dialGauge(applied) {
+function widenerGauge(applied) {
   const angle = applied === null ? 0 : clamp((applied - 1) * 150, -90, 90) * Math.PI / 180;
   const x = (28 + 17 * Math.sin(angle)).toFixed(1), y = (28 - 17 * Math.cos(angle)).toFixed(1);
   return `<path d="M8 28 A 20 20 0 0 1 48 28" fill="none" stroke="${COLOUR.rule}" stroke-width="5" `
@@ -1214,15 +1315,12 @@ function stepCheck(number, name, kind, sub, svg, value) {
        + `<span class="sub">${sub}</span></div>${svg}<span class="value">${value}</span></div>`;
 }
 
-function dialsLine(read) {
-  const dials = read.dials || {};
-  const names = Object.keys(dials);
-  const earned = names.filter((name) => dials[name].weight);
-  const moving = names.filter((name) => dials[name].raw !== 1 && dials[name].raw !== null);
-  const raw = read.dials_product ? read.dials_product.raw : null;
-  if (earned.length) return `Earned: ${earned.map((name) => DIAL_LABELS[name]).join(" · ")}`;
-  if (moving.length) return `${moving.map((name) => DIAL_LABELS[name]).join(" · ")} · Raw ×${fmt(raw, 2)}`;
-  return raw !== null && raw !== 1 ? `Five Dials · Raw ×${fmt(raw, 2)}` : "All Five Dials At Rest";
+/** Steps' band wideners line: the ones on now by plain name and multiplier, or what they are for while none is. */
+function widenersLine(read) {
+  const on = Object.keys(WIDENER_NAMES).map((name) => [name, widenerStatus(name, read)])
+    .filter(([, status]) => status.on);
+  return on.length ? on.map(([name, status]) => `${WIDENER_NAMES[name]} ${status.by}`).join(" · ")
+                   : "Widen the band for known busy moments · None active now";
 }
 
 function renderStepChecks(read, minutes) {
@@ -1235,16 +1333,16 @@ function renderStepChecks(read, minutes) {
   const used = read.minutes_left === null ? minutes : Math.min(minutes, read.minutes_left);
   const chance = read.chance_up_if_moves;
   const trust = read.trust_applied === null ? "—" : fmt(read.trust_applied, read.trust_applied ? 2 : 0);
-  const applied = dialsApplied(read);
+  const applied = widenersApplied(read);
   el("steps-checks").innerHTML =
     stepCheck(6, "Options", "check", `${fmt(read.straddle, 1)} × √(${fmt(used)} ÷ ${fmt(read.minutes_left)})`,
               `<svg viewBox="0 0 56 34" role="img" aria-label="Options swing next to tape swing">`
               + svgRect(3, 7, (50 * (read.options_swing || 0) / most).toFixed(1), 8, 3, COLOUR.greenDeep, 0.55)
               + svgRect(3, 19, (50 * (read.swing || 0) / most).toFixed(1), 8, 3, COLOUR.blue, 0.45) + `</svg>`,
               `${plusMinus(read.options_swing)} ${options.mark}`)
-    + stepCheck(7, "Dials", "earned", dialsLine(read),
-                `<svg viewBox="0 0 56 34" role="img" aria-label="Dial at times ${fmt(applied, 2)}">`
-                + `${dialGauge(applied)}</svg>`, `×${fmt(applied, 2)}`)
+    + stepCheck(7, "Band Wideners", "earned", widenersLine(read),
+                `<svg viewBox="0 0 56 34" role="img" aria-label="Band wideners at times ${fmt(applied, 2)}">`
+                + `${widenerGauge(applied)}</svg>`, `×${fmt(applied, 2)}`)
     + stepCheck(8, "Direction", "earned", chance === null ? "—" : `50 + ${trust} × (Lean − 50)`,
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Direction meter"><g transform="translate(3,11)">`
                 + `${leanMeter(chance, METER.small)}</g>`
@@ -1273,6 +1371,8 @@ function showTab(name) {
     else button.removeAttribute("aria-current");
   });
   window.scrollTo(0, 0);
+  // the strip lays its labels out by their drawn widths, which a hidden tab cannot measure
+  if (name === "read" && state.feed) guarded(renderStrip, "strip-note");
 }
 
 document.addEventListener("click", (event) => {
@@ -1289,6 +1389,11 @@ document.addEventListener("click", (event) => {
     state.showAll = true;
     render();
   }
+  const pushRow = event.target.closest("[data-push]");
+  if (pushRow) {
+    if (!state.openPush.delete(pushRow.dataset.push)) state.openPush.add(pushRow.dataset.push);
+    guarded(renderPush, "push-note");
+  }
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -1302,3 +1407,4 @@ state.channel = CHANNELS[remembered("channel", state.channel)] ? remembered("cha
 showTab(["read", "sight", "steps"].includes(remembered("tab", "read")) ? remembered("tab", "read") : "read");
 loadFeed();
 openPriceStream();
+document.fonts.ready.then(() => guarded(renderStrip, "strip-note"));

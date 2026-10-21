@@ -41,6 +41,9 @@ class MainActivity : AppCompatActivity() {
                 setSupportZoom(false)
                 builtInZoomControls = false
                 displayZoomControls = false
+                // The page lays its boxes out in px; the phone's font-size setting would enlarge the letters alone
+                // and push them out of their boxes, so the page keeps its own text size.
+                textZoom = 100
             }
             webViewClient = ServerClient()
             isVerticalScrollBarEnabled = false

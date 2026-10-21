@@ -36,8 +36,8 @@ android {
         targetSdk = 34
         // Bump both on every rebuild that goes to the phone: Android refuses an APK whose versionCode is not
         // higher than the one installed.
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         buildConfigField("String", "KAZE_URL", "\"${localValue("KAZE_URL").trimEnd('/')}\"")
         buildConfigField("String", "KAZE_TOKEN", "\"${localValue("KAZE_TOKEN")}\"")
     }

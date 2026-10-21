@@ -376,10 +376,10 @@ Everything here starts at zero weight. A reading or dial changes a number on the
 has written it a weight, and the ledger writes one only from live graded windows under a test fixed in advance.
 
 **Push readings** (which way; `engine/range/push_read.py`). Each read turns inputs already on its snapshot into a
-value in words (`push_reading_text`, the words the phone shows) and a lean (`push_lean_probability`): the chance
-that the move is up if price moves, were the reading trusted, 0 to 1. Share readings lean by their share; signed
-readings lean by a smooth squash, 0.5 + 0.2 x tanh(value / scale), so they never lean past 0.3 or 0.7 (the scales
-are in `components.LEAN_SCALE`):
+value in words (`push_reading_text`, the exact figure), a short answer from the reading's fixed words (the phone's,
+never stored) and a lean (`push_lean_probability`): the chance that the move is up if price moves, were the reading
+trusted, 0 to 1. Share readings lean by their share; signed readings lean by a smooth squash, 0.5 + 0.2 x tanh(value /
+scale), so they never lean past 0.3 or 0.7 (the scales are in `components.LEAN_SCALE`):
 
 | Reading | Value in words | Lean |
 |---|---|---|
@@ -391,15 +391,33 @@ are in `components.LEAN_SCALE`):
 | `yield_change` | 10-year yield change since its prior close, basis points | squash, scale 5 bp, positive leans up |
 | `mirai_claude` | Mirai's Claude 30-minute up over up plus down | that share (a raw input, not Kaze's own channel) |
 
-A reading whose input is blank is blank with that input's reason, never 0.5 pretending to be neutral, and its feed
-stamp is the input's. **Direction** per channel = 0.5 + the sum of trust x (lean - 0.5) over the readings with a
-lean, the trusts scaled to sum to at most 1 (`direction_all_sources`); with every trust 0 it is 0.5 and the phone
-says Coin Flip. Direction is a coin flip on every input tested so far, so none of these is expected to earn weight
-soon; they are on the board so the ledger can say so from live data.
+The phone asks each reading a plain question and shows its answer; the words live in `components.py`
+(`PUSH_READING_LABEL`, `PUSH_ANSWER_WORDS`) and travel on the reading's registry row with the thresholds. A lean
+within 0.03 of even (0.47 to 0.53, `EVEN_LEAN_ZONE`) answers Flat or Even, else the reading's sign picks the side;
+that is a move under 1.5 points, a QQQ-over-RSP gap under 0.08 points, a yield change under 0.8 bp. Straightness
+under 0.4 (`STEADY_STRAIGHTNESS`: the net move under 40% of the path walked; a random 30-minute walk scores about
+0.18) is Choppy.
 
-**Width dials** (`components.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`), each stored
-per read per channel with a raw and an applied value (`width_multiplier`, subject `adjustment`), applied = 1 +
-weight x (raw - 1), weight 0 today:
+| Reading | Question | Answers |
+|---|---|---|
+| `price_trend` | Since Yesterday | `Up 37 Pts`, `Down 12 Pts` (whole points), `Flat` |
+| `straightness` | Path | `Steady Up`, `Steady Down`, `Choppy` |
+| `breadth` | Stocks Rising | the share, `45%` |
+| `big_tech_vs_rest` | Big Tech | `Ahead`, `Behind`, `Even` (against the average stock) |
+| `options_buyers` | Options Bets | `More Calls`, `More Puts`, `Even` |
+| `yield_change` | Bond Rates | `Rising`, `Falling`, `Flat` |
+| `mirai_claude` | Mirai's Claude | `Leans Up`, `Leans Down`, `Even` |
+
+A reading whose input is blank is blank with that input's reason and no answer, never 0.5 pretending to be neutral,
+and its feed stamp is the input's. **Direction** per channel = 0.5 + the sum of trust x (lean - 0.5) over the
+readings with a lean, the trusts scaled to sum to at most 1 (`direction_all_sources`); with every trust 0 it is 0.5
+and the phone says Coin Flip. Direction is a coin flip on every input tested so far, so none of these is expected to
+earn weight soon; they are on the board so the ledger can say so from live data.
+
+**Width dials** (`components.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`; the phone
+calls them Band Wideners: Fed Decision Day, Data Release In The Window, Last 15 Minutes Of The Day, Price Speeding Up,
+Options Expect More Movement), each stored per read per channel with a raw and an applied value (`width_multiplier`,
+subject `adjustment`), applied = 1 + weight x (raw - 1), weight 0 today:
 
 - `fed_window`: raw 2.6 when the window ends after an FOMC decision known at the cut; applied and tested outside the
   cap. The owner's rule, graded with and without on every Fed read.
@@ -488,20 +506,25 @@ Top level: `status` (`built`, `blind`, `thin`) and `status_reason` (`cut_bar_mis
 once_a_day, hand_kept) and `note`: the calendar feed's horizon words, null elsewhere; the live price's row is filled
 from its file as the feed is written, live inside 10 s), `login` (`state`, `hours_left`, `expires_at`), `session`
 (`opens_at`, where the Read chart's time axis may start; `closes_at`, `next_session_opens_at`: so the phone can tell
-closed from no read today), `nightly` (`done_for`,
+closed from no read today; `closing_window_from`, 15 minutes before the close, from when the last-15-minutes band
+widener can fire), `nightly` (`done_for`,
 `expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
 observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes the file is
 replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent.
 
 `range`: `price`, `read_at`, `minutes_left`, `speed`, `speed_fast`, `speed_slow`, `straddle`, `releases` (the day's
-timed economic releases known at the cut, each `name` and `at`), `band_portion` (0.8, the share the band promises),
-`push` (one entry per reading in the registry's order: `name`, `value` in words, `lean_if_trusted`, `reason` when
-blank, `weight_by_channel`; the list is empty when the readings step crashed), `channels` and `windows`.
+timed economic releases known at the cut, each `name` and `at`), `fed_decision_at` (the day's Fed decision known at
+the cut, null on other days), `band_portion` (0.8, the share the band promises), `push` (one entry per reading in the
+registry's order: `label`, the plain question the phone asks; `name`; `answer`, the short answer from the reading's
+fixed words, null when blank; `value`, the exact figure in words, shown when the row is tapped; `lean_if_trusted`,
+`reason` when blank, `weight_by_channel`; the list is empty when the readings step crashed), `channels` and
+`windows`.
 
 `channels` is keyed `5_minutes` / `30_minutes` / `60_minutes`; each carries `swing`, `stretch`, `average_stretch`,
 `fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_check`, `clipped`,
-`ends_at`, `dials` (keyed `fed_window`, `release_window`, `closing_window`, `acceleration`, `options_vs_tape`, each
-`raw`, `applied`, `weight`), `dials_product` (`raw`, `applied`), `direction` (`chance_up_if_moves`, `trust_applied`,
+`ends_at`, `dials` (the band wideners, keyed `fed_window`, `release_window`, `closing_window`, `acceleration`,
+`options_vs_tape`, each `raw`, `applied`, `weight`), `dials_product` (`raw`, `applied`: the wideners' product, the
+`×1.00` the phone shows), `direction` (`chance_up_if_moves`, `trust_applied`,
 `text`), `bands` (`80` and `average_80`: `half_width`, `low`, `high`), `status` and `reason`.
 
 `windows` is built from the store after the read and its grades are written (`{status: failed, reason}` when that
@@ -530,7 +553,9 @@ step crashed); the 5-minute channel follows every read, the 30- and 60-minute ch
 
 What the phone works out itself and the feed does not carry: the percent change in the header (price against
 `values.prior_close_points`), the colour of a score (its share against `band_portion`, or `stays_inside_share` for
-never left), "N of M past windows" (`stays_inside_share` x `fit_windows`, rounded), the dial gauge's angle, and the
+never left), "N of M past windows" (`stays_inside_share` x `fit_windows`, rounded), the band wideners' gauge angle
+and each widener's standing words (Active, Due 10:00, From 15:45, Not Today, Watching · Not Counted Yet, Counted, from
+`dials`, `releases`, `fed_decision_at` and `session.closing_window_from`), and the
 header's words from `session` and its own clock (`Read 12:35 · Price Live` within eight minutes of `cut_at` while
 ticks arrive, `Read 12:35 · Price 12:41:07` once the newest tick is 10 s old, `Late`, `Closed`, `No Read Yet Today`
 once `next_session_opens_at` plus thirteen minutes has passed with no newer read), the live price and its percent
@@ -665,4 +690,5 @@ Then `rm nightly_done.txt` if the restored session is older than the file says, 
    card says `Schwab Login Renew Soon` all Monday (correct, not a fault) and Tuesday's first read shows
    `Good Until Mon 10-26`. The login lapses weekly from then on.
 10. Wed 10-28 is an FOMC day (14:00): reads whose window ends after the decision carry an `owner_rule` variant and
-    the phone's Steps show the x2.6 Fed dial; the first real test of the Fed path.
+    the phone shows Fed Decision Day `From 14:00`, then `Active ×2.6` (Sight's Band Wideners, Steps row 7); the
+    first real test of the Fed path.

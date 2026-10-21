@@ -1,6 +1,7 @@
-# The push readings (which way): each read's inputs turned into a value in words and a lean, the chance of up if
-# price moves were the reading trusted, and the direction call that sums the leans by the trust each has earned, 0
-# until the ledger writes one, so the call stays a coin flip. A reading with a blank input stays blank with that reason.
+# The push readings (which way): each read's inputs turned into a value in words, a short answer from the reading's
+# fixed words and a lean, the chance of up if price moves were the reading trusted, and the direction call that sums
+# the leans by the trust each has earned, 0 until the ledger writes one, so the call stays a coin flip. A reading with a
+# blank input stays blank, no answer, with that reason.
 import math
 
 from engine.store import components, registry, store
@@ -30,9 +31,20 @@ def feed_of(row):
             "feed_age_seconds": row["feed_age_seconds"], "market_at": row["newest_input_market_at"]}
 
 
-def reading_entry(name, value, lean, reason, stamp_row):
-    """One reading as the forecast carries it: name, value in words, lean, blank reason and the input's feed stamp."""
-    return {"name": name, "value": value, "lean_if_trusted": lean, "reason": reason, "feed": feed_of(stamp_row)}
+def reading_entry(name, value, answer, lean, reason, stamp_row):
+    """One reading as the forecast carries it: name, value and answer in words, lean, blank reason, feed stamp."""
+    return {"name": name, "value": value, "answer": answer, "lean_if_trusted": lean, "reason": reason,
+            "feed": feed_of(stamp_row)}
+
+
+def leaning_answer(name, lean, positive, **numbers):
+    """A reading's short answer from its fixed words: even inside the even zone, else up or down by the sign given."""
+    up, down, even = components.PUSH_ANSWER_WORDS[name]
+    if lean is None:
+        return None
+    if abs(lean - components.EVEN_CHANCE) <= components.EVEN_LEAN_ZONE:
+        return even
+    return (up if positive else down).format(**numbers)
 
 
 def build_reading(name, inputs, build):
@@ -41,14 +53,15 @@ def build_reading(name, inputs, build):
     values = [store.observation_value(row) if row is not None else None for row in inputs]
     for row, value in zip(inputs, values):
         if value is None:
-            return reading_entry(name, None, None, row["blank_reason"] if row is not None else "feed_missing", stamp)
-    text, lean = build(*values)
-    return reading_entry(name, text, lean, None if lean is not None else "no_activity", stamp)
+            return reading_entry(name, None, None, None, row["blank_reason"] if row is not None else "feed_missing",
+                                 stamp)
+    text, lean, answer = build(*values)
+    return reading_entry(name, text, answer, lean, None if lean is not None else "no_activity", stamp)
 
 
 def readings(observations, path_moves):
     """Every push reading of a read from its observations and the range engine's path moves, in the registry's order."""
-    # The value in words is what the phone shows beside the lean, so it is short and title-cased here, once.
+    # The value in words is the exact figure the phone shows under the answer, so it is short and title-cased here.
     def row(measure_name, **subject):
         """The read's observation of a measure and subject."""
         return observation_of(observations, measure_name, registry.subject_key(**subject))
@@ -56,44 +69,60 @@ def readings(observations, path_moves):
     scale = components.LEAN_SCALE
     yield_measure = registry.MEASURES_BY_NAME["ten_year_yield_change_basis_points"]
     yield_leans_up = yield_measure["positive_value_means"] == "leans_up"
+
+    def signed(name, text, value, lean, **numbers):
+        """A signed reading's value in words, lean and answer, the answer's side from the value's sign."""
+        return text, lean, leaning_answer(name, lean, value > 0, **numbers)
+
+    def share(name, text, portion):
+        """A share reading's value in words, lean (the share itself) and answer, the side from the share."""
+        return text, portion, leaning_answer(name, portion, portion is not None and portion > components.EVEN_CHANCE)
+
     return [
         build_reading(components.PRICE_TREND,
                       [row("move_points", since="prior_close"), row("move_points", since="open")],
-                      lambda since_close, since_open: (f"{since_close:+.0f} Since Close",
-                                                       squashed_lean(since_close, scale[components.PRICE_TREND]))),
+                      lambda since_close, since_open: signed(
+                          components.PRICE_TREND, f"{since_close:+.0f} Since Close", since_close,
+                          squashed_lean(since_close, scale[components.PRICE_TREND]), points=f"{abs(since_close):.0f}")),
         straightness_reading(path_moves[components.STRAIGHTNESS_WINDOW_MINUTES], row("spx_price_points")),
         build_reading(components.BREADTH, [row("nyse_advancing_portion")],
-                      lambda share: (f"{share:.0%} Advancing", share)),
+                      lambda portion: (f"{portion:.0%} Advancing", portion,
+                                       components.PUSH_ANSWER_WORDS[components.BREADTH][0].format(
+                                           share=f"{portion:.0%}"))),
         build_reading(components.BIG_TECH_VS_REST,
                       [row("fund_change_from_prior_close_pct", symbol=components.BIG_TECH_SYMBOL),
                        row("fund_change_from_prior_close_pct", symbol=components.REST_SYMBOL)],
-                      lambda big_tech, rest: (f"{components.BIG_TECH_SYMBOL} {big_tech - rest:+.1f}% vs "
-                                              f"{components.REST_SYMBOL}",
-                                              squashed_lean(big_tech - rest, scale[components.BIG_TECH_VS_REST]))),
+                      lambda big_tech, rest: signed(
+                          components.BIG_TECH_VS_REST,
+                          f"{components.BIG_TECH_SYMBOL} {big_tech - rest:+.1f}% vs {components.REST_SYMBOL}",
+                          big_tech - rest, squashed_lean(big_tech - rest, scale[components.BIG_TECH_VS_REST]))),
         build_reading(components.OPTIONS_BUYERS, [row("bullish_portion_of_sided_premium")],
-                      lambda bullish: (f"{bullish:.0%} Bullish", bullish)),
+                      lambda bullish: share(components.OPTIONS_BUYERS, f"{bullish:.0%} Bullish", bullish)),
         build_reading(components.YIELD_CHANGE, [row("ten_year_yield_change_basis_points")],
-                      lambda change: (f"{change:+.1f} bp",
-                                      squashed_lean(change, scale[components.YIELD_CHANGE], yield_leans_up))),
+                      lambda change: signed(components.YIELD_CHANGE, f"{change:+.1f} bp", change,
+                                            squashed_lean(change, scale[components.YIELD_CHANGE], yield_leans_up))),
         build_reading(components.MIRAI_CLAUDE, [row("mirai_claude_forecast_pct", horizon=components.CLAUDE_LEAN_HORIZON,
                                                     side=side) for side in components.CLAUDE_SIDES],
-                      lambda up, flat, down: (f"{up / (up + down):.0%} Up" if up + down else "No Side",
-                                              up / (up + down) if up + down else None)),
+                      lambda up, flat, down: share(components.MIRAI_CLAUDE,
+                                                   f"{up / (up + down):.0%} Up" if up + down else "No Side",
+                                                   up / (up + down) if up + down else None)),
     ]
 
 
 def straightness_reading(path, price_row):
-    """Straightness over the 30-minute window as a lean: the tilt of straightness, signed by the net move."""
+    """The 30-minute straightness as a lean signed by the net move, answered steady up, steady down or choppy."""
     if path is None:
         reason = price_row["blank_reason"] if price_row is not None and price_row["blank_reason"] \
             else registry.NOT_FORMED_REASON
-        return reading_entry(components.STRAIGHTNESS, None, None, reason, price_row)
+        return reading_entry(components.STRAIGHTNESS, None, None, None, reason, price_row)
     net = path["up"] - path["down"]
     if path["straightness"] is None:
-        return reading_entry(components.STRAIGHTNESS, None, None, "no_activity", price_row)
+        return reading_entry(components.STRAIGHTNESS, None, None, None, "no_activity", price_row)
     lean = tilted_lean(path["straightness"] * (1 if net > 0 else -1 if net < 0 else 0))
-    return reading_entry(components.STRAIGHTNESS, f"{path['straightness']:.2f} Straight, Net {net:+.1f}", lean, None,
-                         price_row)
+    up, down, choppy = components.PUSH_ANSWER_WORDS[components.STRAIGHTNESS]
+    answer = choppy if path["straightness"] < components.STEADY_STRAIGHTNESS else up if net > 0 else down
+    return reading_entry(components.STRAIGHTNESS, f"{path['straightness']:.2f} Straight, Net {net:+.1f}", answer, lean,
+                         None, price_row)
 
 
 def combined_lean(leans, weights):

@@ -125,6 +125,25 @@ dashed blue boxes with a hollow mark and a blue used-so-far gauge, and as blue R
 live row and the finished ones; they carry no time label, since their middle is where Now sits. Where finished
 windows overlap (60 Min), every other one from the day's first gets a thin outline so neighbours read apart.
 
+The Average Since The Read strip keeps its two numbers at the top line's edges, `● Live −2.1` on the left and
+`◌ Average −1.4` on the right (the dashed ring placed 8 px before the words from their drawn width), so they never
+touch however close the needles are; every needle ends 4 px above the average band's bottom, and the numbers under the
+strip (the read's price at the centre, each band's edge number at its edge) move out past their neighbour, and in from
+the card's edge, where they would touch. Sight's Which Way card asks each reading a plain question and shows the
+engine's short answer (`Since Yesterday · Up 37 Pts`, `Path · Choppy`; the words and their thresholds are the
+engine's, `docs/data_map.md` section 8); each row is a button, and a tap shows the exact figure under the answer
+(`+37 Since Close`). The engine's width dials are Band Wideners on every screen: Sight's How Far card lists all five
+with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed day, `Active ×2.6`; `Data Release In The
+Window · None Due` or `Due 10:00 ×1.4`; `Last 15 Minutes Of The Day · From 15:45` or `Active ×1.36`; `Price Speeding
+Up` and `Options Expect More Movement · Watching · Not Counted Yet` until the ledger gives them weight, then `Counted
+×n`), and Steps row 7 names the ones on now with the applied product beside them (`×1.00` until one is counted). Rows
+grow with their text instead of clipping it: nothing on the three screens is cut off with an ellipsis at 360 px.
+
+The shell pins the WebView's text zoom at 100% (`textZoom` in `MainActivity.kt`): the page lays its boxes out in px,
+and the phone's font-size setting would enlarge the letters alone and push them out of their boxes. The page reads at
+the size `app.css` gives it whatever that setting is; the chart's label spacing still grows with the text if a
+browser enlarges it.
+
 The page holds `/price.stream` open while it is shown (a `fetch` with a streaming reader, signed in like every other
 request), closes it when the page is hidden and reopens it when shown; each tick moves the header's price and percent
 change, the end of the price line with its live dot, the running average and the Average Since The Read strip (the

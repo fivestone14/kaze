@@ -1,7 +1,7 @@
 # The registry: every measure Kaze may store (name, meaning, unit, lane, fact group, subjects, source feed, blank rule),
-# every component row (feeds, the login, the collector, the range engine, the read lanes, the readings, the dials, the
-# rules and the trust tests, their numbers in components.py) and the fixed word lists. Every word here has a writer;
-# the store writer refuses anything not listed.
+# every component row (feeds, the login, the collector, the range engine, the read lanes, the readings with the phone's
+# question and answer words, the dials, the rules and the trust tests, their numbers in components.py) and the fixed
+# word lists. Every word here has a writer; the store writer refuses anything not listed.
 import hashlib
 import json
 import re
@@ -557,7 +557,9 @@ def component_rows():
     rows.append(component_row("grade_rule", components.GRADE_RULE[0], "a range decision graded against its bands and "
                               "rung", components.GRADE_RULE_PARAMETERS, version=components.GRADE_RULE[1]))
     rows.extend(component_row(components.PUSH_READING_KIND, name, components.PUSH_READING_MEANING[name],
-                              components.PUSH_READING_PARAMETERS[name]) for name in components.PUSH_READINGS)
+                              {**components.PUSH_READING_PARAMETERS[name], "label": components.PUSH_READING_LABEL[name],
+                               "answers": components.PUSH_ANSWER_WORDS[name]})
+                for name in components.PUSH_READINGS)
     rows.extend(component_row(components.WIDTH_DIAL_KIND, name, components.WIDTH_DIAL_MEANING[name],
                               components.WIDTH_DIAL_PARAMETERS[name]) for name in components.WIDTH_DIALS)
     rows.append(component_row("trust_test", components.LEAN_TEST[0], "a lean's Brier skill, added to the earned "

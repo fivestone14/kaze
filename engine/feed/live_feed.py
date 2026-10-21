@@ -23,12 +23,13 @@ LOGIN_FIELD_SHORT_NAMES = {"login_state": "state", "login_hours_until_expiry": "
 WINDOWS, CURRENT, RUNNING, FINISHED, SCORE = "windows", "current", "running", "finished", "score"
 FAILED = "failed"
 # The forecast keys the phone reads, at the top of the range block, per channel and per push reading.
-RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases")
+RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases",
+              "fed_decision_at")
 CHANNEL_KEYS = ("swing", "stretch", "average_stretch", "fit_sessions", "fit_windows", "rung_points",
                 "stays_inside_share", "options_swing", "options_check", "clipped", "ends_at", "dials",
                 "dials_product", "bands", "status", "reason")
 DIRECTION_KEYS = ("chance_up_if_moves", "trust_applied", "text")
-PUSH_KEYS = ("name", "value", "lean_if_trusted", "reason", "weight_by_channel")
+PUSH_KEYS = ("name", "value", "answer", "lean_if_trusted", "reason", "weight_by_channel")
 # The finished-window facts the Read page draws, as the window's outcome values name them.
 FINISHED_FACTS = {"price": "grade_start_price_points", "end": registry.WINDOW_PRICE_MEASURE["end"],
                   "high": registry.WINDOW_PRICE_MEASURE["high"], "low": registry.WINDOW_PRICE_MEASURE["low"],
@@ -57,9 +58,10 @@ def write_document(document):
 
 
 def session_block(day, half_days):
-    """The session's clock for the phone: when it opens and closes and the next one opens, so closed reads as closed."""
-    # Past the holiday list's horizon the clock cannot answer for the day or the next; both are left null rather
-    # than crashing the feed, so a failed read past the horizon still reaches the phone as a failed document.
+    """The session's clock for the phone: open, close, the closing dial's start and the next open."""
+    # So the phone can tell closed from no read today. Past the holiday list's horizon the clock cannot answer for the
+    # day or the next; both are left null rather than crashing the feed, so a failed read past the horizon still
+    # reaches the phone as a failed document.
     opens_at, closes_at, next_open = None, None, None
     try:
         if session_clock.is_trading_day(day):
@@ -67,7 +69,9 @@ def session_block(day, half_days):
         next_open = session_clock.session_open(session_clock.next_trading_day(day))
     except ValueError:
         pass
-    return for_phone({"opens_at": opens_at, "closes_at": closes_at, "next_session_opens_at": next_open})
+    closing_from = closes_at - timedelta(minutes=components.CLOSING_WINDOW_MINUTES) if closes_at else None
+    return for_phone({"opens_at": opens_at, "closes_at": closes_at, "closing_window_from": closing_from,
+                      "next_session_opens_at": next_open})
 
 
 def nightly_block(done_for, day):
@@ -147,7 +151,8 @@ def range_block(forecast):
         return None
     block = {key: forecast[key] for key in RANGE_KEYS}
     block["band_portion"] = components.BAND_PORTION
-    block["push"] = [{key: entry[key] for key in PUSH_KEYS} for entry in forecast["push"]]
+    block["push"] = [{"label": components.PUSH_READING_LABEL[entry["name"]], **{key: entry[key] for key in PUSH_KEYS}}
+                     for entry in forecast["push"]]
     block["channels"] = {}
     for name, channel in forecast["channels"].items():
         picked = {key: channel[key] for key in CHANNEL_KEYS}

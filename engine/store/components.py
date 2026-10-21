@@ -102,15 +102,35 @@ PUSH_READING_MEANING = {
     YIELD_CHANGE: "10-year yield change since its prior close, in basis points",
     MIRAI_CLAUDE: "Mirai's Claude 30-minute forecast, up over up plus down",
 }
+# What the phone shows for each reading: a short question and a short answer from the reading's fixed words. A lean
+# within EVEN_LEAN_ZONE of even (0.47 to 0.53) answers Flat or Even, else the sign of the reading picks up or down; a
+# straightness under STEADY_STRAIGHTNESS is Choppy (a random 30-minute walk scores about 0.18, one way is 1). A blank
+# input has no answer. Breadth answers with its share alone.
+EVEN_LEAN_ZONE = 0.03
+STEADY_STRAIGHTNESS = 0.4
+PUSH_READING_LABEL = {PRICE_TREND: "Since Yesterday", STRAIGHTNESS: "Path", BREADTH: "Stocks Rising",
+                      BIG_TECH_VS_REST: "Big Tech", OPTIONS_BUYERS: "Options Bets", YIELD_CHANGE: "Bond Rates",
+                      MIRAI_CLAUDE: "Mirai's Claude"}
+# Each reading's answers as (up, down, even); {points} is the move in whole points, {share} a percent.
+PUSH_ANSWER_WORDS = {
+    PRICE_TREND: ("Up {points} Pts", "Down {points} Pts", "Flat"),
+    STRAIGHTNESS: ("Steady Up", "Steady Down", "Choppy"),
+    BREADTH: ("{share}",),
+    BIG_TECH_VS_REST: ("Ahead", "Behind", "Even"),
+    OPTIONS_BUYERS: ("More Calls", "More Puts", "Even"),
+    YIELD_CHANGE: ("Rising", "Falling", "Flat"),
+    MIRAI_CLAUDE: ("Leans Up", "Leans Down", "Even"),
+}
 PUSH_READING_PARAMETERS = {
-    PRICE_TREND: {"tilt": LEAN_TILT, "scale_points": LEAN_SCALE[PRICE_TREND]},
-    STRAIGHTNESS: {"tilt": LEAN_TILT, "window_minutes": STRAIGHTNESS_WINDOW_MINUTES},
+    PRICE_TREND: {"tilt": LEAN_TILT, "scale_points": LEAN_SCALE[PRICE_TREND], "even_lean_zone": EVEN_LEAN_ZONE},
+    STRAIGHTNESS: {"tilt": LEAN_TILT, "window_minutes": STRAIGHTNESS_WINDOW_MINUTES,
+                   "steady_straightness": STEADY_STRAIGHTNESS},
     BREADTH: {},
     BIG_TECH_VS_REST: {"tilt": LEAN_TILT, "scale_pct_points": LEAN_SCALE[BIG_TECH_VS_REST],
-                       "symbols": (BIG_TECH_SYMBOL, REST_SYMBOL)},
-    OPTIONS_BUYERS: {},
-    YIELD_CHANGE: {"tilt": LEAN_TILT, "scale_basis_points": LEAN_SCALE[YIELD_CHANGE]},
-    MIRAI_CLAUDE: {"horizon": CLAUDE_LEAN_HORIZON},
+                       "symbols": (BIG_TECH_SYMBOL, REST_SYMBOL), "even_lean_zone": EVEN_LEAN_ZONE},
+    OPTIONS_BUYERS: {"even_lean_zone": EVEN_LEAN_ZONE},
+    YIELD_CHANGE: {"tilt": LEAN_TILT, "scale_basis_points": LEAN_SCALE[YIELD_CHANGE], "even_lean_zone": EVEN_LEAN_ZONE},
+    MIRAI_CLAUDE: {"horizon": CLAUDE_LEAN_HORIZON, "even_lean_zone": EVEN_LEAN_ZONE},
 }
 DIRECTION_TEXT_UNTIL_EARNED = "coin flip until earned"
 RANGE_RECIPE_PARAMETERS = {
