@@ -323,8 +323,9 @@ def schema_step_10(conn):
     rebuild_tables(conn, ALL_TABLES)
 
 
-# Step 11's vocabulary: the range lane carries how far, the push_pull lane which way, and the push readings are the
-# push/pull factors (a factor leaning up pushes, one leaning down pulls).
+# Step 11's vocabulary: the range lane carries how far price travels, the push_pull lane which way, and the push
+# readings are the push/pull factors. Push and pull only ever describe price (a factor leaning up pushes it, one
+# leaning down pulls it), never the range; the retired stored words are kept here only so an older store upgrades.
 LANE_RENAMES = (("pull", "range"), ("push", "push_pull"))
 MEASURE_RENAMES = (("push_lean_probability", "push_pull_lean_probability"),
                    ("push_reading_text", "push_pull_factor_text"))
@@ -334,7 +335,7 @@ OLD_FACTOR_KIND = "push_reading"
 
 
 def schema_step_11(conn):
-    """Pull and push become the range and push_pull lanes, push readings push/pull factors, in every stored row."""
+    """Every stored row moved onto the range and push_pull lanes and the push/pull factors' names."""
     # The measures are written again from the code as the store opens; the ledger's lanes and kinds are rewritten on
     # the way into its rebuilt table, since the old words fail the new word lists. The parameters an earlier
     # component revision stored stay as they were released.

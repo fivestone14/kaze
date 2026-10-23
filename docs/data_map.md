@@ -214,7 +214,8 @@ One observation per measure and subject; `registry_measures` is the list. By gro
 
 Every measure's lane and fact group are checked when the registry loads: one fact may reach the `range` lane (how
 far price travels) or the `push_pull` lane (which way: the factors that push price up or pull it down), never both.
-Schema step 11 renamed the lanes (they were `pull` and `push`) and every stored push reading to a push/pull factor.
+Push and pull only ever describe price: a factor pushing it up or pulling it down. How far price travels is the
+range, never a push or a pull. Schema step 11 moved every stored row onto these words.
 The 12:35:59 read of 2026-10-16 wrote 145 observations as a rebuilt read (147 live, with the two Schwab-login feed
 rows) and 123 decision values.
 
@@ -514,8 +515,8 @@ Top level: `status` (`built`, `blind`, `thin`) and `status_reason` (`cut_bar_mis
 partial / blind, `age_s`, `as_of` (the newest input's moment; for the calendar, the last day it covers), `cadence`
 (live, minute, once_a_day, hand_kept) and `note`: the calendar feed's horizon words, null elsewhere; the live price's
 row is filled from its file as the feed is written, live inside 10 s), `login` (`state`, `hours_left`,
-`expires_at`), `session` (`opens_at`, where the Read chart's time axis may start; `closes_at`, `next_session_opens_at`: so the phone can tell
-closed from no read today; `closing_window_from`, 15 minutes before the close, from when the last-15-minutes band
+`expires_at`), `session` (`opens_at`, where the Read chart's time axis may start; `closes_at`,
+`next_session_opens_at`: so the phone can tell closed from no read today; `closing_window_from`, 15 minutes before the close, from when the last-15-minutes band
 widener can fire), `nightly` (`done_for`,
 `expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
 observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes the file is
