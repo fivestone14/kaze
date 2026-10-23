@@ -11,13 +11,14 @@ from engine.collect import collect, mirai_files
 from engine.feed import live_feed
 from engine.grade import grade, parity, trust
 from engine.jobs import job_log
-from engine.range import push_read, range_fit, range_read
+from engine.push_pull import push_pull_read
+from engine.range import range_fit, range_read
 from engine.store import backup, components, store, store_queries
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
 JOB_READ, JOB_NIGHTLY, JOB_BY_HAND = "read", "nightly", "by_hand"
-RANGE_FAILED, PUSH_FAILED, GRADE_FAILED = "range_failed", "push_failed", "grade_failed"
+RANGE_FAILED, PUSH_PULL_FAILED, GRADE_FAILED = "range_failed", "push_pull_failed", "grade_failed"
 WHOLE_SCOREBOARD = "every graded session"
 
 
@@ -35,7 +36,7 @@ def main():
                         help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
     parser.add_argument("--trust", action="store_true",
-                        help="print the trust ledger: every reading and dial per channel with its verdict and weight")
+                        help="print the trust ledger: every factor and dial per channel with its verdict and weight")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
     if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test or args.trust:
@@ -112,9 +113,9 @@ def run_live():
 
 
 def write_read(conn, snapshot, observations, bars, cut_at, job):
-    """Store a read: bars, then snapshot, readings and decisions in one transaction; a failed step is marked."""
-    # A failed range step leaves no decisions; a failed readings step leaves the band and decisions standing with
-    # the push block empty; either way the read carries the step's word in its status reason.
+    """Store a read: bars, then snapshot, readings, factors and decisions in one transaction; a failed step marked."""
+    # A failed range step leaves no decisions; a failed push/pull step leaves the band and decisions standing with
+    # the push/pull block empty; either way the read carries the step's word in its status reason.
     new_bars = store.write_bars(conn, bars)
     store.claim_snapshot_id(conn, snapshot)
     forecast, decisions, values = None, (), ()
@@ -122,11 +123,11 @@ def write_read(conn, snapshot, observations, bars, cut_at, job):
         weights = store_queries.trust_weights_known(conn, snapshot["trade_date"], snapshot["cut_at"])
         forecast = range_read.forecast_read(conn, snapshot, observations, cut_at, weights)
         try:
-            push_read.apply_push(forecast, push_read.readings(observations, forecast["path_moves"]), weights)
+            push_pull_read.apply_push_pull(forecast, push_pull_read.factors(observations, forecast["path_moves"]))
         except Exception:
-            log(job, "readings step FAILED\n" + traceback.format_exc().rstrip())
-            push_read.apply_push(forecast, [], weights)
-            store.add_status_reason(snapshot, PUSH_FAILED)
+            log(job, "push/pull step FAILED\n" + traceback.format_exc().rstrip())
+            push_pull_read.apply_push_pull(forecast, [])
+            store.add_status_reason(snapshot, PUSH_PULL_FAILED)
         observations.extend(range_read.reading_rows(snapshot, observations, forecast))
         decisions, values = range_read.decision_rows(snapshot, forecast)
     except Exception:

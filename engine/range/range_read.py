@@ -1,14 +1,16 @@
 # One read's range forecast: today's speed and swings from the store's bars, the bands from the newest history fit
 # known at the cut, never-leaves share, time-of-day ratios and width cap from that same history, the width dials
-# applied by the weights the trust ledger holds (none yet), the read's observations and its decisions. The push
-# readings and the direction call are added by push_read; live_feed copies the phone's part of the forecast out.
+# applied by the weights the trust ledger holds (none yet), the read's observations and its decisions: the range, how
+# far price travels. The push/pull factors and the direction call, which way, are added by push_pull_read and ride
+# on the same forecast and decisions; live_feed copies the phone's part of the forecast out.
 import math
 from datetime import date, timedelta
 
 import numpy as np
 
 from engine import session_clock
-from engine.range import push_read, range_fit, width_dials
+from engine.push_pull import push_pull_read
+from engine.range import range_fit, width_dials
 from engine.store import components, registry, store, store_queries
 
 PRODUCER = ("forecaster", components.RANGE_ENGINE_NAME, components.RANGE_ENGINE_VERSION)
@@ -21,7 +23,7 @@ RATIO_MEASURE = {"closing": "closing_window_multiplier", "release": "release_win
 
 def value_of(observations, measure_name, subject_key=store.WHOLE):
     """The value of one observation in a read's list, or None when it is absent or blank."""
-    row = push_read.observation_of(observations, measure_name, subject_key)
+    row = store.observation_of(observations, measure_name, subject_key)
     return store.observation_value(row) if row is not None else None
 
 
@@ -43,7 +45,7 @@ def stored_fit(conn, fit_snapshot):
 
 
 def forecast_read(conn, snapshot, observations, cut_at, weights):
-    """Work the read out from the store with the ledger's weights; returns the forecast, its readings still empty."""
+    """Work the read out from the store with the ledger's weights; returns the forecast, its factors still empty."""
     # The forecast's readings, decisions and phone block are built from it afterwards; the direction starts even.
     day = session_clock.to_eastern(cut_at).date()
     bars = store_queries.session_bars(conn, day.isoformat(), snapshot["cut_at"], store.bars_known_by(snapshot, cut_at))
@@ -74,7 +76,7 @@ def forecast_read(conn, snapshot, observations, cut_at, weights):
     }
     for name, minutes in components.HORIZON_MINUTES.items():
         forecast["channels"][name] = channel_forecast(forecast, name, minutes, fits, ratios, history, weights)
-    push_read.apply_push(forecast, [], weights)
+    push_pull_read.apply_push_pull(forecast, [])
     return forecast
 
 
@@ -166,7 +168,7 @@ def feed_stamp(observations, feed):
 
 
 def reading_rows(snapshot, observations, forecast):
-    """The read's range readings as observations on its snapshot, with the push readings' leans."""
+    """The read's range readings as observations on its snapshot, with the push/pull factors' leans."""
     # Speeds, swings, the options check, the path moves and the wall distances, each stamped with its feed.
     rows = []
     stamps = {feed: feed_stamp(observations, feed) for feed in components.RANGE_INPUT_FEEDS}
@@ -196,11 +198,11 @@ def reading_rows(snapshot, observations, forecast):
             not_formed if not formed else "no_activity", **bars_stamp)
     for level, wall in forecast["walls"].items():
         subject = registry.subject_key(level_type=level)
-        wall_row = push_read.observation_of(observations, "level_price_points", subject)
+        wall_row = store.observation_of(observations, "level_price_points", subject)
         formed = wall is not None and forecast["price"] is not None
         add("level_distance_from_price_points", wall - forecast["price"] if formed else None, subject,
             "feed_missing" if wall is not None else wall_row["blank_reason"], **scan_stamp)
-    rows.extend(push_read.lean_rows(snapshot, forecast["push"]))
+    rows.extend(push_pull_read.lean_rows(snapshot, forecast["push_pull"]))
     return rows
 
 
@@ -270,8 +272,8 @@ def value_rows(decision, forecast, name, variant):
     add("width_multiplier", channel["dials_product"][registry.RAW_ROLE], subject, value_role=registry.RAW_ROLE)
     add("width_multiplier", product, subject, value_role=registry.APPLIED_ROLE)
     direction = channel["direction"]
-    for entry in forecast["push"]:
-        add("push_lean_probability", entry["lean_if_trusted"], registry.subject_key(reading=entry["name"]),
+    for entry in forecast["push_pull"]:
+        add("push_pull_lean_probability", entry["lean"], registry.subject_key(factor=entry["name"]),
             entry["reason"], trust_weight=direction["weights"].get(entry["name"]))
-    add("chance_up_if_moves_probability", direction["chance_up_if_moves"], trust_weight=direction["trust_applied"])
+    add("chance_up_if_moves_probability", direction["chance_up_if_moves"], trust_weight=direction["weight_applied"])
     return rows

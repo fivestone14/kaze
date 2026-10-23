@@ -45,12 +45,13 @@ replay, so it earns the dial no weight.
 The release ratios come from the 10:00 releases since 2026-09-01; the 60-minute one stands below 1 (the fit is
 data, there is no floor).
 
-## The push readings on one read (2026-10-16 12:35:59)
+## The push/pull factors on one read (2026-10-16 12:35:59)
 
 Price trend -53 since the close -> lean 0.300; straightness 0.13 with a net of -5.05 -> 0.474; breadth 50% advancing
 -> 0.503; QQQ -1.4% against RSP -> 0.301; tape bull share 50% -> 0.500; yield +3.8 bp -> 0.628; Claude 28.5 / 45.5 /
 26.0 -> 0.523. The signed leans saturate on an ordinary day (-53 points is already 0.300), which is why a lean is a
-tilt, not a calibrated probability, and carries no weight until the ledger writes one.
+tilt, not a calibrated probability. Live, no factor counted before the ledger earned it weight, so the call was 0.5;
+since 2026-10-23 every factor with a lean counts at an equal share and the same read rebuilds to 0.461455 (down 54%).
 
 ## Storage (2026-10-18, real store: 74 sessions of bars, all rebuilt and graded)
 

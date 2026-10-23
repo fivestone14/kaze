@@ -1,19 +1,22 @@
-# The trust ledger: every push reading and width dial scored per channel, nightly, on live graded windows only
+# The trust ledger: every push/pull factor and width dial scored per channel, nightly, on live graded windows only
 # (replayed history never counts) with a test fixed in advance in the registry, each on top of what has already earned
-# weight, against a fake baseline, held three runs on the way up and down; written as results_evaluations rows.
+# weight, against a fake baseline, held three runs on the way up and down; written as results_evaluations rows. A
+# dial's weight moves the band; the factors count at an equal share whatever the ledger says, which scores them as
+# evidence.
 import itertools
 from collections import defaultdict
 
 import numpy as np
 
 from engine import session_clock
-from engine.range import push_read, range_fit, width_dials
+from engine.push_pull import push_pull_read
+from engine.range import range_fit, width_dials
 from engine.store import components, registry, store, store_queries
 
 RUN_ID_PREFIX = "trust_ledger"
-PRINT_COLUMNS = ("reading or dial", "channel", "sessions", "windows", "score", "95% interval", "fake 95th",
+PRINT_COLUMNS = ("factor or dial", "channel", "sessions", "windows", "score", "95% interval", "fake 95th",
                  "verdict", "weight")
-FAMILY_SIZE = {components.LEAN_TEST: len(components.PUSH_READINGS) * len(components.HORIZON_MINUTES),
+FAMILY_SIZE = {components.LEAN_TEST: len(components.PUSH_PULL_FACTORS) * len(components.HORIZON_MINUTES),
                components.DIAL_TEST: len(components.WIDTH_DIALS) * len(components.HORIZON_MINUTES)}
 
 
@@ -43,8 +46,8 @@ def counting_live_windows(conn, horizon_name, through_day):
             "cap": stored.get(("width_cap_multiplier", horizon, registry.VALUE_ROLE)),
             "raw": {dial: stored.get(("width_multiplier", registry.subject_key(adjustment=dial), registry.RAW_ROLE))
                     for dial in components.WIDTH_DIALS},
-            "leans": {reading: stored.get(("push_lean_probability", registry.subject_key(reading=reading),
-                                           registry.VALUE_ROLE)) for reading in components.PUSH_READINGS},
+            "leans": {factor: stored.get(("push_pull_lean_probability", registry.subject_key(factor=factor),
+                                           registry.VALUE_ROLE)) for factor in components.PUSH_PULL_FACTORS},
         })
     return windows
 
@@ -108,7 +111,7 @@ def lean_skill(days, earned, column="lean"):
         with_, without = 0.0, 0.0
         for window in day:
             up = 1.0 if window["move"] > 0 else 0.0
-            baseline = push_read.combined_lean(window["leans"], earned)
+            baseline = push_pull_read.combined_lean(window["leans"], earned)
             added = min(1.0, max(0.0, baseline + room * (window[column] - components.EVEN_CHANCE)))
             with_ += (added - up) ** 2
             without += (baseline - up) ** 2
@@ -116,19 +119,19 @@ def lean_skill(days, earned, column="lean"):
     return skills
 
 
-def lean_test(conn, windows, reading, earned, horizon_name, through_day):
-    """The lean test on one reading and channel, on top of the readings earned before it."""
+def lean_test(conn, windows, factor, earned, horizon_name, through_day):
+    """The lean test on one factor and channel, on top of the factors earned before it."""
     # Brier skill on the moved windows with the lean, its day-resampled interval, the fake baseline, the hold rule,
     # the verdict and weight.
     threshold = components.LEAN_MOVED_RUNG_SHARE * components.RUNG_POINTS[horizon_name]
-    scored = [dict(window, lean=window["leans"][reading]) for window in windows
-              if abs(window["move"]) > threshold and window["leans"][reading] is not None]
+    scored = [dict(window, lean=window["leans"][factor]) for window in windows
+              if abs(window["move"]) > threshold and window["leans"][factor] is not None]
     days = by_day(scored)
     room = 1 - sum(earned.values())
     fakes = [float(np.mean(lean_skill([[dict(window, fake=lean) for window, lean in zip(day, leans)]
                                        for day, leans in zip(days, permuted)], earned, "fake")))
              for permuted in day_permutations(days, "lean")] if days else []
-    return test_result(conn, judged=(components.PUSH_READING_KIND, reading, components.COMPONENT_VERSION),
+    return test_result(conn, judged=(components.PUSH_PULL_FACTOR_KIND, factor, components.COMPONENT_VERSION),
                        horizon_name=horizon_name, through_day=through_day, scored=scored,
                        day_means=lean_skill(days, earned), fakes=fakes,
                        enough=len(days) >= components.TRUST_MINIMUM_SESSIONS,
@@ -223,7 +226,7 @@ def test_result(conn, *, judged, horizon_name, through_day, scored, day_means, f
 # ---- Writing the ledger (nightly) ------------------------------------------------------------------------------------
 
 def ledger_rows(conn, through_day, in_force_day, written_at):
-    """Every reading's and dial's rows per channel, readings then dials in the registry's order."""
+    """Every factor's and dial's rows per channel, factors then dials in the registry's order."""
     # Each test runs on top of the components that earned weight earlier in the same pass.
     written_iso = session_clock.iso_utc(written_at)
     run = {"trade_date": in_force_day.isoformat(), "data_through_trade_date": through_day.isoformat(),
@@ -233,12 +236,12 @@ def ledger_rows(conn, through_day, in_force_day, written_at):
     for horizon_name in components.HORIZON_MINUTES:
         windows = counting_live_windows(conn, horizon_name, through_day.isoformat())
         earned_leans = {}
-        for reading in components.PUSH_READINGS:
-            result = lean_test(conn, windows, reading, earned_leans, horizon_name, through_day.isoformat())
+        for factor in components.PUSH_PULL_FACTORS:
+            result = lean_test(conn, windows, factor, earned_leans, horizon_name, through_day.isoformat())
             rows.extend(test_rows(result, components.LEAN_TEST, horizon_name, "brier_skill_portion",
                                   components.EARNED_LEANS, 0.0, run))
             if result["weight"]:
-                earned_leans[reading] = result["weight"]
+                earned_leans[factor] = result["weight"]
         earned_dials = []
         for dial in components.WIDTH_DIALS:
             result = dial_test(conn, windows, dial, earned_dials, horizon_name, through_day.isoformat())
@@ -296,14 +299,14 @@ def write_ledger(conn, through_day, in_force_day, written_at):
 # ---- Printing the ledger ---------------------------------------------------------------------------------------------
 
 def ledger_lines(conn):
-    """The newest ledger per reading, dial and channel: sample, score, interval, fake baseline, verdict, weight."""
+    """The newest ledger per factor, dial and channel: sample, score, interval, fake baseline, verdict, weight."""
     rows = store_queries.newest_evaluations(conn)
     if not rows:
         return ["no trust ledger yet: the nightly writes it after its first run"]
     cells = defaultdict(dict)
     for row in rows:
         cells[(row["evaluated_name"], row["horizon_name"])][(row["evaluation_kind"], row["slice_key"])] = row
-    order = {name: place for place, name in enumerate(components.PUSH_READINGS + components.WIDTH_DIALS)}
+    order = {name: place for place, name in enumerate(components.PUSH_PULL_FACTORS + components.WIDTH_DIALS)}
     newest = max(row["trade_date"] for row in rows)
     through = max(row["data_through_trade_date"] for row in rows)
     lines = [f"trust ledger ({components.LEAN_TEST[0]}@{components.LEAN_TEST[1]} on leans, {components.DIAL_TEST[0]}@"

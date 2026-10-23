@@ -4,7 +4,7 @@
 # integer rowid and keep one unique index on the design's own grain.
 from engine.store import components, registry
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -207,9 +207,10 @@ def table_columns(conn, table):
     return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def rebuild_table(conn, table, parent=None):
+def rebuild_table(conn, table, parent=None, rewrite=None):
     """Recreate a table with the code's text, keeping the shared columns' rows; a no-op when the text is the same."""
-    # A value table moving from its parent's text id to the parent's rowid is joined to the parent on the way.
+    # A value table moving from its parent's text id to the parent's rowid is joined to the parent on the way; rewrite
+    # gives a column the SQL that turns its old word into the new one (over old.<column>) as the rows are copied.
     stored = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
     if stored is not None and stored["sql"] == create_table_sql(table):
         return
@@ -217,7 +218,9 @@ def rebuild_table(conn, table, parent=None):
     conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
     conn.execute(create_table_sql(table))
     shared = [column for column in table_columns(conn, table) if column in old_columns]
-    columns, picked, source = list(shared), [f"old.{column}" for column in shared], f"{table}_old old"
+    rewrite = rewrite or {}
+    columns, picked = list(shared), [rewrite.get(column, f"old.{column}") for column in shared]
+    source = f"{table}_old old"
     if parent is not None:
         parent_table, parent_id, parent_rowid = parent
         if parent_rowid not in old_columns:
@@ -320,9 +323,47 @@ def schema_step_10(conn):
     rebuild_tables(conn, ALL_TABLES)
 
 
+# Step 11's vocabulary: the range lane carries how far, the push_pull lane which way, and the push readings are the
+# push/pull factors (a factor leaning up pushes, one leaning down pulls).
+LANE_RENAMES = (("pull", "range"), ("push", "push_pull"))
+MEASURE_RENAMES = (("push_lean_probability", "push_pull_lean_probability"),
+                   ("push_reading_text", "push_pull_factor_text"))
+SUBJECT_RENAME = ("reading=", "factor=")
+STATUS_REASON_RENAME = ("push_failed", "push_pull_failed")
+OLD_FACTOR_KIND = "push_reading"
+
+
+def schema_step_11(conn):
+    """Pull and push become the range and push_pull lanes, push readings push/pull factors, in every stored row."""
+    # The measures are written again from the code as the store opens; the ledger's lanes and kinds are rewritten on
+    # the way into its rebuilt table, since the old words fail the new word lists. The parameters an earlier
+    # component revision stored stay as they were released.
+    conn.execute("DELETE FROM registry_measures")
+    old_subject, new_subject = SUBJECT_RENAME
+    for table in ("collect_observations", "reads_decision_values"):
+        for old, new in MEASURE_RENAMES:
+            conn.execute(f"UPDATE {table} SET measure_name = ? WHERE measure_name = ?", (new, old))
+        conn.execute(f"UPDATE {table} SET subject_key = ? || substr(subject_key, ?) "
+                     "WHERE substr(subject_key, 1, ?) = ?",
+                     (new_subject, len(old_subject) + 1, len(old_subject), old_subject))
+    old_reason, new_reason = STATUS_REASON_RENAME
+    conn.execute("UPDATE collect_snapshots SET snapshot_status_reason = replace(snapshot_status_reason, ?, ?) "
+                 "WHERE instr(snapshot_status_reason, ?) > 0", (old_reason, new_reason, old_reason))
+    conn.execute("UPDATE registry_components SET component_kind = ? WHERE component_kind = ?",
+                 (components.PUSH_PULL_FACTOR_KIND, OLD_FACTOR_KIND))
+    lane = "CASE old.signal_lane " + " ".join(f"WHEN '{old}' THEN '{new}'" for old, new in LANE_RENAMES) \
+        + " ELSE old.signal_lane END"
+    kind = (OLD_FACTOR_KIND, components.PUSH_PULL_FACTOR_KIND)
+    rebuild_table(conn, "results_evaluations", rewrite={
+        "signal_lane": lane, "evaluated_kind": "replace(old.evaluated_kind, '{}', '{}')".format(*kind),
+        "evaluation_row_id": "replace(old.evaluation_row_id, '|{}:', '|{}:')".format(*kind)})
+    rebuild_tables(conn, ALL_TABLES)
+
+
 # Step 9 repeated step 8 for the second verdict word; both numbers stay so a stored version 8 still upgrades.
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
-                6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10}
+                6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10,
+                11: schema_step_11}
 
 
 def upgrade(conn):

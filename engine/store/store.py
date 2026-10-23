@@ -208,7 +208,7 @@ def decision_value_row(decision, measure_name, value, subject_key=WHOLE, subject
                        value_role=registry.VALUE_ROLE, blank_reason=None, trust_weight=None):
     """Shape one reads_decision_values row; it names its decision, which the write turns into the decision's rowid."""
     return {"decision_id": decision["decision_id"], "value_role": value_role,
-            "trust_weight_applied_portion": trust_weight,
+            "trust_weight_applied_portion": rounded(trust_weight),
             **measure_value_row(measure_name, value, subject_key, subject_points, blank_reason)}
 
 
@@ -310,6 +310,12 @@ def rounded(value):
 def observation_value(row):
     """The one filled value column of a long value row, or None when it is blank."""
     return next((row[column] for column in registry.VALUE_COLUMNS if row[column] is not None), None)
+
+
+def observation_of(observations, measure_name, subject_key=WHOLE):
+    """One observation row of a read by measure and subject, or None when the read holds none."""
+    return next((row for row in observations
+                 if row["measure_name"] == measure_name and row["subject_key"] == subject_key), None)
 
 
 def value_key_for(measure_name, subject_key):

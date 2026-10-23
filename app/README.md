@@ -109,7 +109,7 @@ The data contract is `latest.json` alone, plus `bars.json` for the price line an
 `docs/data_map.md` ("The phone feed") lists every key, and the page reads nothing the contract does not name. Sight and
 Steps explain the read the Read page's live window belongs to (its chain travels on `windows.current`); the Which Way
 and Feeds cards are the newest read's. Where the feed has no value the page shows `—`; where a step failed the page says
-so (`failed`, `range_failed`, `push_failed`, `grade_failed`) in the banner at the top and in the block the failure
+so (`failed`, `range_failed`, `push_pull_failed`, `grade_failed`) in the banner at the top and in the block the failure
 empties; each block draws inside its own guard, so one bad field empties that block with its reason, never the page.
 
 The Read chart's time axis ends at the live window's end and spans a fixed time per channel, 75 minutes for 5 Min,
@@ -129,8 +129,9 @@ The Average Since The Read strip keeps its two numbers at the top line's edges, 
 `◌ Average −1.4` on the right (the dashed ring placed 8 px before the words from their drawn width), so they never
 touch however close the needles are; every needle ends 4 px above the average band's bottom, and the numbers under the
 strip (the read's price at the centre, each band's edge number at its edge) move out past their neighbour, and in from
-the card's edge, where they would touch. Sight's Which Way card asks each reading a plain question and shows the
-engine's short answer (`Since Yesterday · Up 37 Pts`, `Path · Choppy`; the words and their thresholds are the
+the card's edge, where they would touch. Sight's Which Way · Push / Pull card asks each factor a plain question and
+shows whether it pushes price up, pulls it down or sits even, with the engine's short answer
+(`Since Yesterday · Pull … Down 12 Pts`, `Path · Even … Choppy`; the words and their thresholds are the
 engine's, `docs/data_map.md` section 8); each row is a button, and a tap shows the exact figure under the answer
 (`+37 Since Close`). The engine's width dials are Band Wideners on every screen: Sight's How Far card lists all five
 with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed day, `Due ×2.6 · Not Counted Yet`; `Data

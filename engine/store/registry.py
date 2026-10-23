@@ -1,7 +1,7 @@
 # The registry: every measure Kaze may store (name, meaning, unit, lane, fact group, subjects, source feed, blank rule),
-# every component row (feeds, the login, the collector, the range engine, the read lanes, the readings with the phone's
-# question and answer words, the dials, the rules and the trust tests, their numbers in components.py) and the fixed
-# word lists. Every word here has a writer; the store writer refuses anything not listed.
+# every component row (feeds, the login, the collector, the range engine, the read lanes, the push/pull factors with the
+# phone's question and answer words, the dials, the rules and the trust tests, their numbers in components.py) and the
+# fixed word lists. Every word here has a writer; the store writer refuses anything not listed.
 import hashlib
 import json
 import re
@@ -22,7 +22,9 @@ LOGIN_RENEW_WARNING_DAYS = 2
 BAR_ARRIVAL_SECONDS = 62
 BAR_ARRIVAL_RULE = f"bar_end_plus_{BAR_ARRIVAL_SECONDS}_seconds"
 
-LANES = ("pull", "push", "label", "id", "health")
+# The two lanes a forecast fact may reach: range (how far price travels, the band) and push_pull (which way: the
+# factors that push price up or pull it down).
+LANES = ("range", "push_pull", "label", "id", "health")
 # The four value columns of every long table; a row fills exactly one of them or carries a blank reason.
 VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
 VALUE_COLUMN_FOR_TYPE = {"number": "value_number", "whole_number": "value_number", "money_usd": "value_number",
@@ -85,7 +87,7 @@ GRADE_WORD_MEASURE = {"ends_inside": ("was_inside_band", components.BAND, 1),
 GRADE_WORDS = tuple(GRADE_WORD_MEASURE)
 POOLED = "pooled"
 SUBJECT_KINDS = (
-    "adjustment", "band", "consumer", "feed", "horizon", "impact", "kind", "level_type", "login", "reading",
+    "adjustment", "band", "consumer", "factor", "feed", "horizon", "impact", "kind", "level_type", "login",
     "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole", "window_minutes")
 
 # Feeds: name, what it is, Mirai's file (the template mirai_files reads), how old its newest input may be, and how
@@ -142,7 +144,7 @@ def measure_row(name, meaning, unit, value_type, lane=None, group=None, subjects
     }
 
 
-PUSH_LANE_DEFAULTS = dict(lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0)
+PUSH_PULL_LANE_DEFAULTS = dict(lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.0)
 DECISION_VALUE = dict(table="reads_decision_values", pillar="reads")
 OUTCOME_VALUE = dict(table="results_outcome_values", pillar="results")
 EVALUATION_VALUE = dict(table="results_evaluations", pillar="results")
@@ -165,9 +167,9 @@ TAPE_TWIN = "feed_coverage_last_30_minutes_portion"
 MEASURES = [
     # clock (no feed: the clock is the clock)
     measure_row("minutes_since_session_open", "whole session minutes finished by the cut", "minutes", "whole_number",
-                "pull", "session_clock", low=0, high=390),
+                "range", "session_clock", low=0, high=390),
     measure_row("minutes_until_session_close", "minutes from the cut to the close", "minutes", "whole_number",
-                "pull", "session_clock", low=0, high=390),
+                "range", "session_clock", low=0, high=390),
     # price
     measure_row("spx_price_points", "SPX close of the last finished 1-minute bar", "points", "number", "id",
                 "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
@@ -182,34 +184,35 @@ MEASURES = [
                 "id", "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("vwap_points", "volume-weighted average price from the options scan", "points", "number", "id",
                 "spx_level", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
-    measure_row("range_so_far_points", "session high minus session low", "points", "number", "pull", "spx_move_size",
+    measure_row("range_so_far_points", "session high minus session low", "points", "number", "range", "spx_move_size",
                 feed="spx_bars", blank=BARS_MISSING_MEANING, low=0, high=2000),
     measure_row("move_points", "SPX close now minus its close at the since point (signed)", "points", "number",
                 group="spx_move_sign", subjects="since", feed="spx_bars",
-                blank="not_formed_yet before the since point exists today", low=-2000, high=2000, **PUSH_LANE_DEFAULTS),
+                blank="not_formed_yet before the since point exists today", low=-2000, high=2000,
+                **PUSH_PULL_LANE_DEFAULTS),
     # options
     measure_row("same_day_straddle_mid_points",
                 "at-the-money same-day call plus put at mid, from the scan ruler (scan value / 0.85)", "points",
-                "number", "pull", "options_premium_size", feed="options_scan",
+                "number", "range", "options_premium_size", feed="options_scan",
                 blank="not_priceable when the scan ruler is not ok", low=0, high=500),
-    measure_row("opening_straddle_mid_points", "the same straddle as it stood at the open", "points", "number", "pull",
+    measure_row("opening_straddle_mid_points", "the same straddle as it stood at the open", "points", "number", "range",
                 "options_premium_size", feed="options_scan", blank="not_priceable when the scan ruler is not ok",
                 low=0, high=500),
     measure_row("atm_option_mid_points", "newest tape quote mid of the at-the-money same-day option on this side",
                 "points", "number", "id", "atm_option_quotes", subjects="side|strike_points", feed="options_tape",
                 blank="no_activity when the strike has not traded today", low=0, high=500),
     measure_row("same_day_atm_iv_calendar_year_pct", "at-the-money implied volatility of the same-day options", "pct",
-                "number", "pull", "options_implied_vol", feed="options_scan", blank=SCAN_MISSING, low=0, high=500),
+                "number", "range", "options_implied_vol", feed="options_scan", blank=SCAN_MISSING, low=0, high=500),
     measure_row("level_price_points", "price of a dealer level from the scan", "points", "number", "id",
                 "level_prices", subjects="level_type", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
-    measure_row("level_gamma_share_portion", "share of total gamma sitting at the level", "portion", "number", "pull",
+    measure_row("level_gamma_share_portion", "share of total gamma sitting at the level", "portion", "number", "range",
                 "dealer_gamma_shape", subjects="level_type", feed="options_scan", blank=SCAN_MISSING, low=0, high=1),
-    measure_row("dealer_net_gamma_usd", "dealers' net gamma across the same-day chain", "usd", "number", "pull",
+    measure_row("dealer_net_gamma_usd", "dealers' net gamma across the same-day chain", "usd", "number", "range",
                 "dealer_gamma_size", feed="options_scan", blank=SCAN_MISSING),
-    measure_row("dealer_gamma_sign", "the scan's own word for the dealer gamma regime", "word", "word", "pull",
+    measure_row("dealer_gamma_sign", "the scan's own word for the dealer gamma regime", "word", "word", "range",
                 "dealer_gamma_shape", feed="options_scan", blank=SCAN_MISSING),
     # VIX family
-    measure_row("vix_calendar_year_pct", "last quote of a VIX-family index", "pct", "number", "pull",
+    measure_row("vix_calendar_year_pct", "last quote of a VIX-family index", "pct", "number", "range",
                 "implied_vol_level", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING, low=0, high=500),
     measure_row("vix_prior_close_calendar_year_pct", "prior close of a VIX-family index", "pct", "number", "id",
                 "implied_vol_prior_close", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING,
@@ -223,24 +226,24 @@ MEASURES = [
                 low=0, high=10000),
     measure_row("nyse_advancing_portion", "advancers over advancers plus decliners", "portion", "number",
                 group="breadth_side", feed="nyse_breadth", blank="feed_missing when no breadth bar has landed",
-                low=0, high=1, lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.5),
+                low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5),
     # leaders, rates, dollar, oil
     measure_row("fund_change_from_prior_close_pct", "a fund's last quote against its prior close", "pct", "number",
                 group="fund_change_sign", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING,
-                low=-50, high=50, **PUSH_LANE_DEFAULTS),
+                low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("sector_funds_up_count", "how many of the 11 sector funds are above their prior close", "count",
                 "whole_number", group="sector_breadth", feed="watchlist_quotes",
-                blank="partial_coverage until all 11 quote", low=0, high=11, lane="push",
+                blank="partial_coverage until all 11 quote", low=0, high=11, lane="push_pull",
                 overlap="direction_all_sources", leans="leans_up", neutral=5.5),
     measure_row("largest_stocks_up_count", "how many of the 9 largest S&P stocks are above their prior close", "count",
                 "whole_number", group="largest_stocks_breadth", feed="watchlist_quotes",
-                blank="partial_coverage until all 9 quote", low=0, high=9, lane="push",
+                blank="partial_coverage until all 9 quote", low=0, high=9, lane="push_pull",
                 overlap="direction_all_sources", leans="leans_up", neutral=4.5),
     measure_row("ten_year_yield_annual_pct", "10-year Treasury yield", "pct", "number", "id", "rates_level",
                 feed="watchlist_quotes", blank=SYMBOL_MISSING, low=0, high=25),
     measure_row("ten_year_yield_change_basis_points", "10-year yield change from its prior close", "basis_points",
                 "number", group="rates_change", feed="watchlist_quotes", blank=SYMBOL_MISSING, low=-200, high=200,
-                **PUSH_LANE_DEFAULTS),
+                **PUSH_PULL_LANE_DEFAULTS),
     # overnight
     measure_row("overnight_high_points", "highest /ES 1-minute bar from 18:00 to 09:30", "points", "number", "id",
                 "overnight_levels", subjects="symbol", feed="futures_bars",
@@ -250,10 +253,10 @@ MEASURES = [
                 blank="feed_missing when the night file is absent", **POINTS_RANGE),
     # events (read from the store's calendar rows as known at the cut)
     measure_row("minutes_until_next_event", "minutes from the cut to the next scheduled event today", "minutes",
-                "number", "pull", "event_clock", subjects="impact", feed="event_calendar",
+                "number", "range", "event_clock", subjects="impact", feed="event_calendar",
                 blank="none_left_today after the day's last event; calendar_not_covering_day outside its span",
                 low=0, high=600),
-    measure_row("events_left_today_count", "scheduled events still ahead today", "count", "whole_number", "pull",
+    measure_row("events_left_today_count", "scheduled events still ahead today", "count", "whole_number", "range",
                 "event_clock", feed="event_calendar", blank="calendar_not_covering_day outside the calendar's span",
                 low=0, high=50),
     measure_row("next_event_kind", "the calendar's kind word for the next event today", "word", "word", "id",
@@ -262,20 +265,20 @@ MEASURES = [
                 "health", "calendar_health", feed="event_calendar"),
     # options tape
     measure_row("options_trades_last_30_minutes_count", "same-day option trades in the 30 minutes to the cut", "count",
-                "whole_number", "pull", "options_activity", feed="options_tape", blank=TAPE_BLANK, low=0,
+                "whole_number", "range", "options_activity", feed="options_tape", blank=TAPE_BLANK, low=0,
                 twin=TAPE_TWIN),
     measure_row("options_call_premium_last_30_minutes_usd",
                 "dollars of call premium traded in the 30 minutes to the cut",
-                "usd", "money_usd", "pull", "options_premium_flow", feed="options_tape", blank=TAPE_BLANK, low=0,
+                "usd", "money_usd", "range", "options_premium_flow", feed="options_tape", blank=TAPE_BLANK, low=0,
                 twin=TAPE_TWIN),
     measure_row("options_put_premium_last_30_minutes_usd", "dollars of put premium traded in the 30 minutes to the cut",
-                "usd", "money_usd", "pull", "options_premium_flow", feed="options_tape", blank=TAPE_BLANK, low=0,
+                "usd", "money_usd", "range", "options_premium_flow", feed="options_tape", blank=TAPE_BLANK, low=0,
                 twin=TAPE_TWIN),
     measure_row("bullish_portion_of_sided_premium",
                 "share of sided single-leg premium that was bullish (calls bought, puts sold)", "portion", "number",
                 group="options_flow_side", feed="options_tape",
                 blank="no_activity when no trade had a side; " + TAPE_BLANK,
-                low=0, high=1, lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.5,
+                low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5,
                 twin=TAPE_TWIN),
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",
                 "whole_number", "health", "tape_health", subjects="feed", feed="options_tape", blank=TAPE_BLANK, low=0),
@@ -284,7 +287,7 @@ MEASURES = [
                 "portion", "number", "health", "feed_coverage", subjects="feed", blank=TAPE_BLANK, low=0, high=1),
     # headlines (the poller leaves no poll stamps, so the count has no coverage twin)
     measure_row("headlines_last_60_minutes_count", "headlines captured in the 60 minutes to the cut", "count",
-                "whole_number", "pull", "news_volume", subjects="kind", feed="news_headlines",
+                "whole_number", "range", "news_volume", subjects="kind", feed="news_headlines",
                 blank="feed_missing when today's file is absent; feed_stale when the newest capture is too old",
                 low=0),
     # Mirai's Claude forecast, carried as a raw input
@@ -332,40 +335,40 @@ MEASURES = [
     # today's speed, swings, path and the options check, written on the read's snapshot by the range engine
     measure_row("today_typical_1_minute_move_points",
                 "recency-weighted mean absolute 1-minute close change, half-life 15 minutes", "points", "number",
-                "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0, table=BOTH_TABLES),
+                "range", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0, table=BOTH_TABLES),
     measure_row("speed_fast_5_minute_half_life_points", "the same speed with a 5-minute half-life", "points", "number",
-                "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0),
+                "range", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0),
     measure_row("speed_slow_30_minute_half_life_points", "the same speed with a 30-minute half-life", "points",
-                "number", "pull", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0),
+                "number", "range", "spx_speed", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0),
     measure_row(components.ACCELERATION_MEASURE,
                 "fast speed over slow speed; above 1 the market is speeding up, below 1 slowing", "ratio", "number",
-                "pull", "spx_acceleration", feed="spx_bars", blank=NO_SPEED + "; no_activity when the slow speed is 0",
+                "range", "spx_acceleration", feed="spx_bars", blank=NO_SPEED + "; no_activity when the slow speed is 0",
                 available_from=2, low=0),
     measure_row("typical_swing_points", "speed times the square root of the horizon's minutes", "points", "number",
-                "pull", "spx_speed", subjects="horizon", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0,
+                "range", "spx_speed", subjects="horizon", feed="spx_bars", blank=NO_SPEED, available_from=2, low=0,
                 table=BOTH_TABLES),
     measure_row("options_implied_swing_points", "straddle left scaled by the square root of window over minutes left",
-                "points", "number", "pull", "options_premium_size", subjects="horizon", feed="options_scan",
+                "points", "number", "range", "options_premium_size", subjects="horizon", feed="options_scan",
                 blank="not_priceable when the read has no straddle", low=0),
     measure_row("options_over_tape_swing_ratio", "options-implied swing over the tape swing over the same minutes",
-                "ratio", "number", "pull", "options_vs_tape_check", subjects="horizon", feed="options_scan",
+                "ratio", "number", "range", "options_vs_tape_check", subjects="horizon", feed="options_scan",
                 blank="not_priceable when either swing is missing", low=0),
     measure_row("path_up_points", "sum of the window's rising 1-minute changes", "points", "number",
                 group="path_moves", subjects="window_minutes", feed="spx_bars",
                 blank="not_formed_yet until the window has formed", low=0,
-                lane="push", overlap="direction_all_sources", leans="leans_up", neutral=0.0),
+                lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.0),
     measure_row("path_down_points", "sum of the window's falling 1-minute changes, as a positive number", "points",
                 "number", group="path_moves", subjects="window_minutes", feed="spx_bars",
-                blank="not_formed_yet until the window has formed", low=0, lane="push",
+                blank="not_formed_yet until the window has formed", low=0, lane="push_pull",
                 overlap="direction_all_sources", leans="leans_down", neutral=0.0),
     measure_row("trend_straightness_ratio",
                 "net move over total path in the window; 1 is one way, 0 is pure back-and-forth", "ratio", "number",
                 group="path_straightness", subjects="window_minutes", feed="spx_bars",
                 blank="not_formed_yet until the window has formed; no_activity when the path is 0", low=0, high=1,
-                lane="push", overlap="direction_all_sources", leans="no_direction", neutral=0.0),
+                lane="push_pull", overlap="direction_all_sources", leans="no_direction", neutral=0.0),
     # history fits, written at nightly_history_fit cuts and copied onto the decisions that used them
     measure_row("stretch_multiplier", "swings that cover the band's share of past window endings on the same recipe",
-                "multiplier", "number", "pull", "band_stretch", subjects="band|horizon", history=True, low=0,
+                "multiplier", "number", "range", "band_stretch", subjects="band|horizon", history=True, low=0,
                 blank=NO_FIT_KNOWN_MEANING, table=BOTH_TABLES),
     measure_row("stretch_recipe_name", "the speed recipe and grading window the stretch was fitted on", "word", "word",
                 "id", "band_stretch", subjects="band|horizon", table=BOTH_TABLES),
@@ -374,13 +377,13 @@ MEASURES = [
     measure_row("fit_windows_count", "windows the history fit used", "count", "whole_number", "health", "fit_sample",
                 subjects="horizon", low=0, table=BOTH_TABLES),
     measure_row("average_price_shrink_ratio", "average-price band half-width over end-price band half-width", "ratio",
-                "number", "pull", "band_stretch", subjects="horizon", history=True, low=0, high=1,
+                "number", "range", "band_stretch", subjects="horizon", history=True, low=0, high=1,
                 blank=NO_FIT_KNOWN_MEANING),
     # range forecast values (reads_decision_values)
     measure_row("band_centre_points", "price the band is centred on: the last close at the read", "points", "number",
                 "id", "band_centre", subjects="horizon", blank="feed_missing when no bar has landed", **POINTS_RANGE,
                 **DECISION_VALUE),
-    measure_row("band_half_width_points", "half-width of the band, dials applied", "points", "number", "pull",
+    measure_row("band_half_width_points", "half-width of the band, dials applied", "points", "number", "range",
                 "band_size", subjects="band|horizon", blank="the speed's or the fit's reason", low=0,
                 **DECISION_VALUE),
     measure_row("band_low_points", "the band's lower edge", "points", "number", "id", "band_edges",
@@ -388,20 +391,20 @@ MEASURES = [
     measure_row("band_high_points", "the band's upper edge", "points", "number", "id", "band_edges",
                 subjects="band|horizon", blank="the speed's or the fit's reason", **POINTS_RANGE, **DECISION_VALUE),
     measure_row("chance_stays_inside_rung_probability", "chance price never leaves the rung over the horizon",
-                "probability", "number", "pull", "rung_odds", subjects="horizon|rung_points", low=0, high=1,
+                "probability", "number", "range", "rung_odds", subjects="horizon|rung_points", low=0, high=1,
                 blank="the speed's or the fit's reason", **DECISION_VALUE),
-    measure_row("width_multiplier", "a dial on the band's width, raw and applied", "multiplier", "number", "pull",
+    measure_row("width_multiplier", "a dial on the band's width, raw and applied", "multiplier", "number", "range",
                 "band_size", subjects="adjustment", overlap="width_all_adjustments", low=0,
                 blank="the speed's reason when the dial reads the speed", **DECISION_VALUE),
     measure_row("options_vs_tape_check_word", "the options cross-check's verdict: agree when the options-implied swing "
-                "sits within the agree ratio of the tape swing either way, else differ", "word", "word", "pull",
+                "sits within the agree ratio of the tape swing either way, else differ", "word", "word", "range",
                 "options_vs_tape_check", subjects="horizon", feed="options_scan", words=components.OPTIONS_CHECK_WORDS,
                 blank="not_priceable when either swing is missing", **DECISION_VALUE),
     measure_row("fit_snapshot_id", "the nightly_history_fit cut whose multipliers the decision used", "id", "text",
                 "id", "band_stretch", blank=NO_FIT_KNOWN_MEANING, **DECISION_VALUE),
     measure_row("chance_up_if_moves_probability", "chance the move is up, given it moves", "probability", "number",
-                group="direction_call", low=0, high=1, lane="push", overlap="direction_all_sources", leans="leans_up",
-                neutral=0.5, **DECISION_VALUE),
+                group="direction_call", low=0, high=1, lane="push_pull", overlap="direction_all_sources",
+                leans="leans_up", neutral=0.5, **DECISION_VALUE),
     # what happened in each decision window (market_window outcomes) and the grade start every grade carries
     measure_row("grade_start_price_points", "price the grade measured from: the read's last close", "points", "number",
                 "id", "grade_start", blank=NO_START, **POINTS_RANGE, **OUTCOME_VALUE),
@@ -438,31 +441,31 @@ MEASURES = [
     measure_row("band_used_ratio", "farthest excursion on this side over the end band's half-width; above 1 means "
                 "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
                 blank=NO_GRADE, low=0, **OUTCOME_VALUE),
-    # the push readings on the read's snapshot (and each lean again on every decision, with the trust applied)
-    measure_row("push_lean_probability", "a reading's lean: its chance of up if price moves, were it trusted; "
-                "trust 0 until earned",
-                "probability", "number", group="push_lean", subjects="reading", low=0, high=1,
+    # the push/pull factors on the read's snapshot (and each lean again on every decision, with the share applied)
+    measure_row("push_pull_lean_probability", "a factor's lean: its chance of up if price moves; above even it "
+                "pushes, below it pulls",
+                "probability", "number", group="push_pull_lean", subjects="factor", low=0, high=1,
                 blank="the input's reason: feed_missing, feed_stale, provider_refused_symbol, not_formed_yet, "
-                      "no_activity, too_old", table=BOTH_TABLES, lane="push", overlap="direction_all_sources",
+                      "no_activity, too_old", table=BOTH_TABLES, lane="push_pull", overlap="direction_all_sources",
                 leans="leans_up", neutral=0.5),
-    measure_row("push_reading_text", "the reading's value in words, what the phone shows beside its lean", "text",
-                "text", "id", "push_description", subjects="reading", blank="the input's reason"),
+    measure_row("push_pull_factor_text", "the factor's value in words, what the phone shows beside its lean", "text",
+                "text", "id", "push_pull_description", subjects="factor", blank="the input's reason"),
     measure_row("level_distance_from_price_points", "a dealer wall's price less the read price (above is positive)",
-                "points", "number", "pull", "level_distances", subjects="level_type", feed="options_scan",
+                "points", "number", "range", "level_distances", subjects="level_type", feed="options_scan",
                 blank=SCAN_MISSING + "; feed_missing when no bar has landed", low=-2000, high=2000),
     # the time-of-day ratios and the width cap, measured on the fit's history at read time
     measure_row("closing_window_multiplier", "the 80% mark of |end move| in swings over unclipped windows ending in "
-                "the last 15 minutes, over the all-day mark", "multiplier", "number", "pull", "band_stretch",
+                "the last 15 minutes, over the all-day mark", "multiplier", "number", "range", "band_stretch",
                 subjects="horizon", history=True, low=0, blank=NO_FIT_KNOWN_MEANING, **DECISION_VALUE),
     measure_row("release_window_multiplier", "the 80% mark of |end move| in swings over windows a timed release "
-                "lands in, over the all-day mark", "multiplier", "number", "pull", "band_stretch", subjects="horizon",
+                "lands in, over the all-day mark", "multiplier", "number", "range", "band_stretch", subjects="horizon",
                 history=True, low=0, blank=f"{TOO_FEW_SESSIONS} until the history holds such a window",
                 **DECISION_VALUE),
     measure_row("width_cap_multiplier", "the most the dials other than the Fed may widen the band: the history's 95% "
-                "mark of |end move| in swings over its 80% mark", "multiplier", "number", "pull", "band_stretch",
+                "mark of |end move| in swings over its 80% mark", "multiplier", "number", "range", "band_stretch",
                 subjects="horizon", history=True, low=1, blank=NO_FIT_KNOWN_MEANING, **DECISION_VALUE),
     # the trust ledger's metrics (results_evaluations)
-    measure_row("trust_weight_portion", "the weight a reading or dial has earned for a channel; 0 is not earned",
+    measure_row("trust_weight_portion", "the weight a factor or dial has earned for a channel; 0 is not earned",
                 "portion", "number", "health", "trust_ledger", low=0, high=1,
                 blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
     measure_row("brier_skill_portion", "1 less the Brier score with the lean added over the Brier score of the "
@@ -482,7 +485,7 @@ MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
 WORD_LISTS = (LANES, FEED_STATUSES, FEED_CADENCES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAPSHOT_KINDS,
               SNAPSHOT_STATUSES, SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS,
               DECISION_STATUSES, VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS,
-              SUBJECT_KINDS, components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS, components.PUSH_READINGS,
+              SUBJECT_KINDS, components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS, components.PUSH_PULL_FACTORS,
               components.EVALUATION_KINDS, components.EVALUATED_KINDS, components.VERDICTS,
               components.INTERVAL_METHODS, components.BASELINES, components.WALL_TYPES, components.CLAUDE_SIDES,
               components.OPTIONS_CHECK_WORDS)
@@ -491,7 +494,7 @@ WORD_SHAPE = re.compile(r"^[a-z0-9_$/]+$")
 
 def check_registry():
     """Refuse a registry that breaks the rules: prose for a word, duplicates, unknown lanes, subjects or feeds."""
-    # And a feed with an unknown cadence, or one fact reaching both the pull lane and the push lane.
+    # And a feed with an unknown cadence, or one fact reaching both the range lane and the push_pull lane.
     for words in WORD_LISTS:
         if len(set(words)) != len(words) or not all(WORD_SHAPE.match(word) for word in words):
             raise ValueError(f"registry word list {words} must be distinct lowercase single words")
@@ -514,12 +517,12 @@ def check_registry():
                 raise ValueError(f"{name}: unknown subject kind {kind}")
         if row["source_feed_name"] and row["source_feed_name"] not in FEED_NAMES:
             raise ValueError(f"{name}: unknown feed {row['source_feed_name']}")
-        if row["signal_lane"] in ("pull", "push"):
+        if row["signal_lane"] in ("range", "push_pull"):
             lanes_by_group[row["information_group_name"]].add(row["signal_lane"])
     for group, lanes in lanes_by_group.items():
         if len(lanes) > 1:
-            # one fact may reach the pull lane (how far) or the push lane (which way), never both
-            raise ValueError(f"fact {group} reaches both pull and push")
+            # one fact may reach the range lane (how far) or the push_pull lane (which way), never both
+            raise ValueError(f"fact {group} reaches both range and push_pull")
 
 
 def component_row(kind, name, meaning, parameters, version=components.COMPONENT_VERSION):
@@ -534,7 +537,7 @@ def component_row(kind, name, meaning, parameters, version=components.COMPONENT_
 
 
 def component_rows():
-    """Every feed, the login, the builder, the range engine, the read lanes, the rules, readings, dials and tests."""
+    """Every feed, the login, the builder, the range engine, the read lanes, the rules, factors, dials and tests."""
     rows = [component_row("feed", name, meaning, {"mirai_file": mirai_file, "stale_limit_seconds": stale_limit,
                                                   "cadence": cadence})
             for name, meaning, mirai_file, stale_limit, cadence in FEEDS]
@@ -556,10 +559,11 @@ def component_rows():
                               "the store's bars", components.WINDOW_RULE_PARAMETERS, version=components.WINDOW_RULE[1]))
     rows.append(component_row("grade_rule", components.GRADE_RULE[0], "a range decision graded against its bands and "
                               "rung", components.GRADE_RULE_PARAMETERS, version=components.GRADE_RULE[1]))
-    rows.extend(component_row(components.PUSH_READING_KIND, name, components.PUSH_READING_MEANING[name],
-                              {**components.PUSH_READING_PARAMETERS[name], "label": components.PUSH_READING_LABEL[name],
-                               "answers": components.PUSH_ANSWER_WORDS[name]})
-                for name in components.PUSH_READINGS)
+    rows.extend(component_row(components.PUSH_PULL_FACTOR_KIND, name, components.PUSH_PULL_FACTOR_MEANING[name],
+                              {**components.PUSH_PULL_FACTOR_PARAMETERS[name],
+                               "label": components.PUSH_PULL_FACTOR_LABEL[name],
+                               "answers": components.PUSH_PULL_ANSWER_WORDS[name]})
+                for name in components.PUSH_PULL_FACTORS)
     rows.extend(component_row(components.WIDTH_DIAL_KIND, name, components.WIDTH_DIAL_MEANING[name],
                               components.WIDTH_DIAL_PARAMETERS[name]) for name in components.WIDTH_DIALS)
     rows.append(component_row("trust_test", components.LEAN_TEST[0], "a lean's Brier skill, added to the earned "

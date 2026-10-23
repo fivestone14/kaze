@@ -160,7 +160,7 @@ main {
 .score b small { font-size: 12px; color: var(--faint); font-weight: 600; }
 .score span { font-size: 10px; font-weight: 600; color: var(--mute); }
 
-/* Sight: speed, chain, range bar, checks, push, feeds */
+/* Sight: speed, chain, range bar, checks, push/pull, feeds */
 .speed-row { display: flex; align-items: center; gap: 10px; }
 .speed-bars { flex: 1 1 auto; min-width: 0; height: auto; }
 #sight-read-line { margin: 0; }
@@ -221,10 +221,10 @@ main {
   display: inline-block;
   margin: 0 3px;
 }
-.push-rows { display: flex; flex-direction: column; opacity: 0.8; }
-.push-rows.earned { opacity: 1; }
-/* a push row is a button: a tap shows the exact figure under its short answer */
-.push-row {
+.push-pull-rows { display: flex; flex-direction: column; opacity: 0.8; }
+.push-pull-rows.counted { opacity: 1; }
+/* a factor row is a button: a tap shows the exact figure under its short answer */
+.push-pull-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 86px minmax(0, auto);
   align-items: center;
@@ -234,17 +234,21 @@ main {
   font-size: 12px;
   text-align: left;
 }
-.push-row svg { width: 86px; height: 12px; display: block; }
-.push-row .short { font-size: 11.5px; font-weight: 700; text-align: right; }
-.push-row .figure {
+.push-pull-row svg { width: 86px; height: 12px; display: block; }
+.push-pull-row .side { font-weight: 700; }
+.push-pull-row .side.push { color: var(--blue); }
+.push-pull-row .side.pull { color: var(--rust); }
+.push-pull-row .side.even { color: var(--mute); }
+.push-pull-row .short { font-size: 11.5px; font-weight: 700; text-align: right; }
+.push-pull-row .figure {
   grid-column: 1 / -1;
   padding-bottom: 3px;
   font-size: 10.5px;
   color: var(--faint);
   text-align: right;
 }
-.push-row .figure[hidden] { display: none; }
-.push-call {
+.push-pull-row .figure[hidden] { display: none; }
+.push-pull-call {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -252,8 +256,8 @@ main {
   border-radius: 10px;
   padding: 6px 10px;
 }
-.push-call span:first-child { font-size: 11px; color: var(--faint); }
-.push-call span:last-child { font-size: 13px; font-weight: 700; }
+.push-pull-call span:first-child { font-size: 11px; color: var(--faint); }
+.push-pull-call span:last-child { font-size: 13px; font-weight: 700; }
 .feeds-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; }
 .feed { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; min-height: 19px; }
 .feed:last-child:nth-child(odd) { grid-column: 1 / -1; }

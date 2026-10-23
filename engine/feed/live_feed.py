@@ -22,14 +22,14 @@ LOGIN_FIELD_SHORT_NAMES = {"login_state": "state", "login_hours_until_expiry": "
                            "login_expires_at": "expires_at"}
 WINDOWS, CURRENT, RUNNING, FINISHED, SCORE = "windows", "current", "running", "finished", "score"
 FAILED = "failed"
-# The forecast keys the phone reads, at the top of the range block, per channel and per push reading.
+# The forecast keys the phone reads, at the top of the range block, per channel and per push/pull factor.
 RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases",
               "fed_decision_at")
 CHANNEL_KEYS = ("swing", "stretch", "average_stretch", "fit_sessions", "fit_windows", "rung_points",
                 "stays_inside_share", "options_swing", "options_check", "clipped", "ends_at", "dials",
                 "dials_product", "bands", "status", "reason")
-DIRECTION_KEYS = ("chance_up_if_moves", "trust_applied", "text")
-PUSH_KEYS = ("name", "value", "answer", "lean_if_trusted", "reason", "weight_by_channel")
+DIRECTION_KEYS = ("chance_up_if_moves", "weight_applied", "text")
+PUSH_PULL_KEYS = ("name", "value", "answer", "lean", "side", "reason", "weight_by_channel")
 # The finished-window facts the Read page draws, as the window's outcome values name them.
 FINISHED_FACTS = {"price": "grade_start_price_points", "end": registry.WINDOW_PRICE_MEASURE["end"],
                   "high": registry.WINDOW_PRICE_MEASURE["high"], "low": registry.WINDOW_PRICE_MEASURE["low"],
@@ -151,8 +151,8 @@ def range_block(forecast):
         return None
     block = {key: forecast[key] for key in RANGE_KEYS}
     block["band_portion"] = components.BAND_PORTION
-    block["push"] = [{"label": components.PUSH_READING_LABEL[entry["name"]], **{key: entry[key] for key in PUSH_KEYS}}
-                     for entry in forecast["push"]]
+    block["push_pull"] = [{"label": components.PUSH_PULL_FACTOR_LABEL[entry["name"]],
+                           **{key: entry[key] for key in PUSH_PULL_KEYS}} for entry in forecast["push_pull"]]
     block["channels"] = {}
     for name, channel in forecast["channels"].items():
         picked = {key: channel[key] for key in CHANNEL_KEYS}
@@ -290,7 +290,7 @@ def read_chain(conn, read, decision, channel, rung):
         "options_swing": seen.get(store.value_key_for("options_implied_swing_points", horizon)),
         "options_check": values.get(store.value_key_for("options_vs_tape_check_word", horizon)),
         "chance_up_if_moves": direction and direction["value_number"],
-        "trust_applied": direction and direction["trust_weight_applied_portion"],
+        "weight_applied": direction and direction["trust_weight_applied_portion"],
     }
 
 

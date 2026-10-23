@@ -61,7 +61,8 @@ const REPLY_WORDS = { 401: "Sign-In Refused (401) · Check The Token",
                       503: "The Mac's Server Can't Answer Right Now (503)" };
 const state = { feed: null, bars: [], channel: "30_minutes", fetchedAt: null, unreachable: false, unreadable: false,
                 feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false,
-                tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null, openPush: new Set() };
+                tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null,
+                openFactors: new Set() };
 
 // ---- the one number formatter, the one clock formatter, small text helpers ------------------------------------------
 
@@ -325,7 +326,7 @@ function explainedRead() {
            stays_inside_share: ch.stays_inside_share, dials: ch.dials, dials_product: ch.dials_product,
            straddle: block.straddle, minutes_left: block.minutes_left, options_swing: ch.options_swing,
            options_check: ch.options_check, chance_up_if_moves: ch.direction ? ch.direction.chance_up_if_moves : null,
-           trust_applied: ch.direction ? ch.direction.trust_applied : null };
+           weight_applied: ch.direction ? ch.direction.weight_applied : null };
 }
 
 function emptyReason() {
@@ -482,8 +483,9 @@ function render() {
   guarded(renderReadsList, "list-note");
   guarded(renderScores, "list-note");
   guarded(renderSight, "sight-note");
-  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.push : null;
-  guarded(renderPush, "push-note");
+  const active = document.activeElement;
+  const focused = active && active.dataset ? active.dataset.factor : null;
+  guarded(renderPushPull, "push-pull-note");
   keepFocus(focused);
   guarded(renderFeeds, "feeds-note");
   guarded(renderSteps, "steps-note");
@@ -1141,45 +1143,46 @@ function leanMeter(lean, width = METER.width) {
   return track + fill + `<circle cx="${x}" cy="6" r="4" fill="${colour}"/>`;
 }
 
-/** The call in words: the engine's text once any trust is earned, Coin Flip while the applied trust is 0. */
+/** The call in words: up's chance and the engine's text, the net of the pushes and pulls; a dash with no factor. */
 function directionWords(direction) {
-  if (!direction || direction.chance_up_if_moves === null || direction.chance_up_if_moves === undefined) return "—";
-  const words = direction.trust_applied === 0 || !direction.text ? "Coin Flip" : titleCase(direction.text);
-  return `Up ${fmt(direction.chance_up_if_moves * 100)}% · ${words}`;
+  if (!direction || direction.chance_up_if_moves === null || direction.chance_up_if_moves === undefined
+      || !direction.weight_applied) return "—";
+  return `Up ${fmt(direction.chance_up_if_moves * 100)}% · ${titleCase(direction.text)}`;
 }
 
-/** Give keyboard focus back to the push row that held it, since re-rendering the rows replaces the buttons. */
+/** Give keyboard focus back to the factor row that held it, since re-rendering the rows replaces the buttons. */
 function keepFocus(name) {
-  const row = name && document.querySelector(`[data-push="${CSS.escape(name)}"]`);
+  const row = name && document.querySelector(`[data-factor="${CSS.escape(name)}"]`);
   if (row) row.focus();
 }
 
-function renderPush() {
+const SIDE_WORDS = { push: "Push", pull: "Pull", even: "Even" };
+
+function renderPushPull() {
   const block = range(), ch = channel();
-  const push = block ? block.push : null;
+  const factors = block ? block.push_pull : null;
   const direction = ch ? ch.direction : null;
-  const weight = direction ? direction.trust_applied : null;
-  note("push-note", block ? "" : emptyReason());
-  el("push-weight").textContent = weight === null ? "—" : `Weight ${fmt(weight, weight ? 2 : 0)}`;
-  const failed = reasons().includes("push_failed");
-  const rows = (push || []).map((entry) => {
-    const entryWeight = entry.weight_by_channel ? entry.weight_by_channel[state.channel] : 0;
+  const weight = direction ? direction.weight_applied : null;
+  note("push-pull-note", block ? "" : emptyReason());
+  el("push-pull-pill").textContent = weight === null ? "—" : weight ? "Counts Now" : "No Factors";
+  const failed = reasons().includes("push_pull_failed");
+  const rows = (factors || []).map((entry) => {
     const answer = entry.reason ? `— · ${titleCase(entry.reason)}` : entry.answer || "—";
-    const open = state.openPush.has(entry.name);
-    return `<button class="push-row" type="button" data-push="${esc(entry.name)}" aria-expanded="${open}">`
-         + `<span class="label">${esc(entry.label || titleCase(entry.name))}`
-         + `${entryWeight ? ` · ${fmt(entryWeight, 2)}` : ""}</span>`
-         + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true">${leanMeter(entry.lean_if_trusted)}</svg>`
+    const side = entry.side ? ` · <span class="side ${esc(entry.side)}">${SIDE_WORDS[entry.side]}</span>` : "";
+    const open = state.openFactors.has(entry.name);
+    return `<button class="push-pull-row" type="button" data-factor="${esc(entry.name)}" aria-expanded="${open}">`
+         + `<span class="label">${esc(entry.label || titleCase(entry.name))}${side}</span>`
+         + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true">${leanMeter(entry.lean)}</svg>`
          + `<span class="short">${esc(answer)}</span>`
          + `<span class="figure"${open ? "" : " hidden"}>${esc(entry.value || "No Figure On This Read")}</span>`
          + `</button>`;
   });
-  const empty = failed ? "Readings Failed On This Read" : block ? "No Readings On This Read" : "";
-  el("push-rows").innerHTML = rows.join("") || (empty ? `<p class="block-note">${empty}</p>` : "");
-  el("push-rows").classList.toggle("earned", Boolean(weight));
-  el("push-call-label").textContent = weight ? `Counted At Weight ${fmt(weight, 2)} →`
-                                             : "Not Counted Until Earned →";
-  el("push-call").textContent = directionWords(direction);
+  const empty = failed ? "Factors Failed On This Read" : block ? "No Factors On This Read" : "";
+  el("push-pull-rows").innerHTML = rows.join("") || (empty ? `<p class="block-note">${empty}</p>` : "");
+  el("push-pull-rows").classList.toggle("counted", Boolean(weight));
+  const counted = (factors || []).filter((entry) => entry.lean !== null && entry.lean !== undefined).length;
+  el("push-pull-call-label").textContent = weight ? `Net Of ${counted} Factors →` : "No Factor Has A Lean →";
+  el("push-pull-call").textContent = directionWords(direction);
 }
 
 /** The live price's row as the page sees it now: Live while ticks arrive, else its age while the session is open,
@@ -1338,7 +1341,6 @@ function renderStepChecks(read, minutes) {
   const most = Math.max(read.options_swing || 0, read.swing || 0, 0.01);
   const used = read.minutes_left === null ? minutes : Math.min(minutes, read.minutes_left);
   const chance = read.chance_up_if_moves;
-  const trust = read.trust_applied === null ? "—" : fmt(read.trust_applied, read.trust_applied ? 2 : 0);
   const applied = widenersApplied(read);
   el("steps-checks").innerHTML =
     stepCheck(6, "Options", "check", `${fmt(read.straddle, 1)} × √(${fmt(used)} ÷ ${fmt(read.minutes_left)})`,
@@ -1349,7 +1351,8 @@ function renderStepChecks(read, minutes) {
     + stepCheck(7, "Band Wideners", "earned", widenersLine(read),
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Band wideners at times ${fmt(applied, 2)}">`
                 + `${widenerGauge(applied)}</svg>`, `×${fmt(applied, 2)}`)
-    + stepCheck(8, "Direction", "earned", chance === null ? "—" : `50 + ${trust} × (Lean − 50)`,
+    + stepCheck(8, "Direction", "today", chance === null || !read.weight_applied ? "No Factor Has A Lean"
+                : "Average Lean Of The Push / Pull Factors",
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Direction meter"><g transform="translate(3,11)">`
                 + `${leanMeter(chance, METER.small)}</g>`
                 + svgText(3, 32, "Down", `font-size="7" fill="${COLOUR.rust}"`)
@@ -1395,11 +1398,11 @@ document.addEventListener("click", (event) => {
     state.showAll = true;
     render();
   }
-  const pushRow = event.target.closest("[data-push]");
-  if (pushRow) {
-    if (!state.openPush.delete(pushRow.dataset.push)) state.openPush.add(pushRow.dataset.push);
-    guarded(renderPush, "push-note");
-    keepFocus(pushRow.dataset.push);
+  const factorRow = event.target.closest("[data-factor]");
+  if (factorRow) {
+    if (!state.openFactors.delete(factorRow.dataset.factor)) state.openFactors.add(factorRow.dataset.factor);
+    guarded(renderPushPull, "push-pull-note");
+    keepFocus(factorRow.dataset.factor);
   }
 });
 document.addEventListener("visibilitychange", () => {

@@ -5,7 +5,8 @@ A range-first SPX forecast and the Android app that shows it.
 Every 5 minutes Kaze reads the market (the :05 and :35 reads are the 30-minute
 calls), measures how fast the index is moving right now and turns that into the
 range it should end inside: today's tape sets the number, history only shapes it,
-and direction stays 50/50 until a reading earns a say.
+and which way it goes is the tug-of-war of push/pull factors: each one, read by read, pushes price up or pulls it
+down, and the direction call is their average.
 
 ## Layout
 
@@ -15,9 +16,11 @@ and direction stays 50/50 until a reading earns a say.
   `collect.py` builds one read from them.
 - `engine/store/`: the SQLite store. `store.py` shapes and writes rows, `store_queries.py` reads them,
   `store_schema.py` holds the tables and the numbered schema steps, `registry.py` lists every measure and word,
-  `components.py` holds the recipe's numbers (dials, readings, trust tests, rules), `backup.py` the nightly copy.
-- `engine/range/`: the range engine. `range_fit.py` fits the history, `range_read.py` works one read out,
-  `width_dials.py` holds the dials, `push_read.py` the push readings (which way, each with a lean).
+  `components.py` holds the recipe's numbers (dials, factors, trust tests, rules), `backup.py` the nightly copy.
+- `engine/range/`: the range engine, how far price travels. `range_fit.py` fits the history, `range_read.py` works
+  one read out, `width_dials.py` holds the dials (the Band Wideners).
+- `engine/push_pull/`: which way. `push_pull_read.py` holds the push/pull factors (each a lean: above even it pushes
+  price up, below it pulls price down) and the direction call.
 - `engine/grade/`: the grader (`grade.py`: outcomes, grades, the scoreboard), the parity check (`parity.py`) and the
   trust ledger (`trust.py`: what has earned weight, from live graded windows only).
 - `engine/feed/`: the live feed the phone reads after every read (`live_feed.py`).
@@ -32,8 +35,9 @@ and direction stays 50/50 until a reading earns a say.
 - `checks/`: git hooks that block secrets from ever reaching this repo.
 
 Every window is graded from the read: did the end land inside the band, did the running average, did price ever
-leave plus or minus X. Seven push readings and five width dials sit on the board at weight 0, and the nightly trust
-ledger moves a weight only after 20 live sessions pass a test fixed in advance. `docs/data_map.md` has the recipe,
+leave plus or minus X. Seven push/pull factors count at an equal share in the direction call; five width dials sit
+on the board at weight 0, and the nightly trust ledger moves a dial's weight only after 20 live sessions pass a test
+fixed in advance. `docs/data_map.md` has the recipe,
 the grades, the ledger's rules and the phone's data contract; `app/README.md` says what runs where for the phone.
 
 ## Setup
