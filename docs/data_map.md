@@ -516,9 +516,9 @@ partial / blind, `age_s`, `as_of` (the newest input's moment; for the calendar, 
 (live, minute, once_a_day, hand_kept) and `note`: the calendar feed's horizon words, null elsewhere; the live price's
 row is filled from its file as the feed is written, live inside 10 s), `login` (`state`, `hours_left`,
 `expires_at`), `session` (`opens_at`, where the Read chart's time axis may start; `closes_at`,
-`next_session_opens_at`: so the phone can tell closed from no read today; `closing_window_from`, 15 minutes before the close, from when the last-15-minutes band
-widener can fire), `nightly` (`done_for`,
-`expected`: the session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
+`next_session_opens_at`: so the phone can tell closed from no read today; `closing_window_from`, 15 minutes
+before the close, from when the last-15-minutes band widener can fire), `nightly` (`done_for`, `expected`: the
+session before this one), `range` (below; null with `status_reason = range_failed`) and `values` (every
 observation of the read by `measure` or `measure|subject` key, blanks left out). When the live job crashes the file is
 replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `cut_at` is never silent.
 
