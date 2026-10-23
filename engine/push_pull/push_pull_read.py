@@ -37,8 +37,21 @@ def side_of(lean):
 
 def factor_entry(name, value, answer, lean, reason, stamp_row):
     """One factor as the forecast carries it: name, value and answer in words, lean, side, blank reason, feed stamp."""
+    # live is the rule the phone may move the factor by between reads; only price_trend carries one.
     return {"name": name, "value": value, "answer": answer, "lean": lean, "side": side_of(lean), "reason": reason,
-            "feed": feed_of(stamp_row)}
+            "feed": feed_of(stamp_row), "live": None}
+
+
+def live_rule(entry, prior_close_row):
+    """How the phone moves price_trend with the live price between reads: the lean of (price - prior close) by the
+    factor's own squash and its answer words; None when the factor or the prior close is blank."""
+    prior_close = store.observation_value(prior_close_row) if prior_close_row is not None else None
+    if entry["lean"] is None or prior_close is None:
+        return None
+    return {"follows": registry.LIVE_PRICE_FEED, "since_price": prior_close, "tilt": components.LEAN_TILT,
+            "scale": components.LEAN_SCALE[components.LIVE_PRICE_FACTOR],
+            "even_zone": components.EVEN_LEAN_ZONE,
+            "words": components.PUSH_PULL_ANSWER_WORDS[components.LIVE_PRICE_FACTOR]}
 
 
 def leaning_answer(name, lean, positive, **numbers):
@@ -82,7 +95,7 @@ def factors(observations, path_moves):
         """A share factor's value in words, lean (the share itself) and answer, the side from the share."""
         return text, portion, leaning_answer(name, portion, portion is not None and portion > components.EVEN_CHANCE)
 
-    return [
+    built = [
         build_factor(components.PRICE_TREND,
                       [row("move_points", since="prior_close"), row("move_points", since="open")],
                       lambda since_close, since_open: signed(
@@ -111,6 +124,9 @@ def factors(observations, path_moves):
                                                    f"{up / (up + down):.0%} Up" if up + down else "No Side",
                                                    up / (up + down) if up + down else None)),
     ]
+    follows = next(entry for entry in built if entry["name"] == components.LIVE_PRICE_FACTOR)
+    follows["live"] = live_rule(follows, row("prior_close_points"))
+    return built
 
 
 def straightness_factor(path, price_row):
@@ -160,6 +176,14 @@ def direction_text(chance, weight_applied):
     return f"up {chance:.0%}" if chance > components.EVEN_CHANCE else f"down {1 - chance:.0%}"
 
 
+def push_points(entry, share, swing):
+    """A factor's push on a channel in points: share x (lean - even) x 2 x swing, positive up, negative down; None
+    when the factor is blank or the channel has no swing."""
+    if entry["lean"] is None or swing is None:
+        return None
+    return share * (entry["lean"] - components.EVEN_CHANCE) * 2 * swing
+
+
 def apply_push_pull(forecast, factors):
     """Put the factors on the forecast and call the direction per channel from them."""
     # Each entry gains its share per channel; the headline channel's call goes on top of the forecast.
@@ -168,6 +192,8 @@ def apply_push_pull(forecast, factors):
         channel["direction"] = direction(factors)
     for entry in factors:
         entry["weight_by_channel"] = {name: channel["direction"]["weights"].get(entry["name"], 0.0)
+                                      for name, channel in forecast["channels"].items()}
+        entry["points_by_channel"] = {name: push_points(entry, entry["weight_by_channel"][name], channel["swing"])
                                       for name, channel in forecast["channels"].items()}
     headline = forecast["channels"][components.HEADLINE_HORIZON]["direction"]
     forecast.update({"chance_up_if_moves": headline["chance_up_if_moves"],

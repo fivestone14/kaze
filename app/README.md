@@ -129,18 +129,23 @@ The Average Since The Read strip keeps its two numbers at the top line's edges, 
 `◌ Average −1.4` on the right (the dashed ring placed 8 px before the words from their drawn width), so they never
 touch however close the needles are; every needle ends 4 px above the average band's bottom, and the numbers under the
 strip (the read's price at the centre, each band's edge number at its edge) move out past their neighbour, and in from
-the card's edge, where they would touch. Sight's Which Way · Push / Pull card asks each factor a plain question and
-shows whether it pushes price up, pulls it down or sits even, with the engine's short answer
-(`Since Yesterday · Pull … Down 12 Pts`, `Path · Even … Choppy`; the words and their thresholds are the
-engine's, `docs/data_map.md` section 8); each row is a button, and a tap shows the exact figure under the answer
-(`+37 Since Close`). The engine's width dials are Band Wideners on every screen: Sight's How Far card lists all five
-with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed day, `Due ×2.6 · Not Counted Yet`; `Data
-Release In The Window · None Due` or `Due 10:00 ×1.4 · Not Counted Yet`; `Last 15 Minutes Of The Day · From 15:45` or
-`Due ×1.36 · Not Counted Yet`; any of them `Counted ×n` once the ledger gives it weight; `Price Speeding
-Up` and `Options Expect More Movement · Watching · Not Counted Yet` until the ledger gives them weight, then `Counted
-×n`), and Steps row 7 names only the counted ones with the applied product beside them (`×1.00` and `None Counted
-Yet` until one is). Rows
-grow with their text instead of clipping it: nothing on the three screens is cut off with an ellipsis at 360 px.
+the card's edge, where they would touch. Sight's Which Way · Push / Pull card leads with the net push in points
+(`−0.09 Pts Net Pull`, `Pull 0.56 · Push 0.49`) beside the wind chip (a wind that tilts toward the winning side,
+grows with strength and fills four dots: Calm, Light Air, Breeze, Strong Breeze), then the tug bar (pulls stacked left
+in rust, pushes right in blue, one segment per factor, the cloud at the net) and the odds (`51% Below · 49% Above`).
+The seven factor rows sit behind one toggle (`3 Pull · 2 Push · 2 Even · Show Factors`), closed by default and
+remembered for the tab; each row says whether that factor pushes, pulls or sits even, with its bar in points and the
+engine's short answer (`Since Yesterday · Pull … Down 21 Pts`; the words and thresholds are the engine's,
+`docs/data_map.md` section 8), and a tap shows the exact figure (`−21 Since Close`). Every number glides to its new
+value (0.7 s, at once with reduced motion): on each read, and with every live tick, since Since Yesterday follows the
+live price between reads (`· Live` after the totals while it does). The engine's width dials are Band Wideners on every
+screen: Sight's How Far card lists all five with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed
+day, `Due ×2.6 · Not Counted Yet`; `Data Release In The Window · None Due` or `Due 10:00 ×1.4 · Not Counted Yet`; `Last
+15 Minutes Of The Day · From 15:45` or `Due ×1.36 · Not Counted Yet`; any of them `Counted ×n` once the ledger gives it
+weight; `Price Speeding Up` and `Options Expect More Movement · Watching · Not Counted Yet` until the ledger gives them
+weight, then `Counted ×n`), and Steps row 7 names only the counted ones with the applied product beside them (`×1.00`
+and `None Counted Yet` until one is). Rows grow with their text instead of clipping it: nothing on the three screens is
+cut off with an ellipsis at 360 px.
 
 The shell pins the WebView's text zoom at 100% (`textZoom` in `MainActivity.kt`): the page lays its boxes out in px,
 and the phone's font-size setting would enlarge the letters alone and push them out of their boxes. The page reads at

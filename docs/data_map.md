@@ -420,8 +420,18 @@ the net move at least 40% of the path walked; a random 30-minute walk scores abo
 A factor whose input is blank is blank with that input's reason, no answer and no side, never 0.5 pretending to be
 neutral, and its feed stamp is the input's. **Direction** per channel = 0.5 + the sum of share x (lean - 0.5) over
 the factors with a lean, each an equal share, the shares summing to 1 (`direction_all_sources`): the average lean,
-the net of the pushes and pulls. The phone says it as up's chance and the call (`Up 46% · Down 54%`). The ledger's
-lean test still scores every factor nightly; its weights no longer gate the call.
+the net of the pushes and pulls. The ledger's lean test still scores every factor nightly; its weights no longer gate
+the call.
+
+**Points and the wind** (the phone's push/pull card; `components.WIND_LEVELS`, `WIND_DOT_STEPS`). A factor's push on
+a channel in points is its share x (lean - 0.5) x 2 x the channel's swing: positive pushes price up, negative pulls
+it down, and the points sum to the call (net = (chance - 0.5) x 2 x swing, so chance = 0.5 + net / (2 x swing)). On
+the 16:35:59 UTC read of 2026-10-23 the 30-minute swing was 5.68 and the net -0.09 points (down 51%). The wind is
+the net over the swing: `calm` under 0.03, `light_air` under 0.10, `breeze` under 0.20, else `strong_breeze`, with a
+dot for each of 0.03, 0.10, 0.20 and 0.30 reached. Between reads the phone moves one factor, `price_trend`, with the
+live SPX price by the rule the feed sends with it (the same squash of the move from the prior close), and sums the
+points again, so the card's net, wind and odds follow the tape; every other factor changes only with a read. The
+read's stored call stays what the read said.
 
 **Width dials** (`components.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`; the phone
 calls them Band Wideners: Fed Decision Day, Data Release In The Window, Last 15 Minutes Of The Day, Price Speeding Up,
@@ -527,8 +537,11 @@ timed economic releases known at the cut, each `name` and `at`), `fed_decision_a
 the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (one entry per factor in
 the registry's order: `label`, the plain question the phone asks; `name`; `answer`, the short answer from the factor's
 fixed words, null when blank; `value`, the exact figure in words, shown when the row is tapped; `lean`; `side`
-(`push`, `pull`, `even`, null when blank); `reason` when blank; `weight_by_channel`, the factor's share; the list is
-empty when the push/pull step crashed), `channels` and `windows`.
+(`push`, `pull`, `even`, null when blank); `reason` when blank; `weight_by_channel`, the factor's share;
+`points_by_channel`, its push in points, null when blank or the channel has no swing; `live`, null except on
+`price_trend`: `follows` (`spx_live_price`), `since_price` (the prior close), `tilt`, `scale`, `even_zone` and
+`words`, the rule the phone moves it by between reads; the list is empty when the push/pull step crashed), `wind`
+(`levels`, each `[name, below]` with the last `below` null, and `dot_steps`), `channels` and `windows`.
 
 `channels` is keyed `5_minutes` / `30_minutes` / `60_minutes`; each carries `swing`, `stretch`, `average_stretch`,
 `fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_check`, `clipped`,

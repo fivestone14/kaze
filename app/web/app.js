@@ -31,7 +31,7 @@ const CONE_STEPS = 4;
 const FONT = "Plus Jakarta Sans, sans-serif";
 const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
                  faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
-                 white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4" };
+                 white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4", mute: "#535B52", well: "#E6E1D8" };
 const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, dotHalo: 9, averageDot: 4.5 };
 // The strip: the two numbers on its top line at the card's edges, each after its key; every needle ends 4 px above
 // the average band's bottom, so the labels under the strip keep clear of them.
@@ -41,6 +41,11 @@ STRIP.needleEnd = STRIP.bandBottom - 4;
 const RANGE_BAR = { width: 312, centre: 156, reach: 136.7 };
 const SPEED = { width: 240, barWidth: 46, step: 84, left: 12, baseline: 50, top: 2, nameY: 62, memoryY: 75 };
 const METER = { width: 86, small: 50 };
+// The push/pull card: the tug bar's track, one side reaching 0.4 swings (the wind's top dot is 0.30), the glide
+// from one value to the next and the net under which the card says Even.
+const PUSH_PULL = { centre: 156, trackLeft: 16, trackRight: 296, top: 16, height: 16, labelY: 45, sideSwings: 0.4,
+                    glideMs: 700, evenPoints: 0.005 };
+const SEGMENT_OPACITY = [1, 0.72, 0.52, 0.4, 0.32, 0.26, 0.22];
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
 const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchlist_quotes: "Quotes",
                       nyse_breadth: "Breadth", options_scan: "Options Scan", options_tape: "Options Tape",
@@ -62,7 +67,8 @@ const REPLY_WORDS = { 401: "Sign-In Refused (401) · Check The Token",
 const state = { feed: null, bars: [], channel: "30_minutes", fetchedAt: null, unreachable: false, unreadable: false,
                 feedReply: null, barsReply: null, inFlight: false, failures: 0, pollTimer: null, showAll: false,
                 tick: null, stream: null, streamFailures: 0, streamTimer: null, tickTimer: null,
-                openFactors: new Set() };
+                openFactors: new Set(), factorsOpen: false, glide: { from: null, to: null, startMs: 0, frame: null } };
+const REDUCED_MOTION = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
 
 // ---- the one number formatter, the one clock formatter, small text helpers ------------------------------------------
 
@@ -465,12 +471,14 @@ function guarded(draw, noteId) {
   }
 }
 
-/** What a tick moves: the header, the chart's line, the strip, the list's live row and the feeds card. */
+/** What a tick moves: the header, the chart's line, the strip, the list's live row, the push/pull card (Since
+ *  Yesterday follows the live price) and the feeds card. */
 function renderLive() {
   guarded(renderClock, "clock-note");
   guarded(renderRead, "chart-note");
   guarded(renderStrip, "strip-note");
   guarded(renderReadsList, "list-note");
+  guarded(renderPushPull, "push-pull-note");
   guarded(renderFeeds, "feeds-note");
 }
 
@@ -1143,13 +1151,6 @@ function leanMeter(lean, width = METER.width) {
   return track + fill + `<circle cx="${x}" cy="6" r="4" fill="${colour}"/>`;
 }
 
-/** The call in words: up's chance and the engine's text, the net of the pushes and pulls; a dash with no factor. */
-function directionWords(direction) {
-  if (!direction || direction.chance_up_if_moves === null || direction.chance_up_if_moves === undefined
-      || !direction.weight_applied) return "—";
-  return `Up ${fmt(direction.chance_up_if_moves * 100)}% · ${titleCase(direction.text)}`;
-}
-
 /** Give keyboard focus back to the factor row that held it, since re-rendering the rows replaces the buttons. */
 function keepFocus(name) {
   const row = name && document.querySelector(`[data-factor="${CSS.escape(name)}"]`);
@@ -1158,31 +1159,208 @@ function keepFocus(name) {
 
 const SIDE_WORDS = { push: "Push", pull: "Pull", even: "Even" };
 
-function renderPushPull() {
+/** The chosen channel's pushes and pulls in points, as the card draws them: each factor's from the read, with Since
+ *  Yesterday moved by the live price while ticks arrive, by the rule the engine sends with it (its own squash of the
+ *  move from the prior close), so between reads it says what the next read would of that factor. */
+function pushPullModel() {
   const block = range(), ch = channel();
-  const factors = block ? block.push_pull : null;
-  const direction = ch ? ch.direction : null;
-  const weight = direction ? direction.weight_applied : null;
-  note("push-pull-note", block ? "" : emptyReason());
-  el("push-pull-pill").textContent = weight === null ? "—" : weight ? "Counts Now" : "No Factors";
-  const failed = reasons().includes("push_pull_failed");
-  const rows = (factors || []).map((entry) => {
-    const answer = entry.reason ? `— · ${titleCase(entry.reason)}` : entry.answer || "—";
-    const side = entry.side ? ` · <span class="side ${esc(entry.side)}">${SIDE_WORDS[entry.side]}</span>` : "";
-    const open = state.openFactors.has(entry.name);
-    return `<button class="push-pull-row" type="button" data-factor="${esc(entry.name)}" aria-expanded="${open}">`
-         + `<span class="label">${esc(entry.label || titleCase(entry.name))}${side}</span>`
-         + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true">${leanMeter(entry.lean)}</svg>`
-         + `<span class="short">${esc(answer)}</span>`
-         + `<span class="figure"${open ? "" : " hidden"}>${esc(entry.value || "No Figure On This Read")}</span>`
-         + `</button>`;
+  if (!block || !ch || !ch.direction) return null;
+  const swing = ch.swing;
+  const tick = tickFresh() ? sessionTick() : null;
+  let live = false;
+  const factors = (block.push_pull || []).map((entry) => {
+    const share = entry.weight_by_channel ? entry.weight_by_channel[state.channel] || 0 : 0;
+    const factor = { name: entry.name, value: entry.value, reason: entry.reason, lean: entry.lean, side: entry.side,
+                     answer: entry.answer, share,
+                     points: entry.points_by_channel ? entry.points_by_channel[state.channel] : null };
+    const rule = entry.live;
+    if (rule && tick && entry.lean !== null && swing) {
+      const move = tick.price - rule.since_price;
+      const lean = 0.5 + rule.tilt * Math.tanh(move / rule.scale);
+      const even = Math.abs(lean - 0.5) <= rule.even_zone;
+      Object.assign(factor, {
+        lean, side: even ? "even" : lean > 0.5 ? "push" : "pull", value: `${fmt(move, 0, true)} Since Close`,
+        answer: even ? rule.words[2] : rule.words[move > 0 ? 0 : 1].replace("{points}", fmt(Math.abs(move))),
+        points: share * (lean - 0.5) * 2 * swing });
+      live = true;
+    }
+    return factor;
   });
-  const empty = failed ? "Factors Failed On This Read" : block ? "No Factors On This Read" : "";
-  el("push-pull-rows").innerHTML = rows.join("") || (empty ? `<p class="block-note">${empty}</p>` : "");
-  el("push-pull-rows").classList.toggle("counted", Boolean(weight));
-  const counted = (factors || []).filter((entry) => entry.lean !== null && entry.lean !== undefined).length;
-  el("push-pull-call-label").textContent = weight ? `Net Of ${counted} Factors →` : "No Factor Has A Lean →";
-  el("push-pull-call").textContent = directionWords(direction);
+  const counted = factors.filter((factor) => factor.points !== null && factor.points !== undefined);
+  const pull = counted.reduce((sum, factor) => sum + Math.max(0, -factor.points), 0);
+  const push = counted.reduce((sum, factor) => sum + Math.max(0, factor.points), 0);
+  const net = counted.length && swing ? push - pull : null;
+  const chance = net === null ? null : live ? 0.5 + net / (2 * swing) : ch.direction.chance_up_if_moves;
+  return { factors, swing, live, pull, push, net, chance, weight: ch.direction.weight_applied };
+}
+
+/** The wind for a strength (the net over the swing): its level's name and how many of its dots are filled. */
+function windLevel(strength) {
+  const wind = range() && range().wind;
+  if (!wind || strength === null) return { name: null, dots: 0 };
+  const level = wind.levels.find(([, below]) => below === null || strength < below);
+  return { name: level[0], dots: wind.dot_steps.filter((step) => strength >= step).length };
+}
+
+/** Start the card gliding from wherever it stands to a new model; with reduced motion it lands at once. */
+function glideTo(model) {
+  const glide = state.glide, now = performance.now();
+  glide.from = glide.to && model ? shownModel(now) : null;
+  glide.to = model;
+  glide.startMs = now;
+  if (!glide.frame) glide.frame = requestAnimationFrame(glideFrame);
+}
+
+/** The model as it stands at a moment of the glide: every number eased from where it was, every word the new one's. */
+function shownModel(now) {
+  const glide = state.glide;
+  const instant = !glide.from || (REDUCED_MOTION && REDUCED_MOTION.matches);
+  const t = instant ? 1 : clamp((now - glide.startMs) / PUSH_PULL.glideMs, 0, 1);
+  if (t >= 1) return glide.to;
+  const eased = 1 - (1 - t) ** 3;
+  const mix = (a, b) => (a === null || a === undefined || b === null || b === undefined ? b : a + (b - a) * eased);
+  const before = Object.fromEntries(glide.from.factors.map((factor) => [factor.name, factor]));
+  const was = (name, key) => (before[name] ? before[name][key] : null);
+  return { ...glide.to, pull: mix(glide.from.pull, glide.to.pull), push: mix(glide.from.push, glide.to.push),
+           net: mix(glide.from.net, glide.to.net), chance: mix(glide.from.chance, glide.to.chance),
+           factors: glide.to.factors.map((factor) => ({ ...factor,
+                                                        points: mix(was(factor.name, "points"), factor.points),
+                                                        lean: mix(was(factor.name, "lean"), factor.lean) })) };
+}
+
+function glideFrame(now) {
+  const glide = state.glide;
+  glide.frame = null;
+  guarded(() => drawPushPull(glide.to ? shownModel(now) : null), "push-pull-note");
+  const moving = glide.from && now - glide.startMs < PUSH_PULL.glideMs && !(REDUCED_MOTION && REDUCED_MOTION.matches);
+  if (moving) glide.frame = requestAnimationFrame(glideFrame);
+}
+
+/** The card's moving parts at one frame: the wind chip, the net, the tug bar, the odds and each row's bar and words. */
+function drawPushPull(model) {
+  const net = model ? model.net : null;
+  const even = net === null || Math.abs(net) < PUSH_PULL.evenPoints;
+  const netColour = even ? COLOUR.mute : net < 0 ? COLOUR.rust : COLOUR.blue;
+  const strength = net === null || !model.swing ? null : Math.abs(net) / model.swing;
+  const wind = windLevel(strength);
+  const chipColour = wind.dots ? netColour : COLOUR.mute;
+  const tilt = strength === null ? 0 : (net < 0 ? 1 : -1) * Math.min(40, strength * 130);
+  el("wind-chip").style.color = chipColour;
+  const grow = 1 + Math.min(strength || 0, 0.4);
+  el("wind-icon").style.transform = `rotate(${tilt.toFixed(1)}deg) scale(${grow.toFixed(2)})`;
+  el("wind-word").textContent = wind.name ? titleCase(wind.name) + (wind.dots ? (net < 0 ? " · Down" : " · Up") : "")
+                                          : "—";
+  el("wind-dots").querySelectorAll("i").forEach((dot, index) => {
+    dot.style.background = index < wind.dots ? chipColour : "";
+  });
+  el("net-value").textContent = net === null ? "—" : fmt(net, 2, !even);
+  el("net-value").style.color = netColour;
+  el("net-word").textContent = net === null ? "" : even ? "Pts · Even" : net < 0 ? "Pts Net Pull" : "Pts Net Push";
+  el("net-word").style.color = netColour;
+  el("net-totals").textContent = net === null ? ""
+    : `Pull ${fmt(model.pull, 2)} · Push ${fmt(model.push, 2)}${model.live ? " · Live" : ""}`;
+  el("tug-bar").innerHTML = tugBar(model);
+  const usable = Boolean(model && model.chance !== null && model.weight);
+  const below = usable ? Math.round((1 - model.chance) * 100) : 0;
+  el("odds-bar").classList.toggle("empty", !usable);
+  el("odds-below").style.width = `${below}%`;
+  el("odds-below-word").textContent = usable ? `${below}% Below` : "—";
+  el("odds-above-word").textContent = usable ? `${100 - below}% Above` : "";
+  (model ? model.factors : []).forEach((factor) => {
+    const row = el("push-pull-rows").querySelector(`[data-factor="${CSS.escape(factor.name)}"]`);
+    if (!row) return;
+    const side = row.querySelector(".side");
+    side.textContent = factor.side ? ` · ${SIDE_WORDS[factor.side]}` : "";
+    side.className = `side ${factor.side || ""}`;
+    row.querySelector(".short").textContent = factor.reason ? `— · ${titleCase(factor.reason)}`
+                                                            : factor.answer || "—";
+    row.querySelector(".figure").textContent = factor.value || "No Figure On This Read";
+    row.querySelector("svg").innerHTML = factorBar(factor, model.swing);
+  });
+}
+
+/** The tug bar: the pulls stacked left of the centre and the pushes right, each factor one segment sized in points
+ *  (the biggest nearest the centre), and the cloud at the net. */
+function tugBar(model) {
+  const { centre, trackLeft, trackRight, top, height, labelY } = PUSH_PULL;
+  const parts = [svgRect(trackLeft, top, trackRight - trackLeft, height, height / 2, COLOUR.well)];
+  const scale = model && model.swing ? (centre - trackLeft) / (PUSH_PULL.sideSwings * model.swing) : 0;
+  [[-1, COLOUR.rust], [1, COLOUR.blue]].forEach(([sign, colour]) => {
+    if (!model) return;
+    const pieces = model.factors.filter((factor) => factor.points !== null && factor.points !== undefined
+                                                    && factor.points * sign > 0)
+      .sort((a, b) => b.points * sign - a.points * sign);
+    let edge = centre;
+    pieces.forEach((factor, index) => {
+      const width = Math.min(factor.points * sign * scale, sign < 0 ? edge - trackLeft : trackRight - edge);
+      if (width <= 0) return;
+      parts.push(svgRect((sign < 0 ? edge - width : edge).toFixed(1), top, width.toFixed(1), height, 0, colour,
+                         SEGMENT_OPACITY[index] || SEGMENT_OPACITY[SEGMENT_OPACITY.length - 1]));
+      edge += sign * width;
+    });
+  });
+  parts.push(svgLine(centre, top - 5, centre, top + height + 5, COLOUR.ink, 2));
+  if (model && model.net !== null) {
+    parts.push(cloudMark(clamp(centre + model.net * scale, trackLeft + 8, trackRight - 8)));
+  }
+  const label = `font-size="10" font-weight="700"`;
+  parts.push(`<path d="M${trackLeft} ${labelY - 3.5}l5-3v6z" fill="${COLOUR.rust}"/>`,
+             svgText(trackLeft + 8, labelY, "Pull", `${label} fill="${COLOUR.rust}"`),
+             `<path d="M${trackRight} ${labelY - 3.5}l-5-3v6z" fill="${COLOUR.blue}"/>`,
+             svgText(trackRight - 8, labelY, "Push", `${label} fill="${COLOUR.blue}" text-anchor="end"`));
+  return parts.join("");
+}
+
+/** The cloud that marks the net on the tug bar, with its dashed drop to the track. */
+function cloudMark(x) {
+  const at = x.toFixed(1);
+  return svgLine(at, 10, at, PUSH_PULL.top + PUSH_PULL.height + 6, COLOUR.ink, 1.2, `stroke-dasharray="3 2"`)
+       + `<circle cx="${at}" cy="8" r="7.5" fill="${COLOUR.white}" stroke="${COLOUR.ink}" stroke-width="1.2"/>`
+       + `<path transform="translate(${at} 8.5)" fill="${COLOUR.ink}" `
+       + `d="M-4.2 2.4h8a2.4 2.4 0 0 0 .2-4.8 3.4 3.4 0 0 0-6.5-.6 2.6 2.6 0 0 0-1.7 5.4z"/>`;
+}
+
+/** One factor row's bar: from the centre, its points over the most that factor can push (its share of one swing). */
+function factorBar(factor, swing) {
+  const mid = METER.width / 2, reach = mid - 2;
+  const track = svgRect(0, 5, METER.width, 2, 1, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
+  if (factor.points === null || factor.points === undefined || !swing || !factor.share) return track;
+  const width = Math.max(Math.min(Math.abs(factor.points) / (factor.share * swing), 1) * reach, 1.5);
+  const colour = factor.side === "push" ? COLOUR.blue : factor.side === "pull" ? COLOUR.rust : COLOUR.mute;
+  return track + svgRect((factor.points < 0 ? mid - width : mid).toFixed(1), 3, width.toFixed(1), 6, 3, colour);
+}
+
+/** The push/pull card's fixed parts (the rows, the toggle, the count, the note), then the glide to the new numbers. */
+function renderPushPull() {
+  const block = range();
+  const factors = block ? block.push_pull || [] : [];
+  const failed = reasons().includes("push_pull_failed");
+  note("push-pull-note", !block ? emptyReason() : failed ? "Factors Failed On This Read"
+                                                         : factors.length ? "" : "No Factors On This Read");
+  const rows = el("push-pull-rows");
+  const key = factors.map((entry) => entry.name).join("|");
+  if (rows.dataset.key !== key) {
+    rows.dataset.key = key;
+    rows.innerHTML = factors.map((entry) => `<button class="push-pull-row" type="button"`
+      + ` data-factor="${esc(entry.name)}" aria-expanded="false">`
+      + `<span class="label">${esc(entry.label || titleCase(entry.name))}<span class="side"></span></span><svg viewBox="0 0 ${METER.width} 12" aria-hidden="true"></svg>`
+      + `<span class="short"></span><span class="figure" hidden></span></button>`).join("");
+  }
+  rows.querySelectorAll("[data-factor]").forEach((row) => {
+    const open = state.openFactors.has(row.dataset.factor);
+    row.setAttribute("aria-expanded", String(open));
+    row.querySelector(".figure").hidden = !open;
+  });
+  rows.hidden = !state.factorsOpen;
+  el("push-pull-toggle").hidden = !factors.length;
+  el("push-pull-toggle").setAttribute("aria-expanded", String(state.factorsOpen));
+  el("push-pull-toggle-word").textContent = state.factorsOpen ? "Hide Factors" : "Show Factors";
+  const model = pushPullModel();
+  const counts = { pull: 0, push: 0, even: 0 };
+  (model ? model.factors : []).forEach((factor) => { if (factor.side) counts[factor.side] += 1; });
+  el("push-pull-count").innerHTML = `<span class="count-pull">${counts.pull} Pull</span> · `
+    + `<span class="count-push">${counts.push} Push</span> · <span class="count-even">${counts.even} Even</span>`;
+  glideTo(model);
 }
 
 /** The live price's row as the page sees it now: Live while ticks arrive, else its age while the session is open,
@@ -1398,6 +1576,11 @@ document.addEventListener("click", (event) => {
     state.showAll = true;
     render();
   }
+  if (event.target.closest("#push-pull-toggle")) {
+    state.factorsOpen = !state.factorsOpen;
+    remember("factors", state.factorsOpen ? "open" : "closed");
+    guarded(renderPushPull, "push-pull-note");
+  }
   const factorRow = event.target.closest("[data-factor]");
   if (factorRow) {
     if (!state.openFactors.delete(factorRow.dataset.factor)) state.openFactors.add(factorRow.dataset.factor);
@@ -1413,6 +1596,7 @@ document.addEventListener("visibilitychange", () => {
     openPriceStream();
   }
 });
+state.factorsOpen = remembered("factors", "closed") === "open";
 state.channel = CHANNELS[remembered("channel", state.channel)] ? remembered("channel", state.channel) : state.channel;
 showTab(["read", "sight", "steps"].includes(remembered("tab", "read")) ? remembered("tab", "read") : "read");
 loadFeed();

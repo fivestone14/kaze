@@ -221,8 +221,52 @@ main {
   display: inline-block;
   margin: 0 3px;
 }
-.push-pull-rows { display: flex; flex-direction: column; opacity: 0.8; }
-.push-pull-rows.counted { opacity: 1; }
+/* push/pull: the wind chip, the net, the tug bar, the odds, then the factor rows behind one toggle */
+.wind-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #FFFFFF;
+  border-radius: 999px;
+  padding: 3px 9px 3px 7px;
+  color: var(--mute);
+}
+.wind-chip svg { width: 16px; height: 16px; display: block; }
+.wind-word { font-size: 11px; font-weight: 700; white-space: nowrap; }
+.wind-dots { display: flex; gap: 2px; }
+.wind-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--band); }
+.push-pull-net { display: flex; align-items: baseline; gap: 6px; }
+.net-value { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.net-word { font-weight: 600; }
+.net-totals { margin-left: auto; text-align: right; }
+.tug-bar { width: 100%; height: auto; display: block; }
+.odds-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--blue); }
+.odds-bar span { background: var(--rust); }
+.odds-bar.empty { background: var(--band); }
+.odds-bar.empty span { background: none; }
+.odds-words { display: flex; justify-content: space-between; margin-top: 3px; font-size: 11px; font-weight: 700; }
+.odds-words span:first-child { color: var(--rust); }
+.odds-words span:last-child { color: var(--blue); }
+.push-pull-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  background: #FFFFFF;
+  border-radius: 10px;
+  padding: 7px 10px;
+  text-align: left;
+}
+.push-pull-toggle[hidden] { display: none; }
+.push-pull-toggle .toggle-word { display: flex; align-items: center; gap: 4px; color: var(--faint); font-size: 11px; }
+.push-pull-toggle svg { width: 12px; height: 12px; display: block; }
+.push-pull-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.count-pull { color: var(--rust); font-weight: 700; }
+.count-push { color: var(--blue); font-weight: 700; }
+.count-even { color: var(--mute); font-weight: 700; }
+.push-pull-rows { display: flex; flex-direction: column; }
+.push-pull-rows[hidden] { display: none; }
 /* a factor row is a button: a tap shows the exact figure under its short answer */
 .push-pull-row {
   display: grid;
@@ -230,10 +274,12 @@ main {
   align-items: center;
   column-gap: 8px;
   width: 100%;
-  min-height: 22px;
+  min-height: 24px;
+  border-top: 1px solid var(--rule);
   font-size: 12px;
   text-align: left;
 }
+.push-pull-row:first-child { border-top: 0; }
 .push-pull-row svg { width: 86px; height: 12px; display: block; }
 .push-pull-row .side { font-weight: 700; }
 .push-pull-row .side.push { color: var(--blue); }
@@ -248,16 +294,6 @@ main {
   text-align: right;
 }
 .push-pull-row .figure[hidden] { display: none; }
-.push-pull-call {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: #FFFFFF;
-  border-radius: 10px;
-  padding: 6px 10px;
-}
-.push-pull-call span:first-child { font-size: 11px; color: var(--faint); }
-.push-pull-call span:last-child { font-size: 13px; font-weight: 700; }
 .feeds-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; }
 .feed { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; min-height: 19px; }
 .feed:last-child:nth-child(odd) { grid-column: 1 / -1; }

@@ -139,6 +139,14 @@ PUSH_SIDE, PULL_SIDE, EVEN_SIDE = "push", "pull", "even"
 # Every factor with a lean counts now, each an equal share of the call; the ledger still scores each one nightly.
 DIRECTION_WEIGHTS_RULE = "equal share of the factors with a lean"
 DIRECTION_TEXT_NO_FACTORS = "even, no factor has a lean"
+# Each factor's push in points on a channel: its share x (lean - even) x 2 x the channel's swing, so the points sum to
+# the call, net = (chance - even) x 2 x swing; positive pushes price up, negative pulls it down. The wind is how hard
+# the factors blow: the net over the swing, named on a wind scale (each level holds strengths below its mark) with a
+# dot for each step reached. The phone's push/pull card draws all of it.
+WIND_LEVELS = (("calm", 0.03), ("light_air", 0.10), ("breeze", 0.20), ("strong_breeze", None))
+WIND_DOT_STEPS = (0.03, 0.10, 0.20, 0.30)
+# The one factor the phone may move between reads: price_trend follows the live SPX price from the prior close.
+LIVE_PRICE_FACTOR = PRICE_TREND
 RANGE_RECIPE_PARAMETERS = {
     "speed_half_life_minutes": SPEED_HALF_LIFE_MINUTES, "fast_half_life_minutes": FAST_SPEED_HALF_LIFE_MINUTES,
     "slow_half_life_minutes": SLOW_SPEED_HALF_LIFE_MINUTES, "horizon_minutes": HORIZON_MINUTES,

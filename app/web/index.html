@@ -92,11 +92,36 @@
     </div>
     <div class="card">
       <div class="row-between">
-        <span class="card-title">Which Way · Push / Pull</span><span class="pill pill-green" id="push-pull-pill">—</span>
+        <span class="card-title">Which Way · Push / Pull</span>
+        <span class="wind-chip" id="wind-chip">
+          <svg id="wind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 8h8.5a2.5 2.5 0 1 0-2.34-3.24"/><path d="M3 12h15.5a2.5 2.5 0 1 1-2.34 3.24"/>
+            <path d="M4 16h5.5a2.5 2.5 0 1 1-2.34 3.24"/>
+          </svg>
+          <span class="wind-word" id="wind-word">—</span>
+          <span class="wind-dots" id="wind-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        </span>
       </div>
-      <div class="push-pull-rows" id="push-pull-rows"></div>
+      <div class="push-pull-net">
+        <span class="net-value" id="net-value">—</span><span class="net-word" id="net-word"></span>
+        <span class="faint-small net-totals" id="net-totals"></span>
+      </div>
+      <svg class="tug-bar" id="tug-bar" viewBox="0 0 312 46" role="img"
+           aria-label="The pulls stacked left and the pushes stacked right, the cloud at the net"></svg>
+      <div>
+        <div class="odds-bar" id="odds-bar"><span id="odds-below"></span></div>
+        <div class="odds-words"><span id="odds-below-word">—</span><span id="odds-above-word">—</span></div>
+      </div>
+      <button class="push-pull-toggle" id="push-pull-toggle" type="button" aria-expanded="false"
+              aria-controls="push-pull-rows">
+        <span id="push-pull-count">—</span>
+        <span class="toggle-word"><span id="push-pull-toggle-word">Show Factors</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span>
+      </button>
+      <div class="push-pull-rows" id="push-pull-rows" hidden></div>
       <p class="block-note" id="push-pull-note" hidden></p>
-      <div class="push-pull-call"><span id="push-pull-call-label">—</span><span id="push-pull-call">—</span></div>
     </div>
     <div class="card">
       <div class="row-between">
