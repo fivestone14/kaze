@@ -9,7 +9,7 @@ from datetime import date
 from engine import paths, session_clock
 from engine.collect import collect, mirai_files
 from engine.feed import live_feed
-from engine.grade import grade, parity, trust
+from engine.grade import grade, parity, promotion_ledger, trust
 from engine.jobs import job_log
 from engine.push_pull import push_pull_read
 from engine.range import range_fit, range_read
@@ -36,7 +36,7 @@ def main():
                         help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
     parser.add_argument("--trust", action="store_true",
-                        help="print the trust ledger: every factor and dial per channel with its verdict and weight")
+                        help="print the trust ledger (every dial per channel) and the promotion ledger (every push/pull reading)")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
     if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test or args.trust:
@@ -113,7 +113,7 @@ def run_live():
 
 
 def write_read(conn, snapshot, observations, bars, cut_at, job):
-    """Store a read: bars, then snapshot, readings, factors and decisions in one transaction; a failed step marked."""
+    """Store a read: bars, then snapshot, readings, forces and decisions in one transaction; a failed step marked."""
     # A failed range step leaves no decisions; a failed push/pull step leaves the band and decisions standing with
     # the push/pull block empty; either way the read carries the step's word in its status reason.
     new_bars = store.write_bars(conn, bars)
@@ -123,10 +123,11 @@ def write_read(conn, snapshot, observations, bars, cut_at, job):
         weights = store_queries.trust_weights_known(conn, snapshot["trade_date"], snapshot["cut_at"])
         forecast = range_read.forecast_read(conn, snapshot, observations, cut_at, weights)
         try:
-            push_pull_read.apply_push_pull(forecast, push_pull_read.factors(observations, forecast["path_moves"]))
+            push_pull_read.read_forces(conn, snapshot, observations, forecast, cut_at,
+                                       store_queries.half_day_sessions(conn))
         except Exception:
             log(job, "push/pull step FAILED\n" + traceback.format_exc().rstrip())
-            push_pull_read.apply_push_pull(forecast, [])
+            push_pull_read.empty_forces(forecast)
             store.add_status_reason(snapshot, PUSH_PULL_FAILED)
         observations.extend(range_read.reading_rows(snapshot, observations, forecast))
         decisions, values = range_read.decision_rows(snapshot, forecast)
@@ -231,8 +232,9 @@ def run_scoreboard(day):
 
 
 def run_trust():
-    """Print the trust ledger: every reading and dial per channel with its sample, score, verdict and weight."""
-    print("\n".join(trust.ledger_lines(store.open_store())))
+    """Print the trust ledger (every dial per channel) and the promotion ledger (every push/pull reading)."""
+    conn = store.open_store()
+    print("\n".join(trust.ledger_lines(conn) + [""] + promotion_ledger.ledger_lines(conn)))
 
 
 def run_pass_test():
@@ -339,6 +341,7 @@ def run_nightly():
         windows, grades = grade.close_windows(conn, date.fromisoformat(trade_date), written_at, written_at)
         settled.append(f"{trade_date} {windows} windows ({grades} grades)")
     ledger = trust.write_ledger(conn, today, next_session, written_at)
+    ledger += "; " + promotion_ledger.write_ledger(conn, today, next_session, written_at)
     parity_phrase, mismatch_lines = parity.check_sessions(conn, half_days, written_at, MISMATCH_LINES_LOGGED)
     for line in mismatch_lines:
         log(JOB_NIGHTLY, line)

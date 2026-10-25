@@ -1,8 +1,8 @@
 # One read's range forecast: today's speed and swings from the store's bars, the bands from the newest history fit
 # known at the cut, never-leaves share, time-of-day ratios and width cap from that same history, the width dials
 # applied by the weights the trust ledger holds (none yet), the read's observations and its decisions: the range, how
-# far price travels. The push/pull factors and the direction call, which way, are added by push_pull_read and ride
-# on the same forecast and decisions; live_feed copies the phone's part of the forecast out.
+# far price travels. The push/pull readings and the call which way, are added by push_pull_read and ride on the
+# same forecast and decisions; live_feed copies the phone's part of the forecast out.
 import math
 from datetime import date, timedelta
 
@@ -45,8 +45,8 @@ def stored_fit(conn, fit_snapshot):
 
 
 def forecast_read(conn, snapshot, observations, cut_at, weights):
-    """Work the read out from the store with the ledger's weights; returns the forecast, its factors still empty."""
-    # The forecast's readings, decisions and phone block are built from it afterwards; the direction starts even.
+    """Work the read out from the store with the ledger's weights; returns the forecast, its push/pull block empty."""
+    # The forecast's readings, decisions and phone block are built from it afterwards; the call starts even.
     day = session_clock.to_eastern(cut_at).date()
     bars = store_queries.session_bars(conn, day.isoformat(), snapshot["cut_at"], store.bars_known_by(snapshot, cut_at))
     closes = range_fit.minute_series(bars, day.isoformat())[0]
@@ -76,7 +76,7 @@ def forecast_read(conn, snapshot, observations, cut_at, weights):
     }
     for name, minutes in components.HORIZON_MINUTES.items():
         forecast["channels"][name] = channel_forecast(forecast, name, minutes, fits, ratios, history, weights)
-    push_pull_read.apply_push_pull(forecast, [])
+    push_pull_read.empty_forces(forecast)
     return forecast
 
 
@@ -168,7 +168,7 @@ def feed_stamp(observations, feed):
 
 
 def reading_rows(snapshot, observations, forecast):
-    """The read's range readings as observations on its snapshot, with the push/pull factors' leans."""
+    """The read's range readings as observations on its snapshot, with the push/pull pipeline's steps."""
     # Speeds, swings, the options check, the path moves and the wall distances, each stamped with its feed.
     rows = []
     stamps = {feed: feed_stamp(observations, feed) for feed in components.RANGE_INPUT_FEEDS}
@@ -202,7 +202,7 @@ def reading_rows(snapshot, observations, forecast):
         formed = wall is not None and forecast["price"] is not None
         add("level_distance_from_price_points", wall - forecast["price"] if formed else None, subject,
             "feed_missing" if wall is not None else wall_row["blank_reason"], **scan_stamp)
-    rows.extend(push_pull_read.lean_rows(snapshot, forecast["push_pull"]))
+    rows.extend(push_pull_read.observation_rows(snapshot, forecast["push_pull"], bars_stamp))
     return rows
 
 
@@ -230,9 +230,9 @@ def decision_rows(snapshot, forecast):
 
 
 def value_rows(decision, forecast, name, variant):
-    """A decision's values: centre, speed, swing, fit, bands, rung share, ratios and cap, dials, leans, direction."""
-    # The dials and their product as this decision used them (the owner_rule applies the Fed dial in full), every
-    # reading's lean with its trust and the direction call.
+    """A decision's values: centre, speed, swing, fit, bands, rung share, ratios and cap, dials, then the push/pull
+    pipeline's values on this channel."""
+    # The dials and their product as this decision used them (the owner_rule applies the Fed dial in full).
     rows = []
     channel = forecast["channels"][name]
     owner_rule = variant == components.OWNER_RULE_VARIANT
@@ -271,9 +271,5 @@ def value_rows(decision, forecast, name, variant):
     product = channel["owner_rule"]["product"] if owner_rule else channel["dials_product"][registry.APPLIED_ROLE]
     add("width_multiplier", channel["dials_product"][registry.RAW_ROLE], subject, value_role=registry.RAW_ROLE)
     add("width_multiplier", product, subject, value_role=registry.APPLIED_ROLE)
-    direction = channel["direction"]
-    for entry in forecast["push_pull"]:
-        add("push_pull_lean_probability", entry["lean"], registry.subject_key(factor=entry["name"]),
-            entry["reason"], trust_weight=direction["weights"].get(entry["name"]))
-    add("chance_up_if_moves_probability", direction["chance_up_if_moves"], trust_weight=direction["weight_applied"])
+    rows.extend(push_pull_read.value_rows(decision, forecast["push_pull"], name))
     return rows

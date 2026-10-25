@@ -80,73 +80,18 @@ WIDTH_DIAL_PARAMETERS = {
     OPTIONS_VS_TAPE_DIAL: {"input": "options_over_tape_swing_ratio", "power": OPTIONS_VS_TAPE_POWER},
 }
 
-# ---- The push/pull factors -------------------------------------------------------------------------------------------
-# Which way: the tug-of-war of factors that push price up or pull it down, in the order the ledger scores them, each a
-# lean, the chance of up if price moves, 0 to 1. A factor leaning above the even zone pushes, below it pulls, inside it
-# is even. Share factors lean by their share; signed factors by even + tilt x tanh(value / scale). The range (how far)
-# is the band, never a push/pull factor.
-
-PRICE_TREND, STRAIGHTNESS, BREADTH = "price_trend", "straightness", "breadth"
-BIG_TECH_VS_REST, OPTIONS_BUYERS, YIELD_CHANGE, MIRAI_CLAUDE = "big_tech_vs_rest", "options_buyers", "yield_change", \
-    "mirai_claude"
-PUSH_PULL_FACTORS = (PRICE_TREND, STRAIGHTNESS, BREADTH, BIG_TECH_VS_REST, OPTIONS_BUYERS, YIELD_CHANGE, MIRAI_CLAUDE)
-LEAN_TILT = 0.2
-LEAN_SCALE = {PRICE_TREND: 10.0, BIG_TECH_VS_REST: 0.5, YIELD_CHANGE: 5.0}
-STRAIGHTNESS_WINDOW_MINUTES = 30
-BIG_TECH_SYMBOL, REST_SYMBOL = "QQQ", "RSP"
-CLAUDE_LEAN_HORIZON = "30_minutes"
-PUSH_PULL_FACTOR_MEANING = {
-    PRICE_TREND: "SPX move since the prior close (and since the open), in points",
-    STRAIGHTNESS: "net move over total path in the last 30 minutes, signed by the net move",
-    BREADTH: "NYSE advancers over advancers plus decliners",
-    BIG_TECH_VS_REST: "QQQ change less RSP change since the prior close, in percentage points",
-    OPTIONS_BUYERS: "share of sided same-day option premium that was bullish in the last 30 minutes",
-    YIELD_CHANGE: "10-year yield change since its prior close, in basis points",
-    MIRAI_CLAUDE: "Mirai's Claude 30-minute forecast, up over up plus down",
-}
-# What the phone shows for each factor: a short question and a short answer from the factor's fixed words. A lean
-# within EVEN_LEAN_ZONE of even (0.47 to 0.53) answers Flat or Even (Choppy for the path), else the sign of the factor
-# picks up or down; a path leaning one way is Steady at STEADY_STRAIGHTNESS or more, else Drifting (a random 30-minute
-# walk scores about 0.18, one way is 1). A blank input has no answer. Breadth answers with its share alone.
-EVEN_LEAN_ZONE = 0.03
-STEADY_STRAIGHTNESS = 0.4
-PUSH_PULL_FACTOR_LABEL = {PRICE_TREND: "Since Yesterday", STRAIGHTNESS: "Path", BREADTH: "Stocks Rising",
-                          BIG_TECH_VS_REST: "Big Tech", OPTIONS_BUYERS: "Options Bets", YIELD_CHANGE: "Bond Rates",
-                          MIRAI_CLAUDE: "Mirai's Claude"}
-# Each factor's answers as (up, down, even); {points} is the move in whole points, {share} a percent.
-PUSH_PULL_ANSWER_WORDS = {
-    PRICE_TREND: ("Up {points} Pts", "Down {points} Pts", "Flat"),
-    STRAIGHTNESS: ("Steady Up", "Steady Down", "Choppy", "Drifting Up", "Drifting Down"),
-    BREADTH: ("{share}",),
-    BIG_TECH_VS_REST: ("Ahead", "Behind", "Even"),
-    OPTIONS_BUYERS: ("More Calls", "More Puts", "Even"),
-    YIELD_CHANGE: ("Rising", "Falling", "Flat"),
-    MIRAI_CLAUDE: ("Leans Up", "Leans Down", "Even"),
-}
-PUSH_PULL_FACTOR_PARAMETERS = {
-    PRICE_TREND: {"tilt": LEAN_TILT, "scale_points": LEAN_SCALE[PRICE_TREND], "even_lean_zone": EVEN_LEAN_ZONE},
-    STRAIGHTNESS: {"tilt": LEAN_TILT, "window_minutes": STRAIGHTNESS_WINDOW_MINUTES,
-                   "steady_straightness": STEADY_STRAIGHTNESS},
-    BREADTH: {},
-    BIG_TECH_VS_REST: {"tilt": LEAN_TILT, "scale_pct_points": LEAN_SCALE[BIG_TECH_VS_REST],
-                       "symbols": (BIG_TECH_SYMBOL, REST_SYMBOL), "even_lean_zone": EVEN_LEAN_ZONE},
-    OPTIONS_BUYERS: {"even_lean_zone": EVEN_LEAN_ZONE},
-    YIELD_CHANGE: {"tilt": LEAN_TILT, "scale_basis_points": LEAN_SCALE[YIELD_CHANGE], "even_lean_zone": EVEN_LEAN_ZONE},
-    MIRAI_CLAUDE: {"horizon": CLAUDE_LEAN_HORIZON, "even_lean_zone": EVEN_LEAN_ZONE},
-}
-# Which side each factor is on, from its lean: push (up), pull (down) or even inside EVEN_LEAN_ZONE.
+# ---- The push/pull readings ----------------------------------------------------------------------------------------
+# The readings (reading_specs.py) are the forces on price; each one's strength × weight × booster × swing is its push
+# in points, positive pushing price up and negative pulling it down; the channel's net is their sum under the caps.
+# Which side a reading is on, from its points: push (up), pull (down) or even at 0.
 PUSH_SIDE, PULL_SIDE, EVEN_SIDE = "push", "pull", "even"
-# Every factor with a lean counts now, each an equal share of the call; the ledger still scores each one nightly.
-DIRECTION_WEIGHTS_RULE = "equal share of the factors with a lean"
-DIRECTION_TEXT_NO_FACTORS = "even, no factor has a lean"
-# Each factor's push in points on a channel: its share x (lean - even) x 2 x the channel's swing, so the points sum to
-# the call, net = (chance - even) x 2 x swing; positive pushes price up, negative pulls it down. The wind is how hard
-# the factors blow: the net over the swing, named on a wind scale (each level holds strengths below its mark) with a
-# dot for each step reached. The phone's push/pull card draws all of it.
+# The wind is how hard the forces blow: the net over the swing, named on a wind scale (each level holds strengths
+# below its mark) with a dot for each step reached. The phone's push/pull card draws all of it.
 WIND_LEVELS = (("calm", 0.03), ("light_air", 0.10), ("breeze", 0.20), ("strong_breeze", None))
 WIND_DOT_STEPS = (0.03, 0.10, 0.20, 0.30)
-# The one factor the phone may move between reads: price_trend follows the live SPX price from the prior close.
-LIVE_PRICE_FACTOR = PRICE_TREND
+# The reading recipes' version: a changed recipe is a new revision of its registry_components row (its hash is the
+# promotion ledger's frozen recipe), a changed version a fresh start.
+PUSH_PULL_RECIPE_VERSION = "1"
 RANGE_RECIPE_PARAMETERS = {
     "speed_half_life_minutes": SPEED_HALF_LIFE_MINUTES, "fast_half_life_minutes": FAST_SPEED_HALF_LIFE_MINUTES,
     "slow_half_life_minutes": SLOW_SPEED_HALF_LIFE_MINUTES, "horizon_minutes": HORIZON_MINUTES,
@@ -155,11 +100,10 @@ RANGE_RECIPE_PARAMETERS = {
     "fit_first_window_minute": FIT_FIRST_WINDOW_MINUTE, "fit_window_step_minutes": FIT_WINDOW_STEP_MINUTES,
     "stretch_recipe": STRETCH_RECIPE_LABEL, "fed_owner_rule_multiplier": FED_OWNER_RULE_MULTIPLIER,
     "width_dials": WIDTH_DIALS, "uncapped_dial": FED_DIAL, "cap_portion": CAP_PORTION,
-    "even_chance": EVEN_CHANCE, "push_pull_factors": PUSH_PULL_FACTORS, "lean_tilt": LEAN_TILT,
-    "direction_weights": DIRECTION_WEIGHTS_RULE,
+    "even_chance": EVEN_CHANCE,
 }
 
-# ---- The trust ledger: two tests fixed in advance, their verdict words, and what a verdict needs --------------------
+# ---- The trust ledger: the dial test fixed in advance, its verdict words, and what a verdict needs -------------------
 
 TRUST_WEIGHT_KIND, SKILL_METRIC_KIND = "trust_weight", "skill_metric"
 EVALUATION_KINDS = (TRUST_WEIGHT_KIND, SKILL_METRIC_KIND)
@@ -167,39 +111,48 @@ PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND = "push_pull_factor", "width_dial"
 EVALUATED_KINDS = (PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND)
 # The dial's and the factor's trust is keyed by the measure that carries the applied weight; its lane and overlap
 # group are read off that measure's registry row.
-WEIGHTED_MEASURE = {PUSH_PULL_FACTOR_KIND: "push_pull_lean_probability", WIDTH_DIAL_KIND: "width_multiplier"}
+WEIGHTED_MEASURE = {PUSH_PULL_FACTOR_KIND: "push_pull_points", WIDTH_DIAL_KIND: "width_multiplier"}
 VERDICT_COLUMN = "metric_text"
 VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED = "passed", "held", "held_down", "failed"
 TOO_FEW_SESSIONS = "too_few_sessions"
-VERDICTS = (VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED, TOO_FEW_SESSIONS)
+# The promotion ledger's words for a push/pull reading sit in the same column: promoted, earning, demoted.
+PROMOTED, EARNING_WORD, DEMOTED = "promoted", "earning", "demoted"
+PROMOTION_WORDS = (PROMOTED, EARNING_WORD, DEMOTED)
+VERDICTS = (VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED, TOO_FEW_SESSIONS, *PROMOTION_WORDS)
 EARNED_VERDICTS = (VERDICT_PASSED, VERDICT_HELD_DOWN)
 BOOTSTRAP_BY_DAY = "bootstrap_by_day"
 INTERVAL_METHODS = (BOOTSTRAP_BY_DAY,)
 # The one interval every verdict and the pass test use: the day-resampled 95% interval of the day means.
 INTERVAL_PERCENT = 95
-EARNED_LEANS, UNDIALED_BAND = "earned_leans", "undialed_band"
-BASELINES = (EARNED_LEANS, UNDIALED_BAND)
+UNDIALED_BAND, NO_SKILL = "undialed_band", "no_skill"
+BASELINES = (UNDIALED_BAND, NO_SKILL)
 DIAL_ON, DIAL_OFF, FAKE_BASELINE = "dial_on", "dial_off", "fake_baseline"
-LEAN_TEST = ("lean_brier_test", COMPONENT_VERSION)
 DIAL_TEST = ("dial_band_test", "2")
+# The promotion ledger judges the push/pull readings: a daily score per reading, an e-value, promotion at 20-to-1
+# with enough days, demotion at 10-to-1 (grade/promotion_ledger.py).
+PROMOTION_LEDGER = ("promotion_ledger", COMPONENT_VERSION)
+PROMOTE_AT, DEMOTE_AT = 20.0, 10.0
+PROMOTE_MINIMUM_DAYS, PROMOTE_MINIMUM_EVENTS = 30, 15
+E_VALUE_BET = 0.25
+PROMOTION_LEDGER_PARAMETERS = {
+    "sample": "live first-built base decisions on the headline channel whose grade counts",
+    "score": "the day's mean of strength × average grade from publish + 1 min, in swings",
+    "e_value": f"product over days of 1 + {E_VALUE_BET} × clip(score ÷ spread, ±1); the reversed sign likewise",
+    "promote": f"e ≥ {PROMOTE_AT} with ≥ {PROMOTE_MINIMUM_DAYS} days ({PROMOTE_MINIMUM_EVENTS} events)",
+    "demote": f"reversed e ≥ {DEMOTE_AT}", "recipe": "frozen by hash; a change restarts the clock",
+}
 TRUST_MINIMUM_SESSIONS = 20
 FED_TEST_MINIMUM = {"windows": 20, "sessions": 5}
 HOLD_RUNS = 3
 FAKE_PERMUTATIONS = 200
 FAKE_PERCENTILE = 95
 FAKE_SEED = 1
-LEAN_MOVED_RUNG_SHARE = 0.5
 INTERVAL_SCORE_ALPHA = 1 - BAND_PORTION
 TRUST_TEST_SHARED = {
     "sample": "live first-built base decisions whose grade counts", "replay_counts": False,
     "minimum_sessions": TRUST_MINIMUM_SESSIONS, "interval": BOOTSTRAP_BY_DAY, "interval_percent": INTERVAL_PERCENT,
     "hold_runs": HOLD_RUNS, "hold_down_runs": HOLD_RUNS, "hold_down_unless": "the interval sits below 0",
     "fake_permutations": FAKE_PERMUTATIONS, "fake_percentile": FAKE_PERCENTILE, "fake_seed": FAKE_SEED,
-}
-LEAN_TEST_PARAMETERS = {
-    **TRUST_TEST_SHARED, "order": PUSH_PULL_FACTORS, "moved_rung_share": LEAN_MOVED_RUNG_SHARE,
-    "baseline": EARNED_LEANS, "weight": "interval low x the room left under 1",
-    "fake": "each day's leans handed to another day's windows",
 }
 DIAL_TEST_PARAMETERS = {
     **TRUST_TEST_SHARED, "order": WIDTH_DIALS, "baseline": UNDIALED_BAND, "alpha": INTERVAL_SCORE_ALPHA,

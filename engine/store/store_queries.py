@@ -1,7 +1,7 @@
 # Every read of the store: the calendar, snapshots, bars and fits; decisions, windows, grades and the scoreboard's
 # counts; the live-against-rebuilt pairs the parity check compares; the trust ledger's sample and weights. Nothing
 # here writes, and every live-read query goes through the one statement of "the live truth".
-from datetime import date
+from datetime import date, timedelta
 
 from engine import session_clock
 from engine.store import components, registry
@@ -217,6 +217,140 @@ def session_bars(conn, trade_date, up_to_iso=None, known_by_iso=None, symbol=reg
     for row in rows:
         bars.setdefault(row["priced_at"], row)
     return list(bars.values())
+
+
+# ---- The push/pull pipeline's history ----------------------------------------------------------------------------------
+
+def read_sessions_before(conn, trade_date, count):
+    """The last `count` sessions before a day that hold reads, oldest first."""
+    rows = conn.execute("SELECT DISTINCT trade_date FROM collect_snapshots WHERE snapshot_kind = 'read' "
+                        "AND trade_date < ? ORDER BY trade_date DESC LIMIT ?", (trade_date, count)).fetchall()
+    return sorted(row["trade_date"] for row in rows)
+
+
+def values_at_same_clock(conn, measure_name, first_day, before_day, cut_at, slack_minutes):
+    """A measure's filled observations on reads of past sessions whose cut falls within ±slack of the cut's UTC clock
+    (the caller narrows to the session clock), one read per cut (live first, then rebuilt), with subject and day."""
+    lower = session_clock.iso_utc(cut_at - timedelta(minutes=slack_minutes))[11:]
+    upper = session_clock.iso_utc(cut_at + timedelta(minutes=slack_minutes))[11:]
+    rows = conn.execute(
+        "SELECT s.trade_date, s.cut_at, s.row_origin, o.subject_key, o.value_number FROM collect_snapshots s "
+        "JOIN collect_observations o ON o.snapshot_rowid = s.snapshot_rowid "
+        "WHERE s.snapshot_kind = 'read' AND s.trade_date >= ? AND s.trade_date < ? AND substr(s.cut_at, 12) >= ? "
+        "AND substr(s.cut_at, 12) <= ? AND o.measure_name = ? AND o.value_number IS NOT NULL "
+        f"ORDER BY s.trade_date, s.cut_at, {ORIGIN_PREFERENCE_SQL}",
+        (first_day, before_day, lower, upper, measure_name)).fetchall()
+    kept, seen = [], set()
+    for row in rows:
+        key = (row["trade_date"], row["cut_at"], row["subject_key"])
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    return kept
+
+
+def same_day_open_interest_book(conn, trade_date, cut_at_iso):
+    """The newest same-day open interest an earlier read of the day kept: {(side, strike): contracts}, or {}."""
+    snapshot = conn.execute(
+        "SELECT s.snapshot_rowid FROM collect_snapshots s JOIN collect_observations o "
+        "ON o.snapshot_rowid = s.snapshot_rowid WHERE s.trade_date = ? AND s.snapshot_kind = 'read' "
+        "AND s.cut_at < ? AND o.measure_name = 'same_day_open_interest_contracts' AND o.value_number IS NOT NULL "
+        f"ORDER BY s.cut_at DESC, {ORIGIN_PREFERENCE_SQL} LIMIT 1", (trade_date, cut_at_iso)).fetchone()
+    if snapshot is None:
+        return {}
+    rows = conn.execute("SELECT subject_key, subject_points, value_number FROM collect_observations "
+                        "WHERE snapshot_rowid = ? AND measure_name = 'same_day_open_interest_contracts' "
+                        "AND value_number IS NOT NULL", (snapshot["snapshot_rowid"],)).fetchall()
+    book = {}
+    for row in rows:
+        side = next(part.split("=")[1] for part in row["subject_key"].split("&") if part.startswith("side="))
+        book[(side, float(row["subject_points"]))] = row["value_number"]
+    return book
+
+
+def push_pull_ledger_known(conn, trade_date, cut_at_iso):
+    """The promotion ledger as known at a cut: {weight name: {live_size, live_day_type, live_days, promoted}} from the
+    newest ledger run in force by the day and known by the cut; {} before the ledger has written."""
+    rows = conn.execute(
+        "SELECT evaluated_name, metric_name, metric_value, metric_text, trade_date, known_at FROM results_evaluations "
+        "WHERE evaluated_kind = ? AND judge_name = ? AND trade_date <= ? AND known_at <= ? "
+        "ORDER BY trade_date DESC, known_at DESC",
+        (components.PUSH_PULL_FACTOR_KIND, components.PROMOTION_LEDGER[0], trade_date, cut_at_iso)).fetchall()
+    if not rows:
+        return {}
+    newest = (rows[0]["trade_date"], rows[0]["known_at"])
+    ledger = {}
+    for row in rows:
+        if (row["trade_date"], row["known_at"]) != newest:
+            break
+        entry = ledger.setdefault(row["evaluated_name"], {"live_size": 0.0, "live_day_type": None, "live_days": 0,
+                                                           "promoted": False, "demoted": False})
+        if row["metric_name"] == "live_weight_fit":
+            entry["live_size"] = row["metric_value"] or 0.0
+        elif row["metric_name"] in ("live_day_type_a_fit", "live_day_type_c_fit"):
+            a, c = entry["live_day_type"] or (0.0, 0.0)
+            value = row["metric_value"] or 0.0
+            entry["live_day_type"] = (value, c) if row["metric_name"].endswith("a_fit") else (a, value)
+        elif row["metric_name"] == "live_days_count":
+            entry["live_days"] = int(row["metric_value"] or 0)
+        elif row["metric_name"] == "promotion_e_value":
+            entry["promoted"] = row["metric_text"] == components.PROMOTED
+            entry["demoted"] = row["metric_text"] == components.DEMOTED
+    return ledger
+
+
+def push_pull_live_sample(conn, horizon_name, through_day, row_origin="live_frozen"):
+    """The promotion ledger's sample: every live first-built read through a day whose headline-channel decision has a
+    counting grade, with the window's average move from publish, the channel's swing, the day's trend-ness and
+    each reading's strength: rows of (trade_date, cut_at, snapshot_rowid, average_from_publish, swing, trend_ness,
+    {factor: strength})."""
+    rows = conn.execute(
+        "SELECT d.decision_rowid, d.trade_date, d.cut_at, s.snapshot_rowid, v.value_number AS average_from_publish, "
+        " (SELECT value_number FROM reads_decision_values w WHERE w.decision_rowid = d.decision_rowid "
+        "  AND w.measure_name = 'typical_swing_points' AND w.subject_key = ?) AS swing, "
+        " (SELECT value_number FROM collect_observations c WHERE c.snapshot_rowid = s.snapshot_rowid "
+        "  AND c.measure_name = 'push_pull_context_input' AND c.subject_key = 'kind=trend_ness') AS trend_ness "
+        "FROM reads_decisions d "
+        "JOIN collect_snapshots s ON s.snapshot_id = d.snapshot_id "
+        "JOIN results_outcomes g ON g.judged_decision_id = d.decision_id AND g.does_count_toward_skill = 1 "
+        "JOIN results_outcomes m ON m.outcome_id = g.market_outcome_id "
+        "JOIN results_outcome_values v ON v.outcome_rowid = m.outcome_rowid AND v.measure_name = ? "
+        "WHERE d.decision_kind = ? AND d.horizon_name = ? AND d.variant_name IS NULL AND d.row_origin = ? "
+        "AND d.trade_date <= ? AND v.value_number IS NOT NULL ORDER BY d.trade_date, d.cut_at, s.snapshot_rowid",
+        (registry.subject_key(horizon=horizon_name), registry.AVERAGE_FROM_PUBLISH_MEASURE,
+         components.RANGE_DECISION_KIND, horizon_name, row_origin, through_day)).fetchall()
+    sample, seen = [], set()
+    for row in rows:
+        if row["cut_at"] in seen:      # one read per cut: the first built
+            continue
+        seen.add(row["cut_at"])
+        strengths = conn.execute("SELECT subject_key, value_number FROM collect_observations WHERE snapshot_rowid = ? "
+                                 "AND measure_name = 'push_pull_strength' AND value_number IS NOT NULL",
+                                 (row["snapshot_rowid"],)).fetchall()
+        sample.append({"trade_date": row["trade_date"], "cut_at": row["cut_at"], "snapshot_rowid": row["snapshot_rowid"],
+                       "average_from_publish": row["average_from_publish"], "swing": row["swing"],
+                       "trend_ness": row["trend_ness"],
+                       "strengths": {registry.subject_parts(r["subject_key"])["factor"]: r["value_number"]
+                                     for r in strengths}})
+    return sample
+
+
+def newest_reading_recipes(conn):
+    """The newest registry_components revision per push/pull reading: {name: parameters hash}."""
+    rows = conn.execute("SELECT component_name, parameters_sha256 FROM registry_components WHERE component_kind = ? "
+                        "ORDER BY component_name, revision_number", (components.PUSH_PULL_FACTOR_KIND,)).fetchall()
+    return {row["component_name"]: row["parameters_sha256"] for row in rows}
+
+
+def ledger_clock_start(conn, weight_name, recipe_hash):
+    """The data-through day of the newest promotion ledger row written for a weight under a different recipe (its
+    clock restarts after it), or None when every row shares this recipe."""
+    row = conn.execute("SELECT MAX(data_through_trade_date) AS day FROM results_evaluations WHERE evaluated_kind = ? "
+                       "AND judge_name = ? AND evaluated_name = ? AND detail_text IS NOT NULL AND detail_text != ?",
+                       (components.PUSH_PULL_FACTOR_KIND, components.PROMOTION_LEDGER[0], weight_name,
+                        recipe_hash)).fetchone()
+    return row["day"] if row else None
 
 
 # ---- Fits ------------------------------------------------------------------------------------------------------------

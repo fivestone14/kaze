@@ -1141,6 +1141,7 @@ function renderWideners(read) {
   }).join("") : "";
 }
 
+/** The which-way meter: a chance of up on a track, grey inside the dead zone around even. */
 function leanMeter(lean, width = METER.width) {
   const mid = width / 2;
   const track = svgRect(0, 4, width, 4, 2, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
@@ -1152,47 +1153,80 @@ function leanMeter(lean, width = METER.width) {
   return track + fill + `<circle cx="${x}" cy="6" r="4" fill="${colour}"/>`;
 }
 
-/** Give keyboard focus back to the factor row that held it, since re-rendering the rows replaces the buttons. */
+/** Give keyboard focus back to the reading row that held it, since re-rendering the rows replaces the buttons. */
 function keepFocus(name) {
   const row = name && document.querySelector(`[data-factor="${CSS.escape(name)}"]`);
   if (row) row.focus();
 }
 
 const SIDE_WORDS = { push: "Push", pull: "Pull", even: "Even" };
+const STATUS_WORDS = { live: "Live", earning: "Earning", logged: "Logged" };
 
-/** The chosen channel's pushes and pulls in points, as the card draws them: each factor's from the read, with Since
- *  Yesterday moved by the live price while ticks arrive, by the rule the engine sends with it (its own squash of the
- *  move from the prior close), so between reads it says what the next read would of that factor. */
+/** A reading's strength from its z by its shape (the engine's strength_shapes): nothing inside the wiggle, tanh
+ *  beyond it, steady following the sign and reversing flipping it. The phone needs only the steady shape live. */
+function steadyStrength(z, wiggle) {
+  const size = Math.tanh(Math.max(0, Math.abs(z) - wiggle));
+  return z < 0 ? -size : size;
+}
+
+/** The chosen channel's readings in points, as the card draws them: each reading's from the read, with the trend
+ *  since the open moved by the live price while ticks arrive, by the rule the engine sends with it (its usual,
+ *  spread, weight and booster), so between reads it says what the next read would of that reading. Only readings
+ *  in the net add to it; a logged one is shown dimmed. */
 function pushPullModel() {
   const block = range(), ch = channel();
-  if (!block || !ch || !ch.direction) return null;
+  const forces = block && block.push_pull;
+  if (!block || !ch || !forces || !forces.channels || !forces.channels[state.channel]) return null;
   const swing = ch.swing;
+  const call = forces.channels[state.channel];
   const tick = tickFresh() ? sessionTick() : null;
-  let live = false;
-  const factors = (block.push_pull || []).map((entry) => {
-    const share = entry.weight_by_channel ? entry.weight_by_channel[state.channel] || 0 : 0;
-    const factor = { name: entry.name, value: entry.value, reason: entry.reason, lean: entry.lean, side: entry.side,
-                     answer: entry.answer, share,
-                     points: entry.points_by_channel ? entry.points_by_channel[state.channel] : null };
+  let live = false, liveDelta = 0;
+  const readings = (forces.readings || []).map((entry) => {
+    const reading = { name: entry.name, label: entry.label, group: entry.group, status: entry.status,
+                      inNet: entry.in_the_net, speaks: entry.speaks, raw: entry.raw, unit: entry.unit,
+                      blank: entry.raw_blank || entry.z_blank, z: entry.z, strength: entry.strength,
+                      weight: entry.weight, booster: entry.booster, side: entry.side,
+                      points: entry.points_by_channel ? entry.points_by_channel[state.channel] : null };
     const rule = entry.live;
-    if (rule && tick && entry.lean !== null && swing) {
-      const move = tick.price - rule.since_price;
-      const lean = 0.5 + rule.tilt * Math.tanh(move / rule.scale);
-      const even = Math.abs(lean - 0.5) <= rule.even_zone;
-      Object.assign(factor, {
-        lean, side: even ? "even" : lean > 0.5 ? "push" : "pull", value: `${fmt(move, 0, true)} Since Close`,
-        answer: even ? rule.words[2] : rule.words[move > 0 ? 0 : 1].replace("{points}", fmt(Math.abs(move))),
-        points: share * (lean - 0.5) * 2 * swing });
+    if (rule && tick && swing && rule.spread) {
+      const raw = tick.price - rule.since_price;
+      const z = (raw - rule.usual) / rule.spread;
+      const strength = steadyStrength(z, rule.wiggle);
+      const points = strength * rule.weight * rule.booster * swing;
+      if (reading.points !== null && reading.points !== undefined) liveDelta += points - reading.points;
+      Object.assign(reading, { raw, z, strength, points,
+                               side: points > 0 ? "push" : points < 0 ? "pull" : "even" });
       live = true;
     }
-    return factor;
+    return reading;
   });
-  const counted = factors.filter((factor) => factor.points !== null && factor.points !== undefined);
-  const pull = counted.reduce((sum, factor) => sum + Math.max(0, -factor.points), 0);
-  const push = counted.reduce((sum, factor) => sum + Math.max(0, factor.points), 0);
-  const net = counted.length && swing ? push - pull : null;
-  const chance = net === null ? null : live ? 0.5 + net / (2 * swing) : ch.direction.chance_up_if_moves;
-  return { factors, swing, live, pull, push, net, chance, weight: ch.direction.weight_applied };
+  const counted = readings.filter((reading) => reading.inNet && reading.points !== null
+                                               && reading.points !== undefined);
+  const pull = counted.reduce((sum, reading) => sum + Math.max(0, -reading.points), 0);
+  const push = counted.reduce((sum, reading) => sum + Math.max(0, reading.points), 0);
+  // live: the engine's net (its group caps already applied) moves by the trend's change and is held to the total
+  // cap; the odds then follow the engine's spread of the average (its sigma and edge) so the card's numbers move
+  // with the tape between reads
+  let net = call.net === null || call.net === undefined ? null : call.net;
+  if (net !== null && live && swing) net = clamp(net + liveDelta, -0.35 * swing, 0.35 * swing);
+  const odds = net === null ? null : live && call.odds ? liveOdds(net, call.odds) : call.odds;
+  return { readings, swing, live, pull, push, net, odds, groups: call.groups || {},
+           weight: call.weight_applied, context: forces.context || {} };
+}
+
+/** The odds of up, flat and down for a live net, with the engine's sigma and edge: the same normal curve it uses. */
+function liveOdds(net, odds) {
+  if (!odds || !odds.sigma) return null;
+  const up = normalBelow((net - odds.edge) / odds.sigma), down = normalBelow((-net - odds.edge) / odds.sigma);
+  return { up, down, flat: Math.max(0, 1 - up - down), sigma: odds.sigma, edge: odds.edge };
+}
+
+/** The standard normal curve's area below x (Abramowitz–Stegun, good to 1.5e-7). */
+function normalBelow(x) {
+  const sign = x < 0 ? -1 : 1, a = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * a);
+  const poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+  return 0.5 * (1 + sign * (1 - poly * Math.exp(-a * a)));
 }
 
 /** The wind for a strength (the net over the swing): its level's name and how many of its dots are filled. */
@@ -1220,13 +1254,16 @@ function shownModel(now) {
   if (t >= 1) return glide.to;
   const eased = 1 - (1 - t) ** 3;
   const mix = (a, b) => (a === null || a === undefined || b === null || b === undefined ? b : a + (b - a) * eased);
-  const before = Object.fromEntries(glide.from.factors.map((factor) => [factor.name, factor]));
+  const before = Object.fromEntries(glide.from.readings.map((reading) => [reading.name, reading]));
   const was = (name, key) => (before[name] ? before[name][key] : null);
+  const mixOdds = (a, b) => (!a || !b ? b : { ...b, up: mix(a.up, b.up), flat: mix(a.flat, b.flat),
+                                                down: mix(a.down, b.down) });
   return { ...glide.to, pull: mix(glide.from.pull, glide.to.pull), push: mix(glide.from.push, glide.to.push),
-           net: mix(glide.from.net, glide.to.net), chance: mix(glide.from.chance, glide.to.chance),
-           factors: glide.to.factors.map((factor) => ({ ...factor,
-                                                        points: mix(was(factor.name, "points"), factor.points),
-                                                        lean: mix(was(factor.name, "lean"), factor.lean) })) };
+           net: mix(glide.from.net, glide.to.net), odds: mixOdds(glide.from.odds, glide.to.odds),
+           readings: glide.to.readings.map((reading) => ({ ...reading,
+                                                           points: mix(was(reading.name, "points"), reading.points),
+                                                           strength: mix(was(reading.name, "strength"),
+                                                                         reading.strength) })) };
 }
 
 function glideFrame(now) {
@@ -1235,6 +1272,28 @@ function glideFrame(now) {
   guarded(() => drawPushPull(glide.to ? shownModel(now) : null), "push-pull-note");
   const moving = glide.from && now - glide.startMs < PUSH_PULL.glideMs && !(REDUCED_MOTION && REDUCED_MOTION.matches);
   if (moving) glide.frame = requestAnimationFrame(glideFrame);
+}
+
+/** A reading's figure in words: its raw value in its unit, its z and strength. */
+function readingFigure(reading) {
+  if (reading.raw === null || reading.raw === undefined) return reading.blank ? titleCase(reading.blank) : "—";
+  const units = { points: "Pts", pct_points: "% Pts", swings: "Swings", bn_usd: "Bn $", issues: "Issues",
+                  orders: "Orders", share: "Share", averages: "Averages", share_per_swing: "" };
+  const raw = `${fmt(reading.raw, reading.unit === "points" || reading.unit === "issues"
+                                  || reading.unit === "orders" ? 1 : 3, true)} ${units[reading.unit] || ""}`.trim();
+  const z = reading.z === null || reading.z === undefined ? "" : ` · z ${fmt(reading.z, 2, true)}`;
+  const strength = reading.strength === null || reading.strength === undefined ? ""
+    : ` · ${fmt(reading.strength * 100, 0, true)}%`;
+  return `${raw}${z}${strength}`;
+}
+
+/** A reading's short answer: its points on the channel and how it counts (weight × booster), or why it is quiet. */
+function readingShort(reading) {
+  if (reading.points === null || reading.points === undefined) {
+    return reading.speaks === false ? "Quiet Now" : reading.blank ? `— · ${titleCase(reading.blank)}` : "—";
+  }
+  const how = reading.inNet ? `w ${fmt(reading.weight, 3, true)} × b ${fmt(reading.booster, 2)}` : "Logged · 0 Pts";
+  return reading.inNet ? `${fmt(reading.points, 2, true)} Pts · ${how}` : how;
 }
 
 /** The card's moving parts at one frame: the wind chip, the net, the tug bar, the odds and each row's bar and words. */
@@ -1261,42 +1320,55 @@ function drawPushPull(model) {
   el("net-totals").textContent = net === null ? ""
     : `Pull ${fmt(model.pull, 2)} · Push ${fmt(model.push, 2)}${model.live ? " · Live" : ""}`;
   el("tug-bar").innerHTML = tugBar(model);
-  const usable = Boolean(model && model.chance !== null && model.weight);
-  const below = usable ? Math.round((1 - model.chance) * 100) : 0;
+  const odds = model ? model.odds : null;
+  const usable = Boolean(odds && model.weight);
+  const down = usable ? Math.round(odds.down * 100) : 0, up = usable ? Math.round(odds.up * 100) : 0;
   el("odds-bar").classList.toggle("empty", !usable);
-  el("odds-below").style.width = `${below}%`;
-  el("odds-below-word").textContent = usable ? `${below}% Below` : "—";
-  el("odds-above-word").textContent = usable ? `${100 - below}% Above` : "";
-  (model ? model.factors : []).forEach((factor) => {
-    const row = el("push-pull-rows").querySelector(`[data-factor="${CSS.escape(factor.name)}"]`);
+  el("odds-below").style.width = `${down}%`;
+  el("odds-flat").style.width = `${usable ? Math.max(0, 100 - down - up) : 0}%`;
+  el("odds-below-word").textContent = usable ? `${down}% Down` : "—";
+  el("odds-flat-word").textContent = usable ? `${Math.max(0, 100 - down - up)}% Flat` : "";
+  el("odds-above-word").textContent = usable ? `${up}% Up` : "";
+  (model ? model.readings : []).forEach((reading) => {
+    const row = el("push-pull-rows").querySelector(`[data-factor="${CSS.escape(reading.name)}"]`);
     if (!row) return;
     const side = row.querySelector(".side");
-    side.textContent = factor.side ? ` · ${SIDE_WORDS[factor.side]}` : "";
-    side.className = `side ${factor.side || ""}`;
-    row.querySelector(".short").textContent = factor.reason ? `— · ${titleCase(factor.reason)}`
-                                                            : factor.answer || "—";
-    row.querySelector(".figure").textContent = factor.value || "No Figure On This Read";
-    row.querySelector("svg").innerHTML = factorBar(factor, model.swing);
+    side.textContent = reading.side && reading.inNet ? ` · ${SIDE_WORDS[reading.side]}` : "";
+    side.className = `side ${reading.inNet ? reading.side || "" : ""}`;
+    row.classList.toggle("logged", !reading.inNet);
+    row.querySelector(".short").textContent = readingShort(reading);
+    row.querySelector(".figure").textContent = readingFigure(reading);
+    row.querySelector("svg").innerHTML = factorBar(reading, model.swing);
   });
 }
 
-/** The tug bar: the pulls stacked left of the centre and the pushes right, each factor one segment sized in points
+/** The tug bar: the pulls stacked left of the centre and the pushes right, each group one segment sized in points
  *  (the biggest nearest the centre), and the cloud at the net. */
 function tugBar(model) {
   const { centre, trackLeft, trackRight, top, height, labelY } = PUSH_PULL;
   const parts = [svgRect(trackLeft, top, trackRight - trackLeft, height, height / 2, COLOUR.well)];
   const scale = model && model.swing ? (centre - trackLeft) / (PUSH_PULL.sideSwings * model.swing) : 0;
+  const groups = {};
+  (model ? model.readings : []).forEach((reading) => {
+    if (reading.inNet && reading.points !== null && reading.points !== undefined) {
+      groups[reading.group] = (groups[reading.group] || 0) + reading.points;
+    }
+  });
   [[-1, COLOUR.rust], [1, COLOUR.blue]].forEach(([sign, colour]) => {
     if (!model) return;
-    const pieces = model.factors.filter((factor) => factor.points !== null && factor.points !== undefined
-                                                    && factor.points * sign > 0)
-      .sort((a, b) => b.points * sign - a.points * sign);
+    const pieces = Object.entries(groups).filter(([, points]) => points * sign > 0)
+      .sort((a, b) => b[1] * sign - a[1] * sign);
     let edge = centre;
-    pieces.forEach((factor, index) => {
-      const width = Math.min(factor.points * sign * scale, sign < 0 ? edge - trackLeft : trackRight - edge);
+    pieces.forEach(([group, points], index) => {
+      const width = Math.min(points * sign * scale, sign < 0 ? edge - trackLeft : trackRight - edge);
       if (width <= 0) return;
-      parts.push(svgRect((sign < 0 ? edge - width : edge).toFixed(1), top, width.toFixed(1), height, 0, colour,
+      const x = sign < 0 ? edge - width : edge;
+      parts.push(svgRect(x.toFixed(1), top, width.toFixed(1), height, 0, colour,
                          SEGMENT_OPACITY[index] || SEGMENT_OPACITY[SEGMENT_OPACITY.length - 1]));
+      if (width >= 9) {
+        parts.push(svgText((x + width / 2).toFixed(1), top + height - 4, group,
+                           `font-size="9" font-weight="700" fill="${COLOUR.white}" text-anchor="middle"`));
+      }
       edge += sign * width;
     });
   });
@@ -1321,31 +1393,45 @@ function cloudMark(x) {
        + `d="M-4.2 2.4h8a2.4 2.4 0 0 0 .2-4.8 3.4 3.4 0 0 0-6.5-.6 2.6 2.6 0 0 0-1.7 5.4z"/>`;
 }
 
-/** One factor row's bar: from the centre, its points over the most that factor can push (its share of one swing). */
-function factorBar(factor, swing) {
+/** One reading row's bar: from the centre, its strength (−1..1) as the share of the half track; a logged reading
+ *  draws in grey. */
+function factorBar(reading, swing) {
   const mid = METER.width / 2, reach = mid - 2;
   const track = svgRect(0, 5, METER.width, 2, 1, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
-  if (factor.points === null || factor.points === undefined || !swing || !factor.share) return track;
-  const width = Math.max(Math.min(Math.abs(factor.points) / (factor.share * swing), 1) * reach, 1.5);
-  const colour = factor.side === "push" ? COLOUR.blue : factor.side === "pull" ? COLOUR.rust : COLOUR.mute;
-  return track + svgRect((factor.points < 0 ? mid - width : mid).toFixed(1), 3, width.toFixed(1), 6, 3, colour);
+  if (reading.strength === null || reading.strength === undefined || !swing) return track;
+  const size = Math.min(Math.abs(reading.strength), 1);
+  const width = Math.max(size * reach, 1.5);
+  const leftward = reading.inNet ? (reading.points || 0) < 0 : reading.strength < 0;
+  const colour = !reading.inNet ? COLOUR.mute : reading.side === "push" ? COLOUR.blue
+               : reading.side === "pull" ? COLOUR.rust : COLOUR.mute;
+  return track + svgRect((leftward ? mid - width : mid).toFixed(1), 3, width.toFixed(1), 6, 3, colour);
 }
 
-/** The push/pull card's fixed parts (the rows, the toggle, the count, the note), then the glide to the new numbers. */
+/** The push/pull card's fixed parts (the rows by group, the toggle, the count, the note), then the glide to the new
+ *  numbers. */
 function renderPushPull() {
   const block = range();
-  const factors = block ? block.push_pull || [] : [];
+  const forces = block && block.push_pull;
+  const readings = forces ? forces.readings || [] : [];
+  const groupNames = forces && forces.groups ? forces.groups : {};
   const failed = reasons().includes("push_pull_failed");
-  note("push-pull-note", !block ? emptyReason() : failed ? "Factors Failed On This Read"
-                                                         : factors.length ? "" : "No Factors On This Read");
+  note("push-pull-note", !block ? emptyReason() : failed ? "Readings Failed On This Read"
+                                                         : readings.length ? "" : "No Readings On This Read");
   const rows = el("push-pull-rows");
-  const key = factors.map((entry) => entry.name).join("|");
+  const key = readings.map((entry) => `${entry.name}:${entry.status}`).join("|");
   if (rows.dataset.key !== key) {
     rows.dataset.key = key;
-    rows.innerHTML = factors.map((entry) => `<button class="push-pull-row" type="button"`
-      + ` data-factor="${esc(entry.name)}" aria-expanded="false">`
-      + `<span class="label">${esc(entry.label || titleCase(entry.name))}<span class="side"></span></span><svg viewBox="0 0 ${METER.width} 12" aria-hidden="true"></svg>`
-      + `<span class="short"></span><span class="figure" hidden></span></button>`).join("");
+    let group = null;
+    rows.innerHTML = readings.map((entry) => {
+      const head = entry.group === group ? "" : `<div class="push-pull-group">${esc(entry.group)} · `
+        + `${esc(titleCase(groupNames[entry.group] || entry.group))}</div>`;
+      group = entry.group;
+      return head + `<button class="push-pull-row" type="button" data-factor="${esc(entry.name)}" aria-expanded="false">`
+        + `<span class="label">${esc(entry.label || titleCase(entry.name))}<span class="side"></span>`
+        + `<span class="status ${esc(entry.status)}">${esc(STATUS_WORDS[entry.status] || entry.status)}</span></span>`
+        + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true"></svg>`
+        + `<span class="short"></span><span class="figure" hidden></span></button>`;
+    }).join("");
   }
   rows.querySelectorAll("[data-factor]").forEach((row) => {
     const open = state.openFactors.has(row.dataset.factor);
@@ -1353,12 +1439,14 @@ function renderPushPull() {
     row.querySelector(".figure").hidden = !open;
   });
   rows.hidden = !state.factorsOpen;
-  el("push-pull-toggle").hidden = !factors.length;
+  el("push-pull-toggle").hidden = !readings.length;
   el("push-pull-toggle").setAttribute("aria-expanded", String(state.factorsOpen));
-  el("push-pull-toggle-word").textContent = state.factorsOpen ? "Hide Factors" : "Show Factors";
+  el("push-pull-toggle-word").textContent = state.factorsOpen ? "Hide Readings" : "Show Readings";
   const model = pushPullModel();
   const counts = { pull: 0, push: 0, even: 0 };
-  (model ? model.factors : []).forEach((factor) => { if (factor.side) counts[factor.side] += 1; });
+  (model ? model.readings : []).forEach((reading) => {
+    if (reading.inNet && reading.side) counts[reading.side] += 1;
+  });
   el("push-pull-count").innerHTML = `<span class="count-pull">${counts.pull} Pull</span> · `
     + `<span class="count-push">${counts.push} Push</span> · <span class="count-even">${counts.even} Even</span>`;
   glideTo(model);
@@ -1530,8 +1618,8 @@ function renderStepChecks(read, minutes) {
     + stepCheck(7, "Band Wideners", "earned", widenersLine(read),
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Band wideners at times ${fmt(applied, 2)}">`
                 + `${widenerGauge(applied)}</svg>`, `×${fmt(applied, 2)}`)
-    + stepCheck(8, "Direction", "today", chance === null || !read.weight_applied ? "No Factor Has A Lean"
-                : "Average Lean Of The Push / Pull Factors",
+    + stepCheck(8, "Which Way", "today", chance === null || !read.weight_applied ? "No Reading Counts Yet"
+                : "Up Over Up Plus Down, From The Net Push",
                 `<svg viewBox="0 0 56 34" role="img" aria-label="Direction meter"><g transform="translate(3,11)">`
                 + `${leanMeter(chance, METER.small)}</g>`
                 + svgText(3, 32, "Down", `font-size="7" fill="${COLOUR.rust}"`)

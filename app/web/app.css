@@ -221,7 +221,7 @@ main {
   display: inline-block;
   margin: 0 3px;
 }
-/* push/pull: the wind chip, the net, the tug bar, the odds, then the factor rows behind one toggle */
+/* push/pull: the wind chip, the net, the tug bar, the odds, then the reading rows by group behind one toggle */
 .wind-chip {
   display: flex;
   align-items: center;
@@ -267,7 +267,7 @@ main {
 .count-even { color: var(--mute); font-weight: 700; }
 .push-pull-rows { display: flex; flex-direction: column; }
 .push-pull-rows[hidden] { display: none; }
-/* a factor row is a button: a tap shows the exact figure under its short answer */
+/* a reading row is a button: a tap shows its raw value, z and strength under its points */
 .push-pull-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 86px minmax(0, auto);
@@ -388,3 +388,15 @@ main {
 .tabs span { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
 .tabs i { width: 4px; height: 4px; border-radius: 50%; }
 .tabs button[aria-current="page"] i { background: var(--ink); }
+/* The push/pull card's readings: a head per mechanism group, a status chip per reading, logged readings dimmed, and
+   the odds bar's flat zone between down and up. */
+.odds-bar #odds-flat { background: var(--band); }
+.odds-words { gap: 6px; }
+.odds-words span:nth-child(2) { color: var(--mute); }
+.push-pull-group { font-size: 10px; font-weight: 700; color: var(--faint); text-transform: uppercase;
+                   letter-spacing: 0.04em; padding: 8px 0 2px; }
+.push-pull-row .status { font-size: 9px; font-weight: 700; border-radius: 7px; padding: 0 5px; margin-left: 5px;
+                         vertical-align: middle; background: var(--band); color: var(--mute); }
+.push-pull-row .status.live { background: var(--green-wash); color: var(--green-deep); }
+.push-pull-row .status.earning { background: var(--purple-wash); color: var(--purple); }
+.push-pull-row.logged .label, .push-pull-row.logged .short { color: var(--mute); }

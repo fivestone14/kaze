@@ -1,6 +1,6 @@
 # The registry: every measure Kaze may store (name, meaning, unit, lane, fact group, subjects, source feed, blank rule),
-# every component row (feeds, the login, the collector, the range engine, the read lanes, the push/pull factors with the
-# phone's question and answer words, the dials, the rules and the trust tests, their numbers in components.py) and the
+# every component row (feeds, the login, the collector, the range engine, the read lanes, the push/pull readings'
+# recipes, the dials, the rules and the tests, their numbers in components.py and reading_specs.py) and the
 # fixed word lists. Every word here has a writer; the store writer refuses anything not listed.
 import hashlib
 import json
@@ -23,7 +23,7 @@ BAR_ARRIVAL_SECONDS = 62
 BAR_ARRIVAL_RULE = f"bar_end_plus_{BAR_ARRIVAL_SECONDS}_seconds"
 
 # The two lanes a forecast fact may reach: range (how far price travels, the band) and push_pull (which way: the
-# factors that push price up or pull it down).
+# readings that push price up or pull it down).
 LANES = ("range", "push_pull", "label", "id", "health")
 # The four value columns of every long table; a row fills exactly one of them or carries a blank reason.
 VALUE_COLUMNS = ("value_number", "value_bool", "value_text", "value_at")
@@ -78,6 +78,7 @@ WINDOW_SIDES = ("end", "average", "high", "low")
 WINDOW_PRICE_MEASURE = {side: f"{side}_price_points" for side in WINDOW_SIDES}
 WINDOW_MOVE_MEASURE = {side: f"{side}_move_points" for side in WINDOW_SIDES}
 GRADE_START_PRICE_MEASURE = "spx_price_points"
+AVERAGE_FROM_PUBLISH_MEASURE = "average_move_from_publish_points"
 SPX_SYMBOL = "$SPX"
 SPY_SYMBOL, TEN_YEAR_SYMBOL = "SPY", "$TNX"
 # The symbols the nightly keeps daily bars for, with the instrument kind each is stored under.
@@ -222,8 +223,8 @@ MEASURES = [
     measure_row("same_day_open_interest_contracts", "contracts held overnight in a same-day strike on one side, "
                 "from the newest native scan, on the first read and the read fifty minutes before the close",
                 "contracts", "whole_number", "id", "expiring_open_interest", subjects="side|strike_points",
-                feed="options_scan", blank=SCAN_MISSING + "; no_activity when the scan lists no same-day strike; "
-                "not kept on other reads", low=0),
+                feed="options_scan", blank="no row when the scan is absent or lists no same-day strike (the "
+                "options_scan feed row says why); not kept on other reads", low=0),
     measure_row("dealer_net_gamma_usd", "dealers' net gamma across the same-day chain", "usd", "number", "range",
                 "dealer_gamma_size", feed="options_scan", blank=SCAN_MISSING),
     measure_row("dealer_gamma_sign", "the scan's own word for the dealer gamma regime", "word", "word", "range",
@@ -459,6 +460,9 @@ MEASURES = [
                 "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row(WINDOW_MOVE_MEASURE["low"], "window low minus grade-start price", "points", "number", "label",
                 "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row(AVERAGE_FROM_PUBLISH_MEASURE, "average price over the window from its second minute (publish time + 1 "
+                "minute, after Kaze has spoken and the bar has landed) minus grade-start price: the push/pull "
+                "readings' grade", "points", "number", "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("minutes_covered_count", "window minutes with a bar held in the store", "count", "whole_number",
                 "health", "window_coverage", blank=NO_END_BAR, low=0, high=390, **OUTCOME_VALUE),
     measure_row("stayed_inside_rung", "price never reached either edge of the rung during the window", "yes_no",
@@ -473,14 +477,53 @@ MEASURES = [
                 "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
                 blank=NO_GRADE, low=0, **OUTCOME_VALUE),
     # the push/pull factors on the read's snapshot (and each lean again on every decision, with the share applied)
-    measure_row("push_pull_lean_probability", "a factor's lean: its chance of up if price moves; above even it "
-                "pushes, below it pulls",
-                "probability", "number", group="push_pull_lean", subjects="factor", low=0, high=1,
-                blank="the input's reason: feed_missing, feed_stale, provider_refused_symbol, not_formed_yet, "
-                      "no_activity, too_old", table=BOTH_TABLES, lane="push_pull", overlap="direction_all_sources",
-                leans="leans_up", neutral=0.5),
-    measure_row("push_pull_factor_text", "the factor's value in words, what the phone shows beside its lean", "text",
-                "text", "id", "push_pull_description", subjects="factor", blank="the input's reason"),
+    # The push/pull pipeline's steps per reading (the factor subject names the reading in reading_specs): the raw
+    # value in the reading's own unit, how unusual it is at this clock (z, in spreads) and its strength by shape.
+    measure_row("push_pull_raw_value", "a reading's raw value in its own unit (reading_specs names the unit); the "
+                "gate closed reads 0", "reading_units", "number", group="push_pull_reading", subjects="factor",
+                blank="the input's reason; not_applicable outside the reading's speak window or on a half day it "
+                      "sits out", **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_z_score", "how unusual the raw value is at the same clock: (raw − usual) ÷ spread",
+                "spreads", "number", group="push_pull_reading", subjects="factor",
+                blank="the raw value's reason; too_few_sessions under ten sessions of same-clock history",
+                low=-100, high=100, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_strength", "the reading's strength by its shape: tanh of z beyond the wiggle (−1..1), z "
+                "held to ±3 for the clipped shape, points for catch-up", "portion", "number",
+                group="push_pull_reading", subjects="factor", blank="the z's reason", low=-100, high=100,
+                **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_context_input", "one context input of the wider view (kind names it: trend_ness and its "
+                "three parts, path_straightness, dealer_gamma, rates_tide, vix_level, time_of_day, down_day)", "mixed",
+                "number", group="push_pull_context", subjects="kind",
+                blank="not_formed_yet before the input's bars; the input's feed reason", lane="push_pull",
+                overlap="direction_all_sources"),
+    # The pipeline's values on each channel's decision: how much each reading counts and what the channel says.
+    measure_row("push_pull_weight", "a reading's earned weight: swings of points per unit strength, (h·ŵ_hist + n·ŵ_live)"
+                " ÷ (h + n + 40), 0 for a logged reading", "swings_per_strength", "number", group="push_pull_decision",
+                subjects="factor", low=-10, high=10, **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_booster", "the wider view's booster on a reading: clip(exp(Σβu), ×0.5, ×2), or the wall's "
+                "clock booster", "ratio", "number", group="push_pull_decision", subjects="factor", low=0.5, high=2,
+                lane="push_pull", overlap="direction_all_sources", **DECISION_VALUE),
+    measure_row("push_pull_points", "a reading's points on the channel: strength × weight × booster × swing (positive "
+                "pushes price up, negative pulls it down)", "points", "number", group="push_pull_decision",
+                subjects="factor", blank="the strength's reason; not_formed_yet without a swing", low=-500, high=500,
+                **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_group_points", "a mechanism group's points on the channel after its cap (kind names the "
+                "group)", "points", "number", group="push_pull_decision", subjects="kind", low=-500, high=500,
+                **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_net_points", "the net push on the channel: the groups' points held to ±0.35 swing", "points",
+                "number", group="push_pull_decision", blank="not_formed_yet without a swing or a counting reading",
+                low=-500, high=500, **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_odds_probability", "the chance the window's average price ends up, flat or down (side names "
+                "it), from the net against the average band's spread", "probability", "number",
+                group="push_pull_decision", subjects="side", blank="too_few_sessions without a fit; not_formed_yet "
+                "without a net", low=0, high=1, lane="push_pull", overlap="direction_all_sources", **DECISION_VALUE),
+    measure_row("push_pull_wind_ratio", "how hard the forces blow: |net| ÷ swing, named on the wind scale", "ratio",
+                "number", group="push_pull_decision", blank="not_formed_yet without a net", low=0, high=10,
+                lane="push_pull", overlap="direction_all_sources", **DECISION_VALUE),
+    measure_row("push_pull_centre_points", "where the band's centre moves with the net: the average band to price + "
+                "net, the end band to price + 2T/(T+1) × net", "points", "number", group="push_pull_decision",
+                subjects="band|horizon", lane="push_pull", overlap="direction_all_sources", **DECISION_VALUE,
+                **POINTS_RANGE),
     measure_row("level_distance_from_price_points", "a dealer wall's price less the read price (above is positive)",
                 "points", "number", "range", "level_distances", subjects="level_type", feed="options_scan",
                 blank=SCAN_MISSING + "; feed_missing when no bar has landed", low=-2000, high=2000),
@@ -508,6 +551,25 @@ MEASURES = [
     measure_row("band_coverage_portion", "share of scored windows whose end landed inside the band", "portion",
                 "number", "health", "trust_ledger", low=0, high=1,
                 blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
+    # the promotion ledger's metrics (results_evaluations): one row each per reading weight, nightly
+    measure_row("live_weight_fit", "the slope of the average grade (swings) on a reading's strength over its live "
+                "days: ŵ_live", "swings_per_strength", "number", "health", "promotion_ledger",
+                blank=f"{TOO_FEW_SESSIONS} under two live days with a strength", **EVALUATION_VALUE),
+    measure_row("live_day_type_a_fit", "the day-type fit's a in w = a + c·tn over live days (the Trend)",
+                "swings_per_strength", "number", "health", "promotion_ledger",
+                blank=f"{TOO_FEW_SESSIONS} under two live days with a strength", **EVALUATION_VALUE),
+    measure_row("live_day_type_c_fit", "the day-type fit's c in w = a + c·tn over live days (the Trend)",
+                "swings_per_strength", "number", "health", "promotion_ledger",
+                blank=f"{TOO_FEW_SESSIONS} under two live days with a strength", **EVALUATION_VALUE),
+    measure_row("live_days_count", "live days (events for an event reading) that scored the reading since its recipe "
+                "was frozen", "count", "whole_number", "health", "promotion_ledger", low=0, **EVALUATION_VALUE),
+    measure_row("promotion_e_value", "the running evidence the reading has skill: the product over days of 1 + bet × "
+                "clip(day score ÷ spread, ±1); 20 promotes, the word says where it stands", "odds", "number",
+                "health", "promotion_ledger", low=0, blank=f"{TOO_FEW_SESSIONS} with no live day scored",
+                **EVALUATION_VALUE),
+    measure_row("reversed_e_value", "the same evidence that the reading points the wrong way; 10 demotes", "odds",
+                "number", "health", "promotion_ledger", low=0, blank=f"{TOO_FEW_SESSIONS} with no live day scored",
+                **EVALUATION_VALUE),
 ]
 
 MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
@@ -516,7 +578,7 @@ MEASURES_BY_NAME = {row["measure_name"]: row for row in MEASURES}
 WORD_LISTS = (LANES, FEED_STATUSES, FEED_CADENCES, ROW_ORIGINS, VALUE_ORIGINS, FACT_KINDS, SNAPSHOT_KINDS,
               SNAPSHOT_STATUSES, SLOT_STATUSES, KNOWN_AT_RULES, LOGIN_STATES, BLANK_REASONS, STORAGE_SCOPES, RUN_KINDS,
               DECISION_STATUSES, VALUE_ROLES, OUTCOME_KINDS, LABEL_STATUSES, VALUE_STATUSES, BAND_SIDES, GRADE_WORDS,
-              SUBJECT_KINDS, components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS, components.PUSH_PULL_FACTORS,
+              SUBJECT_KINDS, components.GRADE_START_RULE_NAMES, components.WIDTH_DIALS,
               components.EVALUATION_KINDS, components.EVALUATED_KINDS, components.VERDICTS,
               components.INTERVAL_METHODS, components.BASELINES, components.WALL_TYPES, components.CLAUDE_SIDES,
               components.OPTIONS_CHECK_WORDS)
@@ -590,19 +652,19 @@ def component_rows():
                               "the store's bars", components.WINDOW_RULE_PARAMETERS, version=components.WINDOW_RULE[1]))
     rows.append(component_row("grade_rule", components.GRADE_RULE[0], "a range decision graded against its bands and "
                               "rung", components.GRADE_RULE_PARAMETERS, version=components.GRADE_RULE[1]))
-    rows.extend(component_row(components.PUSH_PULL_FACTOR_KIND, name, components.PUSH_PULL_FACTOR_MEANING[name],
-                              {**components.PUSH_PULL_FACTOR_PARAMETERS[name],
-                               "label": components.PUSH_PULL_FACTOR_LABEL[name],
-                               "answers": components.PUSH_PULL_ANSWER_WORDS[name]})
-                for name in components.PUSH_PULL_FACTORS)
+    from engine.push_pull import reading_specs      # late: the specs reach the store through the forces
+    rows.extend(component_row(components.PUSH_PULL_FACTOR_KIND, spec["name"], spec["evidence"],
+                              {key: value for key, value in spec.items() if key not in ("name", "evidence")},
+                              version=components.PUSH_PULL_RECIPE_VERSION)
+                for spec in reading_specs.spec_rows())
     rows.extend(component_row(components.WIDTH_DIAL_KIND, name, components.WIDTH_DIAL_MEANING[name],
                               components.WIDTH_DIAL_PARAMETERS[name]) for name in components.WIDTH_DIALS)
-    rows.append(component_row("trust_test", components.LEAN_TEST[0], "a lean's Brier skill, added to the earned "
-                              "leans, on live moved windows", components.LEAN_TEST_PARAMETERS,
-                              version=components.LEAN_TEST[1]))
     rows.append(component_row("trust_test", components.DIAL_TEST[0], "a dial's band interval score gain on live "
                               "windows, on top of the dials earned before it", components.DIAL_TEST_PARAMETERS,
                               version=components.DIAL_TEST[1]))
+    rows.append(component_row("trust_test", components.PROMOTION_LEDGER[0], "a push/pull reading's daily score on the "
+                              "average grade from publish + 1 min, its e-value, promotion and demotion",
+                              components.PROMOTION_LEDGER_PARAMETERS, version=components.PROMOTION_LEDGER[1]))
     return rows
 
 

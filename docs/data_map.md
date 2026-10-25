@@ -24,7 +24,7 @@ Under `KAZE_DATA`:
 | `live/latest.json` | the newest live read for the phone (section 9) | the live read job |
 | `logs/read_log.txt` | one line per read-job run (the quiet "market closed" lines too) and crashes | the read job |
 | `logs/nightly_log.txt` | the health line, parity mismatches, warnings, the hourly "not due" lines | the nightly |
-| `logs/by_hand_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`, crashes) | hand runs |
+| `logs/by_hand_log.txt` | one line per hand run (`--at`, `--rebuild-day`, `--backfill-bars`, the push/pull inputs backfill, crashes) | hand runs |
 | `logs/app_log.txt` | one line per request (route, status, milliseconds; never the token or a body) | the app server |
 | `logs/older/<day>/*.gz` | earlier days' logs, kept 14 days | `job_log.py` on the first write of a new day |
 | `nightly_done.txt` | the session the nightly last finished | the nightly |
@@ -46,6 +46,8 @@ gzipped copies of older days read the same way):
 | `options_scan` | `spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl` | 300 s | minute |
 | `options_tape` | `market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl` | 180 s | minute |
 | `futures_bars` | `market/futures_price_bars_by_minute/{day}.jsonl` | 1 day | once_a_day |
+| `watchlist_bars` | `market/watchlist_price_bars_by_minute/{day}.jsonl` (/ES, SPY, SMH, QQQ, $ADD by bar start) | 180 s | minute |
+| `daily_bars` | `market/spx_vix_rates_price_bars_by_day/{symbol}.jsonl` ($SPX, $TNX, ten years) | 2 days | once_a_day |
 | `event_calendar` | `settings/market_event_calendar_by_event.json` | 100 days | hand_kept |
 | `claude_forecast` | `spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl` | 40 min | minute |
 | `news_headlines` | `market/news_headlines_by_article/{day}.jsonl` | 30 min | minute |
@@ -53,7 +55,12 @@ gzipped copies of older days read the same way):
 
 The cadence (`registry.FEEDS`, also in each feed's component parameters) says how often a feed lands: `live` (a tick
 about every second), `minute` (through the session, judged by its age), `once_a_day` (the night's futures, the
-login check) or `hand_kept` (the calendar, extended by hand).
+daily closes, the login check) or `hand_kept` (the calendar, extended by hand). The watchlist bars are the live
+source for /ES (the true open), SPY (the SPY basis and SPY's own bars in the price table), SMH and QQQ (the leader
+surge) and $ADD (breadth's change); the futures file is saved after the close, so only a rebuild of history before
+2026-08-11 reaches it for the true open. The daily bars are one snapshot file refetched after each close: the store
+keeps each day's bar with the fetch moment as its `known_at`, and the feed's row on a read comes from the store, so a
+rebuilt read never claims a fetch it could not have seen.
 
 Notes per feed: the live price is `{price, at, written_at}` (`at` the trade's own time, both ET ISO), rewritten whole at
 most once a second by Mirai's lob-collector while its Schwab stream is up (market hours), so out of hours it simply goes
@@ -93,11 +100,12 @@ same file shape. `engine/store/store.py` shapes, checks and writes rows; `store_
 - `registry_measures`: one measure Kaze may store: name, plain meaning, unit, lane, fact group, subjects, feed,
   blank rule.
 - `registry_components`: one versioned thing: a feed, the login, the collector, the range engine, a lane, a
-  push/pull factor, a dial, a rule, a test.
+  push/pull reading (its recipe row, whose hash the promotion ledger freezes), a dial, a rule, a test.
 - `collect_snapshots`: one cut: a read, a nightly check or a nightly history fit, with slot, lane, origin, attempt,
   commit and health counts.
 - `collect_observations`: one measure x subject at one cut, with its feed's status and age at the cut.
-- `collect_market_prices`: one SPX 1-minute bar with the moment it was known.
+- `collect_market_prices`: one bar with the moment it was known: SPX's and SPY's 1-minute bars (`price_kind = bar`),
+  the daily bars of $SPX and $TNX (`price_kind = day`, priced at the session's close).
 - `collect_calendar_and_events`: one dated fact: a scheduled event or a half-day session, with when the station
   first held it.
 - `reads_decisions`: one decision header: a `range_forecast` per channel, with its window and status.
@@ -105,8 +113,8 @@ same file shape. `engine/store/store.py` shapes, checks and writes rows; `store_
 - `results_outcomes`: one outcome header: a `market_window` (what happened) or a `forecast_grade` (how a decision
   did).
 - `results_outcome_values`: every fact or grade inside an outcome.
-- `results_evaluations`: one trust-ledger row: a weight, a score or a baseline for one factor or dial on one
-  channel.
+- `results_evaluations`: one ledger row: the trust ledger's weight, score or baseline for one dial on one channel,
+  or the promotion ledger's fit, day count or e-value for one push/pull reading.
 
 The registry is seeded from `registry.py` on every open: a measure dropped from the code is dropped from the table
 (refused while rows still use it); a component whose parameters or meaning changed under the same version gets the
@@ -175,15 +183,22 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   $VVIX)
 - breadth: `nyse_advancing_count`, `nyse_declining_count`, `nyse_advancing_portion`
 - leaders, rates, dollar, oil: `fund_change_from_prior_close_pct` (symbol = SPY, RSP, QQQ, IWM, SMH, UUP, USO),
-  `sector_funds_up_count` (of 11), `largest_stocks_up_count` (of 9), `ten_year_yield_annual_pct`,
-  `ten_year_yield_change_basis_points`
+  `fund_change_window_pct` (symbol = SMH, QQQ; window_minutes = 60, from the watchlist bars), `sector_funds_up_count`
+  (of 11), `largest_stocks_up_count` (of 9), `ten_year_yield_annual_pct`, `ten_year_yield_change_basis_points`
+- the true open: `true_open_points` = prior close + /ES's move from the prior session's last bar to its 09:30 bar
+  (the printed open shows only ~77% of the gap); `not_applicable` across a contract roll
+- breadth's change: `breadth_net_change_count` (window_minutes = 60; $ADD now less $ADD an hour earlier)
+- the same-day option book: `same_day_open_interest_contracts` (side, strike_points; strikes within 3% of spot), kept
+  on the first read of the day and the read fifty minutes before the close only
 - overnight: `overnight_high_points`, `overnight_low_points` (symbol = /ES, 18:00 to 09:30)
 - events: `events_left_today_count`, `minutes_until_next_event` (impact = any), `next_event_kind`,
   `does_calendar_cover_day`
 - options tape (30-minute window): `options_trades_last_30_minutes_count`,
   `options_call_premium_last_30_minutes_usd`, `options_put_premium_last_30_minutes_usd`,
   `bullish_portion_of_sided_premium`, `tape_gap_markers_last_30_minutes_count`,
-  `feed_coverage_last_30_minutes_portion`
+  `feed_coverage_last_30_minutes_portion`, `urgent_orders_count` (kind = total, near, far; window_minutes = 30:
+  signed bursts of three strikes one way inside two seconds plus prints of 50 contracts or more, bought calls and sold
+  puts counting up, every trade condition including the legs of complex trades, near = the strike within 0.5% of SPX)
 - headlines (60-minute window): `headlines_last_60_minutes_count` (kind = all)
 - Mirai's Claude forecast: `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes,
   to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes
@@ -196,28 +211,33 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `typical_swing_points` (horizon), `options_implied_swing_points` and `options_over_tape_swing_ratio` (horizon),
   `path_up_points`, `path_down_points`, `trend_straightness_ratio` (window_minutes = 15, 30, 60),
   `level_distance_from_price_points` (level_type; the wall less the read price, a width input with no dial yet)
-- push/pull factors (section 8): `push_pull_lean_probability` and `push_pull_factor_text` (factor = `price_trend`,
-  `straightness`, `breadth`, `big_tech_vs_rest`, `options_buyers`, `yield_change`, `mirai_claude`)
+- push/pull readings (section 8): `push_pull_raw_value`, `push_pull_z_score`, `push_pull_strength` (factor = the
+  reading's name in `reading_specs.py`) and `push_pull_context_input` (kind = trend_ness and its three parts,
+  path_straightness, dealer_gamma, rates_tide, vix_level, time_of_day, down_day)
 - nightly check: `reads_compared_count`, `values_mismatched_count`, `tolerated_mismatches_count`,
   `rebuild_identical_portion`
 - nightly history fit: `stretch_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon),
   `fit_sessions_count`, `fit_windows_count`, `average_price_shrink_ratio` (horizon)
 - market window (`results_outcome_values`): `grade_start_price_points`, `grade_start_bar_at`,
   `grade_start_rule_name`, `end_price_points`, `average_price_points`, `high_price_points`, `low_price_points`,
-  `end_move_points`, `average_move_points`, `high_move_points`, `low_move_points`, `minutes_covered_count`,
-  `stayed_inside_rung` (rung_points = 5, 10, 15)
+  `end_move_points`, `average_move_points`, `high_move_points`, `low_move_points`,
+  `average_move_from_publish_points` (the window's average from its second minute: the push/pull readings' grade),
+  `minutes_covered_count`, `stayed_inside_rung` (rung_points = 5, 10, 15)
 - forecast grade (`results_outcome_values`): the three grade-start measures again, `was_inside_band` and
   `band_miss_points` (band = 80, average_80), `stayed_inside_rung` (the channel's own rung), `band_used_ratio`
   (band = 80; side = upper, lower)
-- trust ledger (`results_evaluations`): `trust_weight_portion`, `brier_skill_portion`,
-  `interval_score_gain_points`, `band_coverage_portion`
+- trust ledger (`results_evaluations`): `trust_weight_portion`, `interval_score_gain_points`,
+  `band_coverage_portion`
+- promotion ledger (`results_evaluations`): `live_weight_fit`, `live_day_type_a_fit`, `live_day_type_c_fit`,
+  `live_days_count`, `promotion_e_value`, `reversed_e_value`
 
 Every measure's lane and fact group are checked when the registry loads: one fact may reach the `range` lane (how
-far price travels) or the `push_pull` lane (which way: the factors that push price up or pull it down), never both.
-Push and pull only ever describe price: a factor pushing it up or pulling it down. How far price travels is the
-range, never a push or a pull. Schema step 11 moved every stored row onto these words.
-The 12:35:59 read of 2026-10-16 wrote 145 observations as a rebuilt read (147 live, with the two Schwab-login feed
-rows) and 123 decision values.
+far price travels) or the `push_pull` lane (which way: the readings that push price up or pull it down), never both.
+Push and pull only ever describe price: a reading pushing it up or pulling it down. How far price travels is the
+range, never a push or a pull. Schema step 11 moved every stored row onto these words; step 12 dropped the old seven
+factors' lean rows for the pipeline's own rows.
+The 12:35:59 read of 2026-10-16 wrote 200 observations as a rebuilt read (202 live, with the two Schwab-login feed
+rows) and 270 decision values.
 
 ## 5. The range recipe
 
@@ -259,12 +279,11 @@ count real minutes.
    decision tagged `variant_name = owner_rule` (parent = the base decision) applies the Fed dial in full (applied
    2.6 with trust 1.0) to both bands, so the grader scores the band with and without it. No FOMC day in the store
    was known in time (the calendar was built 2026-09-27), so rebuilt reads before that date never carry the variant.
-8. **Direction** (not the range: section 8's push/pull factors) = `chance_up_if_moves_probability` = 0.5 + the
-   sum over the factors with a lean of share x (lean - 0.5), each an equal share (1 / the count), with
-   `trust_weight_applied_portion` the sum of the shares (1, or 0 when no factor has a lean and the call is 0.5 with
-   the words `even, no factor has a lean`). Each factor's lean is stored on the decision too, with its share. The
-   factors are built after the band in their own step (`engine/push_pull/push_pull_read.py`): if that step crashes
-   the read, band and decisions still land, the push/pull block is empty and the read carries
+8. **Which way** (not the range: section 8's push/pull readings) is worked out after the band in its own step
+   (`engine/push_pull/push_pull_read.py`): every reading's points on the channel, the net, the odds of up, flat and
+   down on the average grade, with `chance_up_if_moves_probability` = up ÷ (up + down) and
+   `trust_weight_applied_portion` 1 while any reading counts (0 with the words `even, no reading counts yet`). If
+   that step crashes the read, band and decisions still land, the push/pull block is empty and the read carries
    `snapshot_status_reason = push_pull_failed`.
 
 **One read worked through: 2026-10-16, the 12:35 slot, cut 12:35:59.** Price 7,691.03 (the 12:35 bar's close),
@@ -288,12 +307,9 @@ count real minutes.
 | 8 closing ratio / release ratio | 1.358231 / 1.391491 | 1.273543 / 1.39923 | 1.130402 / 0.87066 |
 
 The raw dials that read: acceleration 1.022462 (fast over slow), options vs tape 1.019466 (1.049378 ^ 0.4); the Fed,
-release and closing dials were at rest (1.00); the raw product 1.042365 was stored and applied at 1.00. The seven
-leans (step 8): price trend -53 since close -> 0.300, straightness 0.13 net -5.05 -> 0.474, breadth 50% advancing ->
-0.503, QQQ -1.4% vs RSP -> 0.301, options buyers 50% -> 0.500, yield +3.8 bp -> 0.628, Claude 28.5 / 45.5 / 26.0 ->
-0.523; direction 0.461455, down 54% (the live read said 0.5: until 2026-10-23 no factor counted before the ledger
-earned it weight). Every number here is on the phone's Steps screen for that read, and
-`--at "2026-10-16 12:35:59"` reproduces them to six decimals.
+release and closing dials were at rest (1.00); the raw product 1.042365 was stored and applied at 1.00. The
+push/pull readings of the same read are worked through in section 8. Every number here is on the phone's Steps screen
+for that read, and `--at "2026-10-16 12:35:59"` reproduces them to six decimals.
 
 **Where it lands.** The readings (speeds, swings, the options check, the path moves, the wall distances) are
 observations on the read's own snapshot. Each read then writes one `reads_decisions` row per channel
@@ -303,8 +319,8 @@ ok / clipped / blind with its reason) and its `reads_decision_values`: `band_cen
 used, `stretch_multiplier`, `stretch_recipe_name`, `fit_sessions_count`, `fit_windows_count` and `fit_snapshot_id`,
 `band_half_width_points`, `band_low_points` and `band_high_points` (band = 80 and average_80),
 `chance_stays_inside_rung_probability` (horizon, rung_points), `closing_window_multiplier`,
-`release_window_multiplier` and `width_cap_multiplier` (horizon), the five dials and `all_dials`, every factor's lean
-and the direction. A read with fewer than two bars is `blind` (`speed_not_formed`, values blank `not_formed_yet`);
+`release_window_multiplier` and `width_cap_multiplier` (horizon), the five dials and `all_dials`, then the push/pull
+values of section 8. A read with fewer than two bars is `blind` (`speed_not_formed`, values blank `not_formed_yet`);
 one with no fit known at its cut is `blind` (`no_fit_known_at_cut`, values blank `too_few_sessions`); one served by
 a thin fit stays `ok` with `decision_status_reason = thin_fit_<n>_of_60`. The snapshot, its observations, its
 decisions and their values are written in one transaction; if the range step itself fails, the snapshot still lands
@@ -320,7 +336,9 @@ fewer than 60 full sessions has `snapshot_status = thin` (reason `<n>_of_60_sess
 so. The nightly stores the session's bars before it fits, then writes a rebuilt fit for every stored session that
 lacks one, then the live fit for the next trading day unless a fit with the same or newer data already serves it. A
 read uses the newest fit with `trade_date <= its day` and `known_at <= its cut`, so a fit never includes the read's
-own day; `--rebuild-day` and `--at` use the same rule. On a fresh store the order is `--backfill-bars`, then
+own day; `--rebuild-day` and `--at` use the same rule. `engine/jobs/backfill_push_pull_inputs.py` runs the daily bars,
+then every session Mirai holds in order (its SPX and SPY bars, every read rebuilt, its windows settled), so the
+push/pull inputs and each read's same-clock baselines exist for history. On a fresh store the order is `--backfill-bars`, then
 `--nightly` (the fits), then any rebuild. The time-of-day ratios and the cap (section 8) come from the same history,
 computed at read time; nothing is written on the fit snapshot for them.
 
@@ -375,63 +393,100 @@ rules the registry names and versions (grade-start rule `at_read@1`, outcome rul
   the rebuilt day's windows the same way. The window and its grades are written in one transaction, never replaced
   except with their rebuilt read.
 
-## 8. Push/pull factors, dials and the trust ledger
+## 8. Push/pull readings, dials and the two ledgers
 
 Two questions, two lanes. The **range** (how far price travels over the window) is the band of sections 5 to 7;
 the width dials below are the only things that may widen it, and each starts at zero weight, changing the band only
 after the trust ledger has written it a weight from live graded windows under a test fixed in advance. **Push and
-pull** (which way) is the tug-of-war of the factors: each one, read by read, either pushes price up or pulls it down,
-and every factor with a lean counts now at an equal share; the ledger scores each one nightly as evidence.
+pull** (which way) is the tug-of-war of the readings: each one, read by read, is a force that pushes price up or pulls
+it down by a number of points; their sum under the caps is the net push, and the net sets the odds of up, flat and
+down. The sheet `kaze_review_data/print/Kaze-push-pull-sheet-v9.pdf` is the design this section implements.
 
-**Push/pull factors** (which way; `engine/push_pull/push_pull_read.py`). Each read turns inputs already on its
-snapshot into a value in words (`push_pull_factor_text`, the exact figure), a short answer from the factor's fixed
-words (the phone's, never stored), a lean (`push_pull_lean_probability`): the chance that the move is up if price
-moves, 0 to 1, and its side (the phone's, never stored): `push` above the even zone, `pull` below it, `even` inside
-it. Share factors lean by their share; signed factors lean by a smooth squash, 0.5 + 0.2 x tanh(value / scale), so
-they never lean past 0.3 or 0.7 (the scales are in `components.LEAN_SCALE`):
+**The readings** (`engine/push_pull/reading_specs.py`: one row per reading; `engine/push_pull/forces/`: one function
+per reading, one file per mechanism group, each saying only what it measures). By who is trading:
 
-| Factor | Value in words | Lean |
-|---|---|---|
-| `price_trend` | SPX move since the prior close, points | squash of that move, scale 10 points |
-| `straightness` | net move over total path in the last 30 minutes | 0.5 + 0.2 x straightness, signed by the net move |
-| `breadth` | NYSE advancers over advancers plus decliners | that share |
-| `big_tech_vs_rest` | QQQ change less RSP change since the prior close | squash of the difference, scale 0.5 points |
-| `options_buyers` | share of sided same-day option premium that was bullish | that share |
-| `yield_change` | 10-year yield change since its prior close, basis points | squash, scale 5 bp, positive leans up |
-| `mirai_claude` | Mirai's Claude 30-minute up over up plus down | that share (a raw input, not Kaze's own channel) |
+| Group | Reading (`factor`) | Raw value, unit | Shape | Speaks | Status, history size |
+|---|---|---|---|---|---|
+| A own path | `gap` | true open − prior close, points | steady | 10:05–15:40 | earning, +0.047 |
+| A | `trend_since_open` | price − true open, points | steady | 10:00–15:40 | earning, w = −0.37 + 0.59·tn |
+| A | `give_back` | the trend's z, clipped ±3 | clipped | 15:45–close, full days | live, −0.111 (⅓ = −0.037) |
+| A | `fresh_burst` | last 15 min − 15 min of the day's pace, points | steady | 10:00–close | earning, −0.008 |
+| A | `fade_15_00` | SPX 15:00 − 14:30, points | reversing | 15:00–15:45 | earning, −0.16 |
+| A | `gap_across_average` | averages (50/100/200-day) the gap crossed, signed against the gap | steady | 09:35–10:00 | logged |
+| H heavyweights | `leader_surge_fade` | SMH 60-min % − QQQ 60-min %; 0 within 0.25 swing of the high/low | reversing | 10:30–15:40 | earning, +0.10 |
+| H | `grind_at_extreme` | −side × breadth's 60-min change, issues; 0 away from an extreme or after a fast approach | one-sided | 10:30–15:40 | earning, +0.39 |
+| B dealers | `pin_to_centre` | gamma-weighted centre of the same-day strikes within 1% − price, swings | steady | 45→20 min before close | live, shared 0.525 (⅓ = 0.175) |
+| B | `dealer_drift` | bn $ dealers must trade as the book decays to expiry | steady, usual = same-clock median | 45→20 min before close | live, shared with the pin |
+| B | `option_wall_untested` | nearest untested wall's share ÷ (1 + distance in swings), signed towards it | steady, clock booster √(195 ÷ min left) | 10:00 → 50 min before close | earning, +0.06 |
+| C catch-up | `spy_basis` | SPY-implied SPX − SPX on the same bar, less today's median, points | catch-up (points) | 09:40–15:45 | logged |
+| D option bets | `urgent_orders` | signed bursts + 50-lots over 30 min, every trade condition | steady | 10:00–close | live, −0.25 (⅓ = −0.083) |
+| D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
+| F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min) | steady | each answer, ≤ 40 min | earning, +0.06 |
 
-The phone asks each factor a plain question and shows its answer and side; the words live in `components.py`
-(`PUSH_PULL_FACTOR_LABEL`, `PUSH_PULL_ANSWER_WORDS`) and travel on the factor's registry row with the thresholds. A
-lean within 0.03 of even (0.47 to 0.53, `EVEN_LEAN_ZONE`) answers Flat or Even, else the factor's sign picks the side;
-that is a move under 1.5 points, a QQQ-over-RSP gap under 0.08 points, a yield change under 0.8 bp. The path is
-Choppy inside that even zone; leaning one way it is Steady at a straightness of 0.4 or more (`STEADY_STRAIGHTNESS`:
-the net move at least 40% of the path walked; a random 30-minute walk scores about 0.18), else Drifting.
+A reading outside its speak window is `not_applicable`; a gate shut (the surge at an extreme, the grind away from
+one) reads 0, a value, never a blank; a missing input is blank with that input's reason, never 0.0. **Status:**
+`live` counts in the net from a third of its history size; `earning` counts from 0 and grows only as live days vouch
+for it; `logged` is measured and stored but never joins the net (rare events and the SPY catch-up Kaze cannot act on
+in time). The phone shows every reading, logged ones dimmed.
 
-| Factor | Question | Answers |
-|---|---|---|
-| `price_trend` | Since Yesterday | `Up 37 Pts`, `Down 12 Pts` (whole points), `Flat` |
-| `straightness` | Path | `Steady Up`, `Steady Down`, `Drifting Up`, `Drifting Down`, `Choppy` |
-| `breadth` | Stocks Rising | the share, `45%` |
-| `big_tech_vs_rest` | Big Tech | `Ahead`, `Behind`, `Even` (against the average stock) |
-| `options_buyers` | Options Bets | `More Calls`, `More Puts`, `Even` |
-| `yield_change` | Bond Rates | `Rising`, `Falling`, `Flat` |
-| `mirai_claude` | Mirai's Claude | `Leans Up`, `Leans Down`, `Even` |
+**How one reading becomes points** (every step stored, `engine/push_pull/push_pull_read.py`):
 
-A factor whose input is blank is blank with that input's reason, no answer and no side, never 0.5 pretending to be
-neutral, and its feed stamp is the input's. **Direction** per channel = 0.5 + the sum of share x (lean - 0.5) over
-the factors with a lean, each an equal share, the shares summing to 1 (`direction_all_sources`): the average lean,
-the net of the pushes and pulls. The ledger's lean test still scores every factor nightly; its weights no longer gate
-the call.
+1. **Raw value** `push_pull_raw_value` (factor): the force's answer in its own unit (`read_facts.py` is all a force may
+   look at: the read's observations, its bars and SPY's known by the cut, the true open, the day's high and low, the
+   same-day option book the day's reads kept, the daily closes; so every force is point-in-time by construction).
+2. **How unusual** `push_pull_z_score` = (raw − usual) ÷ spread (`same_clock_baseline.py`): the history is the
+   reading's own stored raw values at the same clock ±15 minutes over the past 60 sessions, each session counting
+   once with a half-life (30 sessions; 20 for the heavyweights), usual 0 for a directional reading or the weighted
+   median for one with a built-in level (the drift), spread = the weighted median absolute deviation × 1.4826 held
+   above the reading's floor; under 10 sessions of history the z is blank `too_few_sessions`. The give-back reads the
+   trend's history.
+3. **Strength** `push_pull_strength` (`strength_shapes.py`): steady = sign(z) × tanh(max(0, |z| − 0.5)), nothing
+   inside the wiggle, saturating towards ±1; reversing = −steady; one-sided = side × tanh(max(0, z − 0.5)); clipped =
+   z held to ±3 (the give-back's size grows with the day); catch-up = the raw value in points, no z.
+4. **Weight** `push_pull_weight` (factor, on the decision; `earned_weights.py`): w = (h·ŵ_hist + n·ŵ_live) ÷
+   (h + n + 40), swings of points per unit strength, with h = 20 days for a live reading (so day one is a third of
+   the tested size) and 0 for an earning one, n the live days and ŵ_live the promotion ledger's fit, as known at the
+   cut. The Trend's weight is the day-type pair a + c·tn, blended the same way coefficient by coefficient. The pin
+   and the drift share one weight (`pin_and_dealer_drift`): the sum of their strengths × one weight, one day count.
+5. **Context booster** `push_pull_booster` (`context_boosters.py`): the wider view, which adds no points and only
+   sizes them: b = clip(exp(Σ β_j u_j), ×0.5, ×2) over the context inputs the reading's spec names, every β 0 at
+   launch (×1), learned later; the wall's fixed clock booster √(195 ÷ minutes left). The context inputs are stored
+   per read as `push_pull_context_input` (kind): `trend_ness` (0–1: the same-clock rank of the mean of three
+   same-clock ranks, `straightness_since_open`, `side_share_since_open`, `closeness_to_extreme`, eased in by a ramp
+   from 0 at 10:00 to 1 at 12:30, 0.5 before), `path_straightness` (the 30-minute path), `dealer_gamma` (+1 positive,
+   −1 negative), `rates_tide` (the 10-year yield's 20-session change as a z against 250 sessions, floor 5 bp),
+   `vix_level`, `time_of_day` (share of the session gone), `down_day` (±1 against the prior close).
+6. **Points** `push_pull_points` (factor, per channel) = strength × weight × booster × the channel's swing; a catch-up
+   reading's weight is a plain ratio on its points. **Group sums** `push_pull_group_points` (kind = the group's name):
+   a group nobody has promoted yet is held to ±0.15 swing; the **net** `push_pull_net_points` is the groups' sum held
+   to ±0.35 swing (when a cap binds the groups scale down together, so the tug bar still sums to the net).
+7. **Odds** `push_pull_odds_probability` (side = up, flat, down) on the window's average price: σ_G = swing × the
+   average band's stretch ÷ 1.2816, the flat zone edge = the channel's rung × average stretch ÷ end stretch, P(up) =
+   Φ((net − edge) ÷ σ_G), P(down) = Φ((−net − edge) ÷ σ_G), flat the rest; `chance_up_if_moves_probability` = up ÷
+   (up + down). **Wind** `push_pull_wind_ratio` = |net| ÷ swing: `calm` under 0.03, `light_air` under 0.10, `breeze`
+   under 0.20, else `strong_breeze`, a dot for each of 0.03, 0.10, 0.20 and 0.30 reached. **Centres**
+   `push_pull_centre_points` (band, horizon): the average band's centre moves to price + net, the end band's to
+   price + 2T/(T + 1) × net (1.94 at 30 minutes).
 
-**Points and the wind** (the phone's push/pull card; `components.WIND_LEVELS`, `WIND_DOT_STEPS`). A factor's push on
-a channel in points is its share x (lean - 0.5) x 2 x the channel's swing: positive pushes price up, negative pulls
-it down, and the points sum to the call (net = (chance - 0.5) x 2 x swing, so chance = 0.5 + net / (2 x swing)). On
-the 16:35:59 UTC read of 2026-10-23 the 30-minute swing was 5.68 and the net -0.09 points (down 51%). The wind is
-the net over the swing: `calm` under 0.03, `light_air` under 0.10, `breeze` under 0.20, else `strong_breeze`, with a
-dot for each of 0.03, 0.10, 0.20 and 0.30 reached. Between reads the phone moves one factor, `price_trend`, with the
-live SPX price by the rule the feed sends with it (the same squash of the move from the prior close), and sums the
-points again, so the card's net, wind and odds follow the tape; every other factor changes only with a read. The
-read's stored call stays what the read said.
+Between reads the phone moves one reading, `trend_since_open`, with the live SPX price by the rule the feed sends
+with it (its true open, usual, spread, weight, booster and shape), re-sums the net under the cap and recomputes the
+odds with the engine's σ_G and edge, so the card follows the tape; every other reading changes only with a read.
+The read's stored call stays what the read said.
+
+**The promotion ledger** (`results_evaluations`, `engine/grade/promotion_ledger.py`; judge `promotion_ledger@1`,
+`evaluated_kind = push_pull_factor`, `evaluated_name` the weight's name, one run a night after the trust ledger,
+`baseline_name = no_skill`) scores every reading on live days only, on the headline channel, against the window's
+**average from publish time + 1 minute** (`average_move_from_publish_points`: the window's average from its second
+minute, the first a reader could act on, since Kaze publishes 30–55 s after the cut and the bar lands ~62 s late).
+A day's score is the mean over its live reads of strength × that grade in swings; the evidence is an e-value, the
+product over days of 1 + 0.25 × clip(score ÷ the spread of the earlier days' scores, ±1), which under no skill never
+grows in expectation. `promotion_e_value` ≥ 20 with ≥ 30 days (≥ 15 for an event reading) is `promoted` (the word in
+`metric_text`; its group leaves the young cap); `reversed_e_value` (the same evidence for the opposite sign) ≥ 10 is
+`demoted`; else `earning`. `live_weight_fit` is the slope of the grade on the strength over those days (ŵ_live),
+`live_day_type_a_fit` / `live_day_type_c_fit` the Trend's pair, `live_days_count` n. The recipe is frozen by its hash
+(`detail_text` = the reading's `registry_components` parameters hash; a pair's is the hash of both): a changed recipe
+makes a new revision row, and the ledger's clock restarts after the last run written under the old hash. The reads
+look the ledger up by their cut (`store_queries.push_pull_ledger_known`). `--trust` prints both ledgers.
 
 **Width dials** (`components.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`; the phone
 calls them Band Wideners: Fed Decision Day, Data Release In The Window, Last 15 Minutes Of The Day, Price Speeding Up,
@@ -459,31 +514,27 @@ lands in (blank `too_few_sessions` while the history holds no such window); `wid
 (`level_distance_from_price_points`) are stored as width inputs with no dial: a dial arrives with its rule.
 
 **The trust ledger** (`results_evaluations`, `engine/grade/trust.py`) is written by the nightly after the session's
-windows are settled, for the next session: one row per judged thing x channel x metric x slice, 138 rows a night.
+windows are settled, for the next session: one row per dial x channel x metric x slice.
 `evaluation_id` is the run (`trust_ledger|<data-through day>|<judge>@<version>`); `evaluation_kind` is
 `trust_weight` (the weight row) or `skill_metric`; `evaluated_kind`, `evaluated_name`, `evaluated_version` name the
-factor or dial (`push_pull_factor` / `width_dial`, version 1); `judge_name` and `judge_version` the test
-(`lean_brier_test@1`, `dial_band_test@2`); `signal_lane` and `overlap_group_name` are read off the measure the weight
+dial (`width_dial`, version 1; the promotion ledger's rows say `push_pull_factor`); `judge_name` and `judge_version`
+the test (`dial_band_test@2`; `promotion_ledger@1`); `signal_lane` and `overlap_group_name` are read off the measure the weight
 moves; `horizon_name` the channel and `graded_price_measure` `end_price`; `slice_key` is `whole`, `dial_on` /
 `dial_off` on the coverage rows, `fake_baseline` on the control row; `metric_name` a `trust_ledger` measure and
 `metric_value` its value (`blank_reason` `too_few_sessions` when there is none); `metric_text` holds the verdict:
-`passed`, `held`, `held_down`, `failed` or `too_few_sessions`; `metric_interval_low` / `metric_interval_high` with
-`interval_method = bootstrap_by_day`; `baseline_name` (`earned_leans` or `undialed_band`) and
+`passed`, `held`, `held_down`, `failed` or `too_few_sessions` (the promotion ledger's `promoted`, `earning`,
+`demoted`); `metric_interval_low` / `metric_interval_high` with `interval_method = bootstrap_by_day`; `baseline_name`
+(`undialed_band`, or the promotion ledger's `no_skill`) and
 `baseline_metric_value`; the sample columns (`sessions_count`, `independent_windows_count` = rows x 5 / horizon
 minutes, `rows_count`, `live_frozen_rows_count`, `data_from_trade_date` / `data_through_trade_date`); `trade_date`
 the session the row is in force for and `applies_from_at` its open; `test_family_name` the judge and
-`test_family_size_count` the real family (21 lean tests, 15 dial tests); `detail_text` says why.
+`test_family_size_count` the real family (15 dial tests); `detail_text` says why.
 
 - **The sample is live only:** first-built live reads' base decisions, `run_kind = live`, whose grade counts under
   the current rule, through the session just graded, with their window's end move. Replayed history never counts,
   a day is one vote (every interval is the day-resampled 95% interval of the day means, 20,000 draws, seed 1, the
   pass test's machinery), and a run's rows are judged in the registry's order, each test on top of what earned
   weight earlier in the same run.
-- **Leans** (`lean_brier_test@1`), factors in registry order: over the windows that moved more than half the
-  channel's rung (2.5 / 5 / 7.5 points) and had the lean, the baseline is the call built from the factors already
-  earned (0.5 while none has), and the candidate is that call moved by (lean - 0.5) times the room left under 1;
-  each day scores 1 - (Brier with the lean added / Brier of the baseline) (`brier_skill_portion`, mean of the day
-  means); the weight is the interval's low end floored at 0 times the room left, so leans never stack past 1.
 - **Dials** (`dial_band_test@2`), in the registry's order, each on top of the dials earned before it: over the
   windows the dial touches (raw not 1.00), the end band's half-width is rebuilt from swing x stretch with the earned
   dials, capped (the Fed outside the cap), with and without this dial's raw; each window scores the band's interval
@@ -493,8 +544,7 @@ the session the row is in force for and `applies_from_at` its open; `test_family
   at full strength. A Claude width call, when built, will be scored last.
 - **What a pass needs:** 20 live sessions in the test's sample (the Fed dial, a pre-registered exception, 20 Fed
   windows over at least 5 FOMC sessions); the interval's low end above 0; the score above the 95th percentile of 200
-  fake baselines (seed 1, written on the `fake_baseline` row): for a lean, the same test with each day's leans
-  handed to another day's windows; for a dial, the same test with each day's touched windows handed whole to
+  fake baselines (seed 1, written on the `fake_baseline` row): the same test with each day's touched windows handed whole to
   another day, as a same-size random set of that day's windows matched on the clipped flag and carrying the first
   day's raws (so a constant raw cannot reproduce the test itself); and the same verdict on the two nightly runs
   before (the hold rule: the first and second passing runs are `held` with weight 0, the third `passed` with the
@@ -507,8 +557,8 @@ the session the row is in force for and `applies_from_at` its open; `test_family
 - A rerun of the same run (same judge, same data-through day) replaces its rows in one transaction. The read job
   applies a dial only at a weight the ledger holds (the newest weight per component and channel in force for the
   read's session or earlier and known by the cut) and copies every weight it applied onto the value it moved
-  (`trust_weight_applied_portion`; a factor's equal share goes there too). `--trust` prints the newest ledger per
-  factor, dial and channel.
+  (`trust_weight_applied_portion`). `--trust` prints the newest trust ledger per dial and channel, then the
+  promotion ledger per reading.
 
 ## 9. The phone feed
 
@@ -534,13 +584,7 @@ replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `c
 
 `range`: `price`, `read_at`, `minutes_left`, `speed`, `speed_fast`, `speed_slow`, `straddle`, `releases` (the day's
 timed economic releases known at the cut, each `name` and `at`), `fed_decision_at` (the day's Fed decision known at
-the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (one entry per factor in
-the registry's order: `label`, the plain question the phone asks; `name`; `answer`, the short answer from the factor's
-fixed words, null when blank; `value`, the exact figure in words, shown when the row is tapped; `lean`; `side`
-(`push`, `pull`, `even`, null when blank); `reason` when blank; `weight_by_channel`, the factor's share;
-`points_by_channel`, its push in points, null when blank or the channel has no swing; `live`, null except on
-`price_trend`: `follows` (`spx_live_price`), `since_price` (the prior close), `tilt`, `scale`, `even_zone` and
-`words`, the rule the phone moves it by between reads; the list is empty when the push/pull step crashed), `wind`
+the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (the readings: `readings`, one entry per reading in `reading_specs` order with `name`, `label`, `group` (the letter), `status` (live / earning / logged), `in_the_net`, `speaks`, `raw` and `raw_blank`, `unit`, `z` and `z_blank`, `strength`, `weight`, `booster`, `points_by_channel`, `side` (`push`, `pull`, `even`, null without points) and `live`, the rule the phone moves the trend by between reads (`since_price` the true open, `usual`, `spread`, `weight`, `booster`, `shape`, `wiggle`); `context`, the context inputs by kind; `groups`, letter to name; `channels`, per channel `net`, `groups` (points per group after the caps), `odds` (`up`, `flat`, `down`, `sigma`, `edge`), `wind` (`ratio`, `level`, `dots`, `side`), `centres`, `chance_up_if_moves`, `weight_applied`, `text`; the readings list is empty when the push/pull step crashed), `wind`
 (`levels`, each `[name, below]` with the last `below` null, and `dot_steps`), `channels` and `windows`.
 
 `channels` is keyed `5_minutes` / `30_minutes` / `60_minutes`; each carries `swing`, `stretch`, `average_stretch`,

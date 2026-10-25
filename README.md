@@ -5,8 +5,8 @@ A range-first SPX forecast and the Android app that shows it.
 Every 5 minutes Kaze reads the market (the :05 and :35 reads are the 30-minute
 calls), measures how fast the index is moving right now and turns that into the
 range it should end inside: today's tape sets the number, history only shapes it,
-and which way it goes is the tug-of-war of push/pull factors: each one, read by read, pushes price up or pulls it
-down, and the direction call is their average.
+and which way it goes is the tug-of-war of push/pull readings: each one, read by read, is a force that pushes price
+up or pulls it down by so many points, and their net sets the odds of up, flat and down.
 
 ## Layout
 
@@ -16,13 +16,16 @@ down, and the direction call is their average.
   `collect.py` builds one read from them.
 - `engine/store/`: the SQLite store. `store.py` shapes and writes rows, `store_queries.py` reads them,
   `store_schema.py` holds the tables and the numbered schema steps, `registry.py` lists every measure and word,
-  `components.py` holds the recipe's numbers (dials, factors, trust tests, rules), `backup.py` the nightly copy.
+  `components.py` holds the recipe's numbers (dials, the wind scale, the ledgers' rules), `backup.py` the nightly copy.
 - `engine/range/`: the range engine, how far price travels. `range_fit.py` fits the history, `range_read.py` works
   one read out, `width_dials.py` holds the dials (the Band Wideners).
-- `engine/push_pull/`: which way. `push_pull_read.py` holds the push/pull factors (each a lean: above even it pushes
-  price up, below it pulls price down) and the direction call.
-- `engine/grade/`: the grader (`grade.py`: outcomes, grades, the scoreboard), the parity check (`parity.py`) and the
-  trust ledger (`trust.py`: what has earned weight, from live graded windows only).
+- `engine/push_pull/`: which way. `reading_specs.py` lists every reading (one row each), `forces/` measures them (one
+  function per reading, one file per mechanism group), `same_clock_baseline.py`, `strength_shapes.py`,
+  `context_boosters.py`, `earned_weights.py` and `net_and_odds.py` are the pipeline's steps, `push_pull_read.py`
+  runs every reading through them and stores each step, `read_facts.py` is all a force may look at.
+- `engine/grade/`: the grader (`grade.py`: outcomes, grades, the scoreboard), the parity check (`parity.py`), the
+  trust ledger (`trust.py`: which dials have earned weight, from live graded windows only) and the promotion ledger
+  (`promotion_ledger.py`: each push/pull reading's live score, e-value, promotion and demotion).
 - `engine/feed/`: the live feed the phone reads after every read (`live_feed.py`).
 - `engine/jobs/`: the read job (`read_job.py`: the 5-minute read, the nightly and the hand commands), the job log,
   the three launchd jobs (the read, the nightly, the phone server), their runner and installer.
@@ -35,9 +38,9 @@ down, and the direction call is their average.
 - `checks/`: git hooks that block secrets from ever reaching this repo.
 
 Every window is graded from the read: did the end land inside the band, did the running average, did price ever
-leave plus or minus X. Seven push/pull factors count at an equal share in the direction call; five width dials sit
-on the board at weight 0, and the nightly trust ledger moves a dial's weight only after 20 live sessions pass a test
-fixed in advance. `docs/data_map.md` has the recipe,
+leave plus or minus X. The push/pull readings count by earned weight (a live reading starts at a third of its
+tested size, an earning one at 0, and live days move both); five width dials sit on the board at weight 0, and the
+nightly trust ledger moves a dial's weight only after 20 live sessions pass a test fixed in advance. `docs/data_map.md` has the recipe,
 the grades, the ledger's rules and the phone's data contract; `app/README.md` says what runs where for the phone.
 
 ## Setup
@@ -60,15 +63,17 @@ points to.
     python3 -m engine.jobs.read_job --at "2026-10-16 12:35:59"   # rebuild one past moment (New York time)
     python3 -m engine.jobs.read_job --rebuild-day 2026-10-16     # rebuild every 5-minute read of a session
     python3 -m engine.jobs.read_job --backfill-bars              # load every session's SPX bars Mirai holds
+    python3 -m engine.jobs.backfill_push_pull_inputs [--from D] [--to D]   # daily bars, SPY bars, every read rebuilt
     python3 -m engine.jobs.read_job --nightly                    # rebuilds, fits, grades, ledger, parity, backup
     python3 -m engine.jobs.read_job --scoreboard [2026-10-16]    # grades per session and channel, last 20 pooled
     python3 -m engine.jobs.read_job --pass-test                  # the band's walk-forward coverage test
-    python3 -m engine.jobs.read_job --trust                      # the trust ledger: verdicts and weights
+    python3 -m engine.jobs.read_job --trust                      # the trust and promotion ledgers
     python3 -m app.server.app_server                             # the phone's server by hand (launchd: com.kaze.app)
     engine/jobs/install_jobs.sh                                  # install the three launchd jobs
 
 On a fresh store run `--backfill-bars`, then `--nightly` (it writes the history fits every read's band needs), then
-`--rebuild-day` for each past session you want graded.
+`backfill_push_pull_inputs` (it rebuilds every past session in order, so each read's same-clock baselines see the
+reads before it) or `--rebuild-day` for each past session you want graded.
 
 ## Operations
 

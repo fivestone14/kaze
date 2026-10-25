@@ -4,7 +4,7 @@
 # integer rowid and keep one unique index on the design's own grain.
 from engine.store import components, registry
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -361,10 +361,28 @@ def schema_step_11(conn):
     rebuild_tables(conn, ALL_TABLES)
 
 
+# Step 12's retired words: the old seven factors' lean rows, the lean test and its baseline word.
+RETIRED_LEAN_MEASURES = ("push_pull_lean_probability", "push_pull_factor_text")
+RETIRED_LEAN_TEST = "lean_brier_test"
+
+
+def schema_step_12(conn):
+    """The old seven push/pull factors' lean rows, their component rows and the lean test's ledger rows dropped: the
+    push/pull pipeline stores every step of every reading instead (push_pull_raw_value and on). The ledger table is
+    rebuilt at the code's text, since the lean test's baseline word left its list."""
+    holes = ", ".join("?" for _ in RETIRED_LEAN_MEASURES)
+    for table in ("collect_observations", "reads_decision_values"):
+        conn.execute(f"DELETE FROM {table} WHERE measure_name IN ({holes})", RETIRED_LEAN_MEASURES)
+    conn.execute("DELETE FROM results_evaluations WHERE judge_name = ?", (RETIRED_LEAN_TEST,))
+    conn.execute("DELETE FROM registry_components WHERE component_kind = ? OR (component_kind = 'trust_test' "
+                 "AND component_name = ?)", (components.PUSH_PULL_FACTOR_KIND, RETIRED_LEAN_TEST))
+    rebuild_tables(conn, LEDGER_TABLES)
+
+
 # Step 9 repeated step 8 for the second verdict word; both numbers stay so a stored version 8 still upgrades.
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
                 6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10,
-                11: schema_step_11}
+                11: schema_step_11, 12: schema_step_12}
 
 
 def upgrade(conn):
