@@ -423,10 +423,14 @@ def note_daily_bars(read, conn, day, cut_at):
     if newest is None:
         read.note_feed("daily_bars", None, present=False)
         return
+    # The bar's market moment is its day's close (always before the cut); the fetch moment is its receipt when the
+    # read could have seen it (a rebuild of history reads by market date and leaves the receipt unstamped).
+    bar_day = date.fromisoformat(newest["trade_date"])
+    closed_at = session_clock.session_close(bar_day, store_queries.half_day_sessions(conn))
     known = session_clock.parse_iso(newest["known_at"])
     prior_session = session_clock.latest_trading_day(day - timedelta(days=1))
-    status = "ok" if date.fromisoformat(newest["trade_date"]) >= prior_session else "stale"
-    read.note_feed("daily_bars", known, received_at=known, status=status)
+    read.note_feed("daily_bars", closed_at, received_at=known if known <= cut_at else None,
+                   status="ok" if bar_day >= prior_session else "stale")
 
 
 def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
