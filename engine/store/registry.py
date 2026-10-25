@@ -476,7 +476,6 @@ MEASURES = [
     measure_row("band_used_ratio", "farthest excursion on this side over the end band's half-width; above 1 means "
                 "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
                 blank=NO_GRADE, low=0, **OUTCOME_VALUE),
-    # the push/pull factors on the read's snapshot (and each lean again on every decision, with the share applied)
     # The push/pull pipeline's steps per reading (the factor subject names the reading in reading_specs): the raw
     # value in the reading's own unit, how unusual it is at this clock (z, in spreads) and its strength by shape.
     measure_row("push_pull_raw_value", "a reading's raw value in its own unit (reading_specs names the unit); the "
@@ -630,7 +629,8 @@ def component_row(kind, name, meaning, parameters, version=components.COMPONENT_
 
 
 def component_rows():
-    """Every feed, the login, the builder, the range engine, the read lanes, the rules, factors, dials and tests."""
+    """Every feed, the login, the builder, the range engine, the read lanes, the rules, the readings' recipes, the
+    dials and the tests."""
     rows = [component_row("feed", name, meaning, {"mirai_file": mirai_file, "stale_limit_seconds": stale_limit,
                                                   "cadence": cadence})
             for name, meaning, mirai_file, stale_limit, cadence in FEEDS]

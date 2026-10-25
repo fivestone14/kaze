@@ -416,8 +416,10 @@ def collect_overnight(read, night):
 
 def note_daily_bars(read, conn, day, cut_at):
     """The daily-bars feed's state from the store (Mirai's file is one snapshot, so only stored rows say what was
-    known by the cut): ok while the newest $SPX daily bar known is the prior session's or later, else stale."""
-    newest = store_queries.newest_daily_bar(conn, registry.SPX_SYMBOL, session_clock.iso_utc(cut_at))
+    known by the cut; a rebuild of history reads them by market date, as its forces do): ok while the newest $SPX
+    daily bar is the prior session's or later, else stale."""
+    newest = store_queries.newest_daily_bar(conn, registry.SPX_SYMBOL, store.bars_known_by(read.snapshot, cut_at),
+                                            session_clock.latest_trading_day(day - timedelta(days=1)).isoformat())
     if newest is None:
         read.note_feed("daily_bars", None, present=False)
         return

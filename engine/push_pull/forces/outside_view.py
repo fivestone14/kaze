@@ -1,5 +1,6 @@
 # F · Outside view: Mirai's Claude forecast, counted only for what it says beyond the base rate it was shown. The
-# answer is held through later reads, fading with age, and drops out at 40 minutes (the feed's own carry).
+# answer is held through later reads, fading to nothing over its 30-minute horizon; the feed itself drops it at 40
+# minutes (its carry), so from 30 to 40 minutes the reading is a 0, then blank.
 from engine import session_clock
 from engine.push_pull.read_facts import Reading
 from engine.store import components

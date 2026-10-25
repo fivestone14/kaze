@@ -400,7 +400,8 @@ the width dials below are the only things that may widen it, and each starts at 
 after the trust ledger has written it a weight from live graded windows under a test fixed in advance. **Push and
 pull** (which way) is the tug-of-war of the readings: each one, read by read, is a force that pushes price up or pulls
 it down by a number of points; their sum under the caps is the net push, and the net sets the odds of up, flat and
-down. The sheet `kaze_review_data/print/Kaze-push-pull-sheet-v9.pdf` is the design this section implements.
+down. The sheet `kaze_review_data/print/Kaze-push-pull-sheet-v11.pdf` is the design this section implements (its
+page 2 is a real read from the store).
 
 **The readings** (`engine/push_pull/reading_specs.py`: one row per reading; `engine/push_pull/forces/`: one function
 per reading, one file per mechanism group, each saying only what it measures). By who is trading:
@@ -411,7 +412,7 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | A | `trend_since_open` | price − true open, points | steady | 10:00–15:40 | earning, w = −0.37 + 0.59·tn |
 | A | `give_back` | the trend's z, clipped ±3 | clipped | 15:45–close, full days | live, −0.111 (⅓ = −0.037) |
 | A | `fresh_burst` | last 15 min − 15 min of the day's pace, points | steady | 10:00–close | earning, −0.008 |
-| A | `fade_15_00` | SPX 15:00 − 14:30, points | reversing | 15:00–15:45 | earning, −0.16 |
+| A | `fade_15_00` | SPX 15:00 − 14:30, points | reversing | 15:00–15:45 | earning, +0.16 (the fade's size) |
 | A | `gap_across_average` | averages (50/100/200-day) the gap crossed, signed against the gap | steady | 09:35–10:00 | logged |
 | H heavyweights | `leader_surge_fade` | SMH 60-min % − QQQ 60-min %; 0 within 0.25 swing of the high/low | reversing | 10:30–15:40 | earning, +0.10 |
 | H | `grind_at_extreme` | −side × breadth's 60-min change, issues; 0 away from an extreme or after a fast approach | one-sided | 10:30–15:40 | earning, +0.39 |
@@ -421,7 +422,7 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | C catch-up | `spy_basis` | SPY-implied SPX − SPX on the same bar, less today's median, points | catch-up (points) | 09:40–15:45 | logged |
 | D option bets | `urgent_orders` | signed bursts + 50-lots over 30 min, every trade condition | steady | 10:00–close | live, −0.25 (⅓ = −0.083) |
 | D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
-| F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min) | steady | each answer, ≤ 40 min | earning, +0.06 |
+| F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
 
 A reading outside its speak window is `not_applicable`; a gate shut (the surge at an extreme, the grind away from
 one) reads 0, a value, never a blank; a missing input is blank with that input's reason, never 0.0. **Status:**

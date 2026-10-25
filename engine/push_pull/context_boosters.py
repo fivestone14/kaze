@@ -16,7 +16,6 @@ TIDE_SESSIONS, TIDE_HISTORY_SESSIONS, TIDE_FLOOR_BASIS_POINTS = 20, 250, 5.0
 BOOSTER_FLOOR, BOOSTER_CEILING = 0.5, 2.0
 TREND_NESS, PATH_STRAIGHTNESS, DEALER_GAMMA, RATES_TIDE, VIX_LEVEL, TIME_OF_DAY, DOWN_DAY = (
     "trend_ness", "path_straightness", "dealer_gamma", "rates_tide", "vix_level", "time_of_day", "down_day")
-CONTEXT_INPUTS = (TREND_NESS, PATH_STRAIGHTNESS, DEALER_GAMMA, RATES_TIDE, VIX_LEVEL, TIME_OF_DAY, DOWN_DAY)
 # The three same-clock ranks trend-ness averages, each stored so past sessions can be ranked against.
 STRAIGHTNESS_SINCE_OPEN, SIDE_SHARE, CLOSENESS_TO_EXTREME, TREND_RANK_MEAN = (
     "straightness_since_open", "side_share_since_open", "closeness_to_extreme", "trend_rank_mean")

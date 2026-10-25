@@ -168,11 +168,13 @@ def daily_bar_days(conn, symbol):
     return {row["trade_date"] for row in rows}
 
 
-def newest_daily_bar(conn, symbol, known_by_iso):
-    """A symbol's newest daily bar known by a moment (its trade_date and known_at), or None."""
+def newest_daily_bar(conn, symbol, known_by_iso, through_day):
+    """A symbol's newest daily bar through a day (its trade_date and known_at), known by a moment when one is given
+    (a rebuild of history passes None and reads by market date), or None."""
     return conn.execute("SELECT trade_date, known_at FROM collect_market_prices WHERE instrument_symbol = ? "
-                        "AND price_kind = 'day' AND known_at <= ? ORDER BY trade_date DESC, known_at LIMIT 1",
-                        (symbol, known_by_iso)).fetchone()
+                        "AND price_kind = 'day' AND trade_date <= ? AND (? IS NULL OR known_at <= ?) "
+                        "ORDER BY trade_date DESC, known_at LIMIT 1",
+                        (symbol, through_day, known_by_iso, known_by_iso)).fetchone()
 
 
 def daily_bars(conn, symbol, through_day, known_by_iso=None):

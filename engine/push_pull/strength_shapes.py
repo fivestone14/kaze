@@ -10,8 +10,6 @@ WIGGLE = 0.5
 CLIP = 3.0
 STEADY, REVERSING, ONE_SIDED, CLIPPED, CATCH_UP = "steady", "reversing", "one_sided", "clipped", "catch_up"
 SHAPES = (STEADY, REVERSING, ONE_SIDED, CLIPPED, CATCH_UP)
-# The shapes whose strength is a z turned through tanh (the others carry their own units).
-Z_SHAPES = (STEADY, REVERSING, ONE_SIDED)
 
 
 def steady(z):

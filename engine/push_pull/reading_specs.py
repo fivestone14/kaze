@@ -145,7 +145,6 @@ SPECS = (
          evidence="IC +0.06 (p 0.58) on 9 days; held ≤ 40 min, fading with age"),
 )
 SPECS_BY_NAME = {spec.name: spec for spec in SPECS}
-READING_NAMES = tuple(spec.name for spec in SPECS)
 if len(SPECS_BY_NAME) != len(SPECS):
     raise ValueError("two readings share a name")
 

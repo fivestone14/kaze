@@ -1,5 +1,5 @@
 # The fixed numbers and words of every component the registry_components table describes: the range recipe, the
-# band and grade words, the width dials, the push/pull factors, the trust tests and the outcome rules. One home for
+# band and grade words, the width dials, the push/pull sides and wind scale, the two ledgers and the outcome rules. One home for
 # every number the range, push/pull, grade and trust code shares; nothing here is read from a file or a store, so this
 # file imports nothing and every group may import it.
 

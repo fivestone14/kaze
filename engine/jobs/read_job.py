@@ -1,6 +1,7 @@
 # The entry point launchd runs: a live read every 5 minutes (collect, range forecast, store, grades, live feed) and
-# the nightly (catch-up rebuilds, fits, every open window settled, the trust ledger, parity, backup); by hand it
-# rebuilds a moment or a session, backfills bars, or prints the scoreboard, the range pass test or the trust ledger.
+# the nightly (catch-up rebuilds, daily bars, fits, every open window settled, the trust and promotion ledgers, parity,
+# backup); by hand it rebuilds a moment or a session, backfills bars, or prints the scoreboard, the range pass test or
+# the two ledgers.
 import argparse
 import sys
 import traceback
