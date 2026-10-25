@@ -79,6 +79,9 @@ WINDOW_PRICE_MEASURE = {side: f"{side}_price_points" for side in WINDOW_SIDES}
 WINDOW_MOVE_MEASURE = {side: f"{side}_move_points" for side in WINDOW_SIDES}
 GRADE_START_PRICE_MEASURE = "spx_price_points"
 SPX_SYMBOL = "$SPX"
+SPY_SYMBOL, TEN_YEAR_SYMBOL = "SPY", "$TNX"
+# The symbols the nightly keeps daily bars for, with the instrument kind each is stored under.
+DAILY_BAR_SYMBOLS = {SPX_SYMBOL: "index", TEN_YEAR_SYMBOL: "rate"}
 # The three grade words and what yes means for each: the measure, its band subject (None: the channel's own rung
 # subject) and the stored value that says yes. The scoreboard, the phone and the data map all read this.
 GRADE_WORD_MEASURE = {"ends_inside": ("was_inside_band", components.BAND, 1),
@@ -92,7 +95,7 @@ SUBJECT_KINDS = (
 
 # Feeds: name, what it is, Mirai's file (the template mirai_files reads), how old its newest input may be, and how
 # often it lands: live (a tick about every second), minute (through the session, judged by its age), once_a_day (the
-# night's futures, the login check) or hand_kept (the calendar). The live price is no read's input: only the phone's
+# night's futures, the daily closes, the login check) or hand_kept (the calendar). The live price is no read's input: only the phone's
 # feed row and its stream read it.
 FEED_CADENCES = ("live", "minute", "once_a_day", "hand_kept")
 LIVE_PRICE_FEED = "spx_live_price"
@@ -102,6 +105,10 @@ FEEDS = (
     ("spx_bars", "SPX 1-minute bars", paths.MIRAI_FILES["spx_bars"], 180, "minute"),
     ("watchlist_quotes", "one minute's quotes for the watchlist (SPX, VIX family, funds, stocks, rates)",
      paths.MIRAI_FILES["watchlist_quotes"], 180, "minute"),
+    ("watchlist_bars", "one minute's bars for the watchlist (SPY, /ES, $ADD, the leaders, sectors)",
+     paths.MIRAI_FILES["watchlist_bars"], 180, "minute"),
+    ("daily_bars", "daily bars of $SPX and $TNX, ten years, fetched after each close", paths.MIRAI_FILES["daily_bars"],
+     2 * 86400, "once_a_day"),
     ("nyse_breadth", "NYSE advancers and decliners carried in the quotes rows' bars field",
      paths.MIRAI_FILES["watchlist_quotes"], 240, "minute"),
     ("options_scan", "the same-day SPX options scan: walls, VWAP, straddle ruler, dealer gamma",
@@ -119,8 +126,8 @@ FEEDS = (
      paths.MIRAI_FILES["schwab_login"], 2 * 86400, "once_a_day"),
 )
 FEED_NAMES = tuple(feed[0] for feed in FEEDS)
-FEEDS_WITH_LINE_COUNTS = ("spx_bars", "watchlist_quotes", "options_scan", "options_tape", "claude_forecast",
-                          "news_headlines")
+FEEDS_WITH_LINE_COUNTS = ("spx_bars", "watchlist_quotes", "watchlist_bars", "options_scan", "options_tape",
+                          "claude_forecast", "news_headlines")
 LOGIN_NAMES = ("schwab",)
 CONSUMERS = {"range_engine": ("spx_bars",)}
 
@@ -184,6 +191,11 @@ MEASURES = [
                 "id", "spx_level", feed="spx_bars", blank=BARS_MISSING_MEANING, **POINTS_RANGE),
     measure_row("vwap_points", "volume-weighted average price from the options scan", "points", "number", "id",
                 "spx_level", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
+    measure_row("true_open_points", "the open SPX would have printed had every stock traded: the prior close plus "
+                "/ES's move from its last bar of the prior session to its 09:30 bar", "points", "number", "id",
+                "spx_level", feed="watchlist_bars",
+                blank="feed_missing when either /ES bar is absent; not_applicable across a contract roll",
+                **POINTS_RANGE),
     measure_row("range_so_far_points", "session high minus session low", "points", "number", "range", "spx_move_size",
                 feed="spx_bars", blank=BARS_MISSING_MEANING, low=0, high=2000),
     measure_row("move_points", "SPX close now minus its close at the since point (signed)", "points", "number",
@@ -207,6 +219,11 @@ MEASURES = [
                 "level_prices", subjects="level_type", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
     measure_row("level_gamma_share_portion", "share of total gamma sitting at the level", "portion", "number", "range",
                 "dealer_gamma_shape", subjects="level_type", feed="options_scan", blank=SCAN_MISSING, low=0, high=1),
+    measure_row("same_day_open_interest_contracts", "contracts held overnight in a same-day strike on one side, "
+                "from the newest native scan, on the first read and the read fifty minutes before the close",
+                "contracts", "whole_number", "id", "expiring_open_interest", subjects="side|strike_points",
+                feed="options_scan", blank=SCAN_MISSING + "; no_activity when the scan lists no same-day strike; "
+                "not kept on other reads", low=0),
     measure_row("dealer_net_gamma_usd", "dealers' net gamma across the same-day chain", "usd", "number", "range",
                 "dealer_gamma_size", feed="options_scan", blank=SCAN_MISSING),
     measure_row("dealer_gamma_sign", "the scan's own word for the dealer gamma regime", "word", "word", "range",
@@ -227,10 +244,19 @@ MEASURES = [
     measure_row("nyse_advancing_portion", "advancers over advancers plus decliners", "portion", "number",
                 group="breadth_side", feed="nyse_breadth", blank="feed_missing when no breadth bar has landed",
                 low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5),
+    measure_row("breadth_net_change_count", "NYSE advancers less decliners now against a window of minutes earlier",
+                "count", "whole_number", group="breadth_change", subjects="window_minutes", feed="watchlist_bars",
+                blank="not_formed_yet until the window has formed; provider_refused_symbol when the $ADD bars are "
+                "absent from landed rows; feed_missing when no rows have landed",
+                low=-6000, high=6000, **PUSH_PULL_LANE_DEFAULTS),
     # leaders, rates, dollar, oil
     measure_row("fund_change_from_prior_close_pct", "a fund's last quote against its prior close", "pct", "number",
                 group="fund_change_sign", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING,
                 low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("fund_change_window_pct", "a fund's bar close now against its close a window of minutes earlier",
+                "pct", "number", group="fund_change_window", subjects="symbol|window_minutes", feed="watchlist_bars",
+                blank="not_formed_yet until the window has formed; provider_refused_symbol when the fund's bars "
+                      "are missing", low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("sector_funds_up_count", "how many of the 11 sector funds are above their prior close", "count",
                 "whole_number", group="sector_breadth", feed="watchlist_quotes",
                 blank="partial_coverage until all 11 quote", low=0, high=11, lane="push_pull",
@@ -280,6 +306,11 @@ MEASURES = [
                 blank="no_activity when no trade had a side; " + TAPE_BLANK,
                 low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5,
                 twin=TAPE_TWIN),
+    measure_row("urgent_orders_count", "signed urgent option orders in the window: bursts over three strikes on "
+                "one side within two seconds, and prints of fifty contracts or more, bullish less bearish; every "
+                "trade condition counts (multi-leg legs included)", "count", "whole_number",
+                group="options_urgent_flow", subjects="kind|window_minutes", feed="options_tape", blank=TAPE_BLANK,
+                low=-10000, high=10000, twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",
                 "whole_number", "health", "tape_health", subjects="feed", feed="options_tape", blank=TAPE_BLANK, low=0),
     measure_row("feed_coverage_last_30_minutes_portion",

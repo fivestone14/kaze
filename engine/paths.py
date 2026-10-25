@@ -9,13 +9,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".env"
 REQUIRED_KEYS = ("KAZE_MIRAI_HOME", "KAZE_DATA")
 BACKUP_KEY = "KAZE_BACKUP_DIR"
-# Mirai's files as the feeds name them: templates under Mirai's data folder ({day} is the session), the live price
+# Mirai's files as the feeds name them: templates under Mirai's data folder ({day} is the session, {symbol} a daily
+# file's instrument), the live price
 # Mirai's Schwab stream rewrites about once a second, the auth watch's log, and the event calendar under Mirai's
 # settings folder. mirai_files.py reads them; registry.py lists them on the feed rows.
 MIRAI_FILES = {
     "spx_live_price": "market/spx_live_price_latest.json",
     "spx_bars": "market/spx_price_bars_by_minute/{day}.jsonl",
     "watchlist_quotes": "market/watchlist_quotes_by_minute/{day}.jsonl",
+    "watchlist_bars": "market/watchlist_price_bars_by_minute/{day}.jsonl",
+    "daily_bars": "market/spx_vix_rates_price_bars_by_day/{symbol}.jsonl",
+    "futures_rolls": "market/futures_contracts_and_past_rolls_latest.json",
     "options_scan": "spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl",
     "options_tape": "market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl",
     "futures_bars": "market/futures_price_bars_by_minute/{day}.jsonl",

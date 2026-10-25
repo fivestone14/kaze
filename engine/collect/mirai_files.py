@@ -1,6 +1,7 @@
-# How to read each of Mirai's files as it stood at a moment: the live price, bars, quotes, scans, the options tape,
-# futures, the event calendar, Claude's forecast, headlines and the auth watch's login line. Read-only; nothing here
-# imports Mirai's code.
+# How to read each of Mirai's files as it stood at a moment: the live price, bars, quotes, the watchlist's minute bars
+# (SPY, /ES, $ADD, the leaders), scans and their same-day open interest, the options tape and its urgent orders,
+# futures, daily bars, the event calendar, Claude's forecast, headlines and the auth watch's login line. Read-only;
+# nothing here imports Mirai's code.
 import gzip
 import json
 import os
@@ -20,6 +21,17 @@ HALF_DAY_EVENT_KIND = "HALF_DAY_CLOSE"
 # Vendor trade-condition codes 130-144 mark legs of multi-leg packages, which have no clear buyer or seller side.
 MULTI_LEG_CONDITIONS = range(130, 145)
 CONTRACT_MULTIPLIER = 100
+# Urgent orders: a burst is three or more strikes hit on one side inside a two-second bin; a big print is fifty
+# contracts or more; near the money is within half a percent of SPX.
+URGENT_BIN_MS = 2000
+URGENT_BURST_STRIKES = 3
+BIG_PRINT_CONTRACTS = 50
+NEAR_MONEY_SHARE = 0.005
+URGENT_KINDS = ("total", "near", "far")
+# Same-day open interest is kept for strikes within this share of spot; the scan's rows are [strike, calls, puts].
+OPEN_INTEREST_SPOT_SHARE = 0.03
+ES_SYMBOL = "/ES"
+BREADTH_NET_SYMBOL = "$ADD"
 SCAN_STRADDLE_SHARE = 0.85
 AUTH_WATCH_LINE = re.compile(r"\[auth-check\] state=(\w+) age=([\d.?]+)d left=(-?[\d.?]+)d")
 AUTH_WATCH_TAIL_BYTES = 4096
@@ -117,10 +129,69 @@ def read_quotes_rows(day, cut):
     return rows_at_or_before(FILES["watchlist_quotes"], day, cut)
 
 
+def read_watchlist_bars(day, cut):
+    """Watchlist rows (one minute's bars per symbol) polled at or before the cut."""
+    return rows_at_or_before(FILES["watchlist_bars"], day, cut)
+
+
+def symbol_bars(rows, symbol):
+    """One symbol's bars out of watchlist rows, one per bar start (the newest poll wins), oldest first, each with
+    its parsed 'at'."""
+    bars = {}
+    for row in rows:
+        bar = (row.get("bars") or {}).get(symbol)
+        if bar and bar.get("ts") and bar.get("close") is not None:
+            bars[bar["ts"]] = bar
+    return [dict(bars[ts], at=parse_iso(ts)) for ts in sorted(bars)]
+
+
+def bar_close_at_or_before(bars, moment):
+    """The close of the last bar starting at or before a moment, or None."""
+    return next((bar["close"] for bar in reversed(bars) if bar["at"] <= moment), None)
+
+
+def es_roll_days():
+    """The sessions /ES rolled onto a new contract overnight (its 09:30 bar and the prior close differ by contract)."""
+    path = paths.mirai_data(FILES["futures_rolls"])
+    if not path.exists():
+        return set()
+    try:
+        rolls = json.loads(path.read_text()).get("rolls") or []
+    except ValueError:
+        return set()
+    return {date.fromisoformat(roll["day"]) for roll in rolls if roll.get("symbol") == ES_SYMBOL and roll.get("day")}
+
+
+def read_daily_bars(symbol):
+    """A symbol's daily bars from Mirai's ten-year file, oldest first, each with its day and fetch moment; empty when
+    the file is absent."""
+    path = paths.mirai_data(FILES["daily_bars"].format(symbol=symbol))
+    rows = [row for row in read_jsonl(path if path.exists() else None) if row.get("day") and row.get("close") is not None]
+    return sorted(rows, key=lambda row: row["day"])
+
+
 def read_native_scans(day, cut, max_bytes=None):
     """Options scans built from the native chain at or before the cut, within the first max_bytes of the file."""
     scans = rows_at_or_before(FILES["options_scan"], day, cut, max_bytes=max_bytes)
     return [scan for scan in scans if str(scan.get("gex_source", "")).startswith("native")]
+
+
+def scan_open_interest_by_strike(scan):
+    """The scan's same-day open interest within the kept share of spot, as {(side, strike): contracts}."""
+    spot = scan.get("spot")
+    rows = (scan.get("gex_views") or {}).get("oi_side_by_strike") or []
+    if not spot:
+        return {}
+    held = {}
+    for row in rows:
+        try:
+            strike, calls, puts = float(row[0]), int(row[1] or 0), int(row[2] or 0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if abs(strike / spot - 1) <= OPEN_INTEREST_SPOT_SHARE:
+            held[("call", strike)] = calls
+            held[("put", strike)] = puts
+    return held
 
 
 def scan_straddle_points(ruler, field):
@@ -209,6 +280,42 @@ def tape_window_totals(day, cut, minutes, max_bytes=None):
     }
 
 
+def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
+    """Signed urgent orders in the window to the cut, bullish less bearish: bursts (three strikes on one side inside
+    one two-second bin, counted once when the third strike lands) and big prints, in total and split by whether
+    the trade's strike sat near the money (a trade before SPX's first bar counts in the total only); every trade
+    condition counts, a big print that completes a burst counts as both."""
+    # A trade's side is the quote side it took (at or past the ask bought, at or past the bid sold, else the nearer
+    # side); bought calls and sold puts are bullish. spx_close_at(ts_ms) gives SPX at the trade's minute.
+    tape = read_tape_day(day)
+    end_ms = int(cut.timestamp() * 1000)
+    start_ms = end_ms - minutes * 60 * 1000
+    on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
+    usable = (on_disk & (tape["ts_ms"] >= start_ms) & (tape["ts_ms"] <= end_ms) & (tape["bid"] > 0)
+              & (tape["ask"] >= tape["bid"]) & (tape["price"] >= tape["bid"]) & (tape["price"] <= tape["ask"])
+              & (tape["strike"] > 0))
+    counts = dict.fromkeys(URGENT_KINDS, 0)
+    bins = {}
+    for index in np.flatnonzero(usable)[np.argsort(tape["ts_ms"][usable], kind="stable")]:
+        price, bid, ask = tape["price"][index], tape["bid"][index], tape["ask"][index]
+        side = 1 if price >= ask else -1 if price <= bid else np.sign(price - (bid + ask) / 2)
+        if not side:
+            continue
+        bull = int(side) * (1 if tape["is_call"][index] > 0 else -1)
+        spx = spx_close_at(tape["ts_ms"][index])
+        kind = None if not spx else "near" if abs(tape["strike"][index] / spx - 1) < NEAR_MONEY_SHARE else "far"
+        strikes = bins.setdefault((int(tape["ts_ms"][index] // URGENT_BIN_MS), bull), set())
+        completes_burst = False
+        if len(strikes) < URGENT_BURST_STRIKES:
+            strikes.add(float(tape["strike"][index]))
+            completes_burst = len(strikes) == URGENT_BURST_STRIKES
+        for _ in range(int(tape["size"][index] >= BIG_PRINT_CONTRACTS) + int(completes_burst)):
+            counts["total"] += bull
+            if kind:
+                counts[kind] += bull
+    return counts
+
+
 def atm_option_mids(day, cut, strike, max_bytes=None):
     """Mid of the newest quoted trade at or before the cut for the call and the put at one strike."""
     tape = read_tape_day(day)
@@ -231,7 +338,7 @@ def read_overnight_futures(day):
     open_at = session_open(day)
     highs, lows, newest = [], [], None
     for bar in read_jsonl(day_file_path(FILES["futures_bars"], day)):
-        if bar.get("symbol") != "/ES" or bar.get("bar_minutes") != 1:
+        if bar.get("symbol") != ES_SYMBOL or bar.get("bar_minutes") != 1:
             continue
         at = parse_iso(bar["ts"])
         if night_start <= at < open_at:

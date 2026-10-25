@@ -49,11 +49,12 @@ const SEGMENT_OPACITY = [1, 0.72, 0.52, 0.4, 0.32, 0.26, 0.22];
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
 const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchlist_quotes: "Quotes",
                       nyse_breadth: "Breadth", options_scan: "Options Scan", options_tape: "Options Tape",
-                      futures_bars: "Futures",
+                      futures_bars: "Futures", watchlist_bars: "Minute Bars", daily_bars: "Daily Closes",
                       event_calendar: "Calendar", news_headlines: "News", claude_forecast: "Claude",
                       schwab_login: "Schwab Login" };
 // What a once-a-day or hand-kept feed's row says instead of an age, from its as_of.
-const AS_OF_WORDS = { futures_bars: (at) => `Night · ${clock(at)}`, schwab_login: (at) => `Checked ${clock(at)}`,
+const AS_OF_WORDS = { futures_bars: (at) => `Night · ${clock(at)}`, daily_bars: (at) => `Close · ${clock(at)}`,
+                      schwab_login: (at) => `Checked ${clock(at)}`,
                       event_calendar: (day) => `To ${monthDay(day)}` };
 const QUIET_CADENCES = ["once_a_day", "hand_kept"];
 // The band wideners' plain names, keyed by the feed's dial names in the engine's order: the one home for these words.

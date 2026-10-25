@@ -13,7 +13,7 @@ from engine.grade import grade, parity, trust
 from engine.jobs import job_log
 from engine.push_pull import push_pull_read
 from engine.range import range_fit, range_read
-from engine.store import backup, components, store, store_queries
+from engine.store import backup, components, registry, store, store_queries
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
@@ -254,10 +254,19 @@ def rebuild_session(conn, day, calendar, half_days):
 
 
 def write_session_bars(conn, day, row_origin, half_days, written_at):
-    """Store every bar of the session up to the close not stored yet, stamped by arrival when it came after its slot."""
+    """Store every SPX and SPY bar of the session up to the close not stored yet, stamped by arrival when it came
+    after its slot."""
     close = session_clock.session_close(day, half_days)
     bars = mirai_files.read_spx_bars(day, close)
-    return store.write_bars(conn, collect.session_bar_rows(conn, bars, day, row_origin, written_at, written_at))
+    rows = collect.session_bar_rows(conn, bars, day, row_origin, written_at, written_at, collect.SPX_INSTRUMENT)
+    spy = mirai_files.symbol_bars(mirai_files.read_watchlist_bars(day, close), registry.SPY_SYMBOL)
+    rows += collect.session_bar_rows(conn, spy, day, row_origin, written_at, written_at, collect.SPY_INSTRUMENT)
+    return store.write_bars(conn, rows)
+
+
+def write_daily_bars(conn, today, half_days, written_at):
+    """Store the daily bars of $SPX and $TNX not stored yet, each known at Mirai's fetch moment."""
+    return store.write_bars(conn, collect.daily_bar_rows(conn, today, half_days, written_at))
 
 
 def run_backfill_bars():
@@ -319,6 +328,7 @@ def run_nightly():
         origin = "live_frozen" if store_queries.live_reads_count(conn, trade_date) else "history_rebuilt"
         bars_added[trade_date] = (write_session_bars(conn, date.fromisoformat(trade_date), origin, half_days,
                                                      written_at), origin)
+    daily_added = write_daily_bars(conn, today, half_days, written_at)
     next_session = session_clock.next_trading_day(today)
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt = [f"{trade_date} {rebuild_session(conn, date.fromisoformat(trade_date), calendar, half_days)[0]} reads"
@@ -338,6 +348,7 @@ def run_nightly():
     conn.execute("PRAGMA optimize")
     live_bars = store_queries.bar_count(conn, today.isoformat(), "live_frozen")
     bars = "; ".join(f"{trade_date} {added} {origin} bars added" for trade_date, (added, origin) in bars_added.items())
+    bars += f"; {daily_added} daily bars added"
     fits = f"{fits_rebuilt} past fits added, fit for {next_session} {'written' if fit_written else 'already there'}"
     warnings = live_feed.horizon_warnings(calendar, next_session)
     live_reads = store_queries.live_reads_count(conn, today.isoformat())

@@ -288,13 +288,16 @@ def evaluation_row(evaluation_id, judged, judge, horizon_name, *, kind, metric_n
     return row
 
 
-def bar_price_row(bar, trade_date, row_origin, priced_at_iso, known_at_iso, known_at_rule):
-    """A collect_market_prices row for one SPX 1-minute bar (no volume: Mirai's index volume is a known-wrong 0)."""
+def bar_price_row(bar, trade_date, row_origin, priced_at_iso, known_at_iso, known_at_rule,
+                  instrument=(registry.SPX_SYMBOL, "index", "spx_bars"), price_kind="bar", bar_minutes=1):
+    """A collect_market_prices row for one bar of an instrument (symbol, kind, feed): SPX's 1-minute bars unless
+    named (no volume: Mirai's index volume is a known-wrong 0); a daily bar is price_kind day over the session."""
+    symbol, kind, feed = instrument
     row = {
-        "trade_date": trade_date, "instrument_symbol": registry.SPX_SYMBOL, "instrument_kind": "index",
-        "price_kind": "bar", "bar_minutes": 1, "priced_at": priced_at_iso, "known_at": known_at_iso,
+        "trade_date": trade_date, "instrument_symbol": symbol, "instrument_kind": kind,
+        "price_kind": price_kind, "bar_minutes": bar_minutes, "priced_at": priced_at_iso, "known_at": known_at_iso,
         "known_at_rule": known_at_rule, "row_origin": row_origin, "value_origin": registry.LIVE_VALUE_ORIGIN,
-        "source_feed_name": "spx_bars", "feed_status": "ok", "quote_unit": "points",
+        "source_feed_name": feed, "feed_status": "ok", "quote_unit": "points",
         "open_in_quote_units": bar["open"], "high_in_quote_units": bar["high"], "low_in_quote_units": bar["low"],
         "close_in_quote_units": bar["close"],
     }

@@ -146,19 +146,46 @@ def read_price_and_bar(conn, snapshot_rowid):
 
 # ---- Bars ------------------------------------------------------------------------------------------------------------
 
-def stored_bar_times(conn, trade_date, row_origin):
-    """The priced_at stamps of the session's bars already stored under one origin."""
+def stored_bar_times(conn, trade_date, row_origin, symbol=registry.SPX_SYMBOL):
+    """The priced_at stamps of a session's 1-minute bars of one instrument already stored under one origin."""
     rows = conn.execute("SELECT priced_at FROM collect_market_prices "
-                        "WHERE trade_date = ? AND row_origin = ? AND price_kind = 'bar'",
-                        (trade_date, row_origin)).fetchall()
+                        "WHERE trade_date = ? AND row_origin = ? AND price_kind = 'bar' AND instrument_symbol = ?",
+                        (trade_date, row_origin, symbol)).fetchall()
     return {row["priced_at"] for row in rows}
 
 
-def bar_count(conn, trade_date, row_origin):
-    """How many SPX 1-minute bars of a session the store holds under one origin."""
+def bar_count(conn, trade_date, row_origin, symbol=registry.SPX_SYMBOL):
+    """How many 1-minute bars of one instrument a session holds under one origin."""
     return conn.execute("SELECT COUNT(*) FROM collect_market_prices "
-                        "WHERE trade_date = ? AND row_origin = ? AND price_kind = 'bar'",
-                        (trade_date, row_origin)).fetchone()[0]
+                        "WHERE trade_date = ? AND row_origin = ? AND price_kind = 'bar' AND instrument_symbol = ?",
+                        (trade_date, row_origin, symbol)).fetchone()[0]
+
+
+def daily_bar_days(conn, symbol):
+    """The days a symbol already has a daily bar for."""
+    rows = conn.execute("SELECT DISTINCT trade_date FROM collect_market_prices "
+                        "WHERE instrument_symbol = ? AND price_kind = 'day'", (symbol,)).fetchall()
+    return {row["trade_date"] for row in rows}
+
+
+def newest_daily_bar(conn, symbol, known_by_iso):
+    """A symbol's newest daily bar known by a moment (its trade_date and known_at), or None."""
+    return conn.execute("SELECT trade_date, known_at FROM collect_market_prices WHERE instrument_symbol = ? "
+                        "AND price_kind = 'day' AND known_at <= ? ORDER BY trade_date DESC, known_at LIMIT 1",
+                        (symbol, known_by_iso)).fetchone()
+
+
+def daily_bars(conn, symbol, through_day, known_by_iso=None):
+    """A symbol's daily bars through a day, oldest first (one per day, live rows preferred), known by a moment."""
+    rows = conn.execute(
+        "SELECT trade_date, known_at, open_in_quote_units AS open, high_in_quote_units AS high, "
+        " low_in_quote_units AS low, close_in_quote_units AS close FROM collect_market_prices "
+        "WHERE instrument_symbol = ? AND price_kind = 'day' AND trade_date <= ? AND (? IS NULL OR known_at <= ?) "
+        f"ORDER BY trade_date, {ORIGIN_PREFERENCE_SQL}", (symbol, through_day, known_by_iso, known_by_iso))
+    bars = {}
+    for row in rows:
+        bars.setdefault(row["trade_date"], row)
+    return list(bars.values())
 
 
 def sessions_with_bars(conn):
@@ -176,15 +203,16 @@ def full_sessions(conn):
             if minutes == session_clock.session_length_minutes(date.fromisoformat(day), half_days)]
 
 
-def session_bars(conn, trade_date, up_to_iso=None, known_by_iso=None):
-    """One SPX 1-minute bar per minute of a session, oldest first, live rows preferred, each with when it was known."""
+def session_bars(conn, trade_date, up_to_iso=None, known_by_iso=None, symbol=registry.SPX_SYMBOL):
+    """One 1-minute bar per minute of a session for one instrument (SPX unless named), oldest first, live rows
+    preferred, each with when it was known."""
     # Only bars starting by up_to_iso and known by known_by_iso (no limit when None).
     rows = conn.execute(
         "SELECT priced_at, known_at, open_in_quote_units AS open, high_in_quote_units AS high, "
         " low_in_quote_units AS low, close_in_quote_units AS close FROM collect_market_prices "
         "WHERE trade_date = ? AND instrument_symbol = ? AND price_kind = 'bar' AND (? IS NULL OR priced_at <= ?) "
         f"AND (? IS NULL OR known_at <= ?) ORDER BY priced_at, {ORIGIN_PREFERENCE_SQL}",
-        (trade_date, registry.SPX_SYMBOL, up_to_iso, up_to_iso, known_by_iso, known_by_iso))
+        (trade_date, symbol, up_to_iso, up_to_iso, known_by_iso, known_by_iso))
     bars = {}
     for row in rows:
         bars.setdefault(row["priced_at"], row)

@@ -1,9 +1,9 @@
 # Builds one read: Mirai's files as they stood at a cut become one snapshot row, one observation per measure (a blank
-# carries its reason, never 0.0), the calendar facts as known, and the session's new bars stamped by arrival.
-# Raw inputs only; the range engine reads them back from the store.
+# carries its reason, never 0.0), the calendar facts as known, and the session's new SPX and SPY bars stamped by
+# arrival. Raw inputs only; the range engine and the push/pull pipeline read them back from the store.
 import json
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from engine import paths, session_clock
 from engine.collect import mirai_files
@@ -16,6 +16,15 @@ LARGEST_STOCKS = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA
 MOVE_SINCE_MINUTES = {"5_minutes": 5, "15_minutes": 15, "30_minutes": 30, "60_minutes": 60}
 CLAUDE_HORIZONS = {"30_minutes": "next_30_minutes", "to_close": "to_close"}
 TAPE_WINDOW_MINUTES = 30
+# The windows the watchlist bars are measured over (the leaders' and breadth's change), and the two reads a day the
+# same-day open interest is kept on: the first read, and the read fifty minutes before the close.
+BAR_WINDOW_MINUTES = (60,)
+OPEN_INTEREST_READS = {"first_minutes_after_open": session_clock.FIRST_SLOT_MINUTES_AFTER_OPEN,
+                       "minutes_before_close": 50}
+LEADER_SYMBOLS = ("SMH", "QQQ")
+# An instrument whose bars the price table keeps: symbol, kind and the feed the bars come from.
+SPX_INSTRUMENT = (registry.SPX_SYMBOL, "index", "spx_bars")
+SPY_INSTRUMENT = (registry.SPY_SYMBOL, "etf", "watchlist_bars")
 HEADLINE_WINDOW_MINUTES = 60
 STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
@@ -87,9 +96,13 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     collect_prices(read, bars, bar_arrived)
     collect_clock(read, cut_at, day, half_days)
     quotes_rows = mirai_files.read_quotes_rows(day, cut_at)
-    collect_watchlist_quotes(read, quotes_rows, bars)
+    prior_close = collect_watchlist_quotes(read, quotes_rows, bars)
     collect_breadth(read, quotes_rows)
-    collect_options_scan(read, mirai_files.read_native_scans(day, cut_at, file_limits.get("options_scan")))
+    watch_rows = mirai_files.read_watchlist_bars(day, cut_at)
+    collect_watchlist_bars(read, watch_rows, day, cut_at, prior_close)
+    note_daily_bars(read, conn, day, cut_at)
+    collect_options_scan(read, mirai_files.read_native_scans(day, cut_at, file_limits.get("options_scan")),
+                         is_open_interest_read(cut_at, day, half_days))
     collect_options_tape(read, day, cut_at, bars, file_limits.get("options_tape"))
     collect_overnight(read, mirai_files.read_overnight_futures(day))
     collect_events(read, conn, calendar, day, cut_at, row_origin, written_at)
@@ -98,12 +111,15 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     collect_login(read, login, cut_at, row_origin)
     collect_feed_health(read, day, {"spx_bars": len(bars),
                                     "watchlist_quotes": sum(1 for r in quotes_rows if r.get("quotes")),
-                                    "nyse_breadth": sum(1 for r in quotes_rows if r.get("bars"))})
+                                    "nyse_breadth": sum(1 for r in quotes_rows if r.get("bars")),
+                                    "watchlist_bars": len(watch_rows)})
     bars_state = read.feed_states["spx_bars"]["status"]
     snapshot["snapshot_status"] = "blind" if bars_state == "missing" else "built"
     snapshot["snapshot_status_reason"] = {"missing": "spx_bars_missing", "late": "cut_bar_missing"}.get(bars_state)
     snapshot["build_seconds"] = round(time.monotonic() - started, 3)
-    bar_rows = session_bar_rows(conn, bars, day, row_origin, cut_at, written_at)
+    bar_rows = session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, SPX_INSTRUMENT)
+    bar_rows += session_bar_rows(conn, mirai_files.symbol_bars(watch_rows, registry.SPY_SYMBOL), day, row_origin,
+                                 cut_at, written_at, SPY_INSTRUMENT)
     return snapshot, read.observations, bar_rows, read.feed_states
 
 
@@ -172,7 +188,8 @@ def collect_prices(read, bars, bar_arrived):
 
 
 def collect_watchlist_quotes(read, quotes_rows, bars):
-    """Prior close, VIX family, fund changes, sector and largest-stock counts and the 10-year yield from the quotes."""
+    """Prior close, VIX family, fund changes, sector and largest-stock counts and the 10-year yield from the quotes;
+    returns the prior close for the true open."""
     row = mirai_files.newest_row_with(quotes_rows, "quotes")
     polled_at = row["at"] if row else None
     read.note_feed("watchlist_quotes", polled_at, received_at=polled_at, present=bool(row))
@@ -202,6 +219,59 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
         yield_change = store.rounded((tnx["last"] - tnx["close"]) * TNX_QUOTE_PER_YIELD_PCT)
     read.add_observation("ten_year_yield_annual_pct", yield_pct, blank=blank_reason_for_symbol(row))
     read.add_observation("ten_year_yield_change_basis_points", yield_change, blank=blank_reason_for_symbol(row))
+    return spx.get("close")
+
+
+def collect_watchlist_bars(read, rows, day, cut_at, prior_close):
+    """From the watchlist's minute bars: the true open (/ES from the prior session's last bar to its 09:30 bar, on
+    the prior close), the leaders' change over each bar window, and breadth's net change over each window."""
+    newest = rows[-1]["at"] if rows else None
+    read.note_feed("watchlist_bars", newest, received_at=newest, present=bool(rows))
+    true_open = true_open_points(rows, day, prior_close)
+    read.add_observation("true_open_points", true_open,
+                         blank="not_applicable" if day in mirai_files.es_roll_days() else "feed_missing",
+                         source="watchlist_quotes" if true_open is None and prior_close is None else None)
+    for symbol in LEADER_SYMBOLS:
+        bars = mirai_files.symbol_bars(rows, symbol)
+        for minutes in BAR_WINDOW_MINUTES:
+            change, blank = window_change(bars, cut_at, minutes, rows)
+            read.add_observation("fund_change_window_pct", change, blank=blank, symbol=symbol, window_minutes=minutes)
+    breadth = mirai_files.symbol_bars(rows, mirai_files.BREADTH_NET_SYMBOL)
+    for minutes in BAR_WINDOW_MINUTES:
+        change, blank = window_change(breadth, cut_at, minutes, rows, as_percent=False)
+        read.add_observation("breadth_net_change_count", change, blank=blank, window_minutes=minutes)
+
+
+def true_open_points(rows, day, prior_close):
+    """The prior close plus /ES's move from the prior session's last bar to today's 09:30 bar; None when any part is
+    missing or the contract rolled overnight."""
+    if prior_close is None or day in mirai_files.es_roll_days():
+        return None
+    opening = next((bar for bar in mirai_files.symbol_bars(rows, mirai_files.ES_SYMBOL)
+                    if bar["at"] == session_clock.session_open(day)), None)
+    prior_day = session_clock.latest_trading_day(day - timedelta(days=1))
+    prior_rows = mirai_files.read_watchlist_bars(prior_day, session_clock.session_open(day))
+    prior_bars = [bar for bar in mirai_files.symbol_bars(prior_rows, mirai_files.ES_SYMBOL)
+                  if bar["at"].date() == prior_day]
+    if opening is None or not prior_bars:
+        return None
+    return store.rounded(prior_close + (opening["open"] - prior_bars[-1]["close"]))
+
+
+def window_change(bars, cut_at, minutes, rows, as_percent=True):
+    """A symbol's bar close now against its close a window earlier (percent, or a count), with the blank reason."""
+    if not bars:
+        return None, "provider_refused_symbol" if rows else "feed_missing"
+    window_start = bars[-1]["at"] - timedelta(minutes=minutes)
+    earlier = mirai_files.bar_close_at_or_before(bars, window_start)
+    if earlier is None or window_start < session_clock.session_open(session_clock.to_eastern(cut_at).date()):
+        return None, "not_formed_yet"
+    # The 60-minute window first forms on the bar that starts 60 minutes after the open, so the 10:30:59 read is
+    # still not_formed_yet and the first value lands at 10:35, like the hour's move in points.
+    now = bars[-1]["close"]
+    if as_percent:
+        return (store.rounded((now / earlier - 1) * 100) if earlier else None), "no_activity"
+    return int(round(now - earlier)), "no_activity"
 
 
 def blank_reason_for_symbol(quotes_row):
@@ -245,12 +315,29 @@ def collect_breadth(read, quotes_rows):
     read.add_observation("nyse_advancing_portion", portion, blank=reason)
 
 
-def collect_options_scan(read, scans):
-    """VWAP, walls, gamma and ATM IV from the newest native scan; the straddle from the newest scan with an ok ruler."""
+def is_open_interest_read(cut_at, day, half_days):
+    """True on the two reads a day that keep the same-day open interest: the first, and fifty minutes before close."""
+    slot_minute = session_clock.minute_of_session(cut_at, day)
+    until_close = session_clock.session_length_minutes(day, half_days) - slot_minute
+    return slot_minute == OPEN_INTEREST_READS["first_minutes_after_open"] \
+        or until_close == OPEN_INTEREST_READS["minutes_before_close"]
+
+
+def collect_options_scan(read, scans, keep_open_interest):
+    """VWAP, walls, gamma and ATM IV from the newest native scan; the straddle from the newest scan with an ok ruler;
+    on the two open-interest reads, every same-day strike's open interest by side."""
     present = bool(scans)
     scan = scans[-1] if present else {}
     read.note_feed("options_scan", scan.get("at"), received_at=scan.get("at"), present=present)
     views = scan.get("gex_views") or {}
+    if keep_open_interest:
+        held = mirai_files.scan_open_interest_by_strike(scan)
+        for (side, strike), contracts in sorted(held.items()):
+            read.add_observation("same_day_open_interest_contracts", contracts, subject_points=strike, side=side,
+                                 strike_points=int(strike) if strike == int(strike) else strike)
+        if not held:
+            read.add_observation("same_day_open_interest_contracts", None,
+                                 blank="no_activity" if present else "feed_missing")
     read.add_observation("vwap_points", scan.get("vwap"))
     for level in components.WALL_TYPES:
         read.add_observation("level_price_points", views.get(f"{level}_gamma"), level_type=level)
@@ -282,6 +369,18 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes):
     sided = window["bull_usd"] + window["bear_usd"]
     bullish = store.rounded(window["bull_usd"] / sided) if counted and sided > 0 else None
     read.add_observation("bullish_portion_of_sided_premium", bullish, blank="no_activity" if counted else None)
+    minute_closes = {bar["at"].replace(second=0, microsecond=0): bar["close"] for bar in bars}
+
+    def spx_close_at(ts_ms):
+        """SPX's last finished close at a trade's minute (the bar before it), or None early in the session."""
+        moment = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).replace(second=0, microsecond=0)
+        return minute_closes.get(moment - timedelta(minutes=1))
+
+    urgent = mirai_files.tape_urgent_orders(day, cut_at, TAPE_WINDOW_MINUTES, spx_close_at, max_bytes) \
+        if counted else {}
+    for kind in mirai_files.URGENT_KINDS:
+        read.add_observation("urgent_orders_count", urgent.get(kind) if counted else None, kind=kind,
+                             window_minutes=TAPE_WINDOW_MINUTES)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
     coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_FOR_EMPTY_WINDOW) if counted else None
@@ -301,8 +400,21 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes):
 def collect_overnight(read, night):
     """The /ES overnight high and low."""
     read.note_feed("futures_bars", night["newest_at"] if night else None, present=bool(night))
-    read.add_observation("overnight_high_points", night["high"] if night else None, symbol="/ES")
-    read.add_observation("overnight_low_points", night["low"] if night else None, symbol="/ES")
+    read.add_observation("overnight_high_points", night["high"] if night else None, symbol=mirai_files.ES_SYMBOL)
+    read.add_observation("overnight_low_points", night["low"] if night else None, symbol=mirai_files.ES_SYMBOL)
+
+
+def note_daily_bars(read, conn, day, cut_at):
+    """The daily-bars feed's state from the store (Mirai's file is one snapshot, so only stored rows say what was
+    known by the cut): ok while the newest $SPX daily bar known is the prior session's or later, else stale."""
+    newest = store_queries.newest_daily_bar(conn, registry.SPX_SYMBOL, session_clock.iso_utc(cut_at))
+    if newest is None:
+        read.note_feed("daily_bars", None, present=False)
+        return
+    known = session_clock.parse_iso(newest["known_at"])
+    prior_session = session_clock.latest_trading_day(day - timedelta(days=1))
+    status = "ok" if date.fromisoformat(newest["trade_date"]) >= prior_session else "stale"
+    read.note_feed("daily_bars", known, received_at=known, status=status)
 
 
 def collect_events(read, conn, calendar, day, cut_at, row_origin, written_at):
@@ -441,11 +553,12 @@ def collect_feed_health(read, day, rows_received):
         read.add_observation("are_needed_feeds_all_ok", all(read.feed_ok(feed) for feed in needed), consumer=consumer)
 
 
-def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
-    """Price rows for bars not yet stored under this origin, each stamped with the moment it became known."""
+def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, instrument):
+    """Price rows for an instrument's 1-minute bars not yet stored under this origin, each stamped with the moment it
+    became known."""
     # A bar of the read's own slot, or any bar a rebuild writes once the session has closed, is known 62 s after it
     # ends; anything else is known when it is written.
-    already = store_queries.stored_bar_times(conn, day.isoformat(), row_origin)
+    already = store_queries.stored_bar_times(conn, day.isoformat(), row_origin, instrument[0])
     own_slot_starts_at = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
     session_closed = written_at >= session_clock.session_close(day, store_queries.half_day_sessions(conn))
     rows = []
@@ -459,5 +572,26 @@ def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at):
             rule = registry.BAR_ARRIVAL_RULE
         else:
             known_at, rule = session_clock.iso_utc(written_at), "written_at"
-        rows.append(store.bar_price_row(bar, day.isoformat(), row_origin, priced_at, known_at, rule))
+        rows.append(store.bar_price_row(bar, day.isoformat(), row_origin, priced_at, known_at, rule, instrument))
+    return rows
+
+
+def daily_bar_rows(conn, today, half_days, written_at):
+    """Daily bars of $SPX and $TNX not yet stored, priced at each day's close (13:00 on the half days the calendar
+    lists, else 16:00): today's is live_frozen, earlier days are history_rebuilt; each is known at the moment Mirai's
+    file stamps the fetch with (its file write)."""
+    rows = []
+    for symbol, kind in registry.DAILY_BAR_SYMBOLS.items():
+        stored = store_queries.daily_bar_days(conn, symbol)
+        for bar in mirai_files.read_daily_bars(symbol):
+            if bar["day"] in stored:
+                continue
+            day = date.fromisoformat(bar["day"])
+            fetched = session_clock.parse_iso(bar["fetched_at"]) if bar.get("fetched_at") else written_at
+            close = session_clock.session_close(day, half_days)
+            origin = "live_frozen" if day == today else "history_rebuilt"
+            rows.append(store.bar_price_row(bar, bar["day"], origin, session_clock.iso_utc(close),
+                                            session_clock.iso_utc(min(fetched, written_at)), "file_modified_at",
+                                            (symbol, kind, "daily_bars"), "day",
+                                            session_clock.session_length_minutes(day, half_days)))
     return rows
