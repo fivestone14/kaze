@@ -97,9 +97,11 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     collect_clock(read, cut_at, day, half_days)
     quotes_rows = mirai_files.read_quotes_rows(day, cut_at)
     prior_close = collect_watchlist_quotes(read, quotes_rows, bars)
+    if prior_close is None:
+        prior_close = stored_prior_session_close(conn, day)
     collect_breadth(read, quotes_rows)
     watch_rows = mirai_files.read_watchlist_bars(day, cut_at)
-    collect_watchlist_bars(read, watch_rows, day, cut_at, prior_close)
+    collect_watchlist_bars(read, watch_rows, day, cut_at, prior_close, half_days)
     note_daily_bars(read, conn, day, cut_at)
     collect_options_scan(read, mirai_files.read_native_scans(day, cut_at, file_limits.get("options_scan")),
                          is_open_interest_read(cut_at, day, half_days))
@@ -222,12 +224,12 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
     return spx.get("close")
 
 
-def collect_watchlist_bars(read, rows, day, cut_at, prior_close):
+def collect_watchlist_bars(read, rows, day, cut_at, prior_close, half_days):
     """From the watchlist's minute bars: the true open (/ES from the prior session's last bar to its 09:30 bar, on
     the prior close), the leaders' change over each bar window, and breadth's net change over each window."""
     newest = rows[-1]["at"] if rows else None
     read.note_feed("watchlist_bars", newest, received_at=newest, present=bool(rows))
-    true_open = true_open_points(rows, day, prior_close)
+    true_open = true_open_points(day, cut_at, prior_close, half_days)
     read.add_observation("true_open_points", true_open,
                          blank="not_applicable" if day in mirai_files.es_roll_days() else "feed_missing",
                          source="watchlist_quotes" if true_open is None and prior_close is None else None)
@@ -242,20 +244,30 @@ def collect_watchlist_bars(read, rows, day, cut_at, prior_close):
         read.add_observation("breadth_net_change_count", change, blank=blank, window_minutes=minutes)
 
 
-def true_open_points(rows, day, prior_close):
+def stored_prior_session_close(conn, day):
+    """The prior session's SPX close from the store, for history before the quotes feed began (2026-09-28): its daily
+    bar's close, else its last 1-minute bar's close; None when the store holds neither. History rows carry the
+    load's known_at, so only their market times are checked against the cut."""
+    prior_day = session_clock.latest_trading_day(day - timedelta(days=1))
+    daily = store_queries.daily_bars(conn, registry.SPX_SYMBOL, prior_day.isoformat())
+    if daily and daily[-1]["trade_date"] == prior_day.isoformat():
+        return daily[-1]["close"]
+    bars = store_queries.session_bars(conn, prior_day.isoformat())
+    return bars[-1]["close"] if bars else None
+
+
+def true_open_points(day, cut_at, prior_close, half_days):
     """The prior close plus /ES's move from the prior session's last bar to today's 09:30 bar; None when any part is
     missing or the contract rolled overnight."""
     if prior_close is None or day in mirai_files.es_roll_days():
         return None
-    opening = next((bar for bar in mirai_files.symbol_bars(rows, mirai_files.ES_SYMBOL)
-                    if bar["at"] == session_clock.session_open(day)), None)
+    opening = next((bar for bar in mirai_files.es_bars(day, cut_at) if bar["at"] == session_clock.session_open(day)),
+                   None)
     prior_day = session_clock.latest_trading_day(day - timedelta(days=1))
-    prior_rows = mirai_files.read_watchlist_bars(prior_day, session_clock.session_open(day))
-    prior_bars = [bar for bar in mirai_files.symbol_bars(prior_rows, mirai_files.ES_SYMBOL)
-                  if bar["at"].date() == prior_day]
-    if opening is None or not prior_bars:
+    es_prior_close = mirai_files.es_prior_session_close(day, prior_day, session_clock.session_close(prior_day, half_days))
+    if opening is None or es_prior_close is None:
         return None
-    return store.rounded(prior_close + (opening["open"] - prior_bars[-1]["close"]))
+    return store.rounded(prior_close + (opening["open"] - es_prior_close))
 
 
 def window_change(bars, cut_at, minutes, rows, as_percent=True):
@@ -325,7 +337,8 @@ def is_open_interest_read(cut_at, day, half_days):
 
 def collect_options_scan(read, scans, keep_open_interest):
     """VWAP, walls, gamma and ATM IV from the newest native scan; the straddle from the newest scan with an ok ruler;
-    on the two open-interest reads, every same-day strike's open interest by side."""
+    on the two open-interest reads, every same-day strike's open interest by side (no row at all when the scan is
+    absent or lists none: the options_scan feed row says why)."""
     present = bool(scans)
     scan = scans[-1] if present else {}
     read.note_feed("options_scan", scan.get("at"), received_at=scan.get("at"), present=present)
@@ -335,9 +348,6 @@ def collect_options_scan(read, scans, keep_open_interest):
         for (side, strike), contracts in sorted(held.items()):
             read.add_observation("same_day_open_interest_contracts", contracts, subject_points=strike, side=side,
                                  strike_points=int(strike) if strike == int(strike) else strike)
-        if not held:
-            read.add_observation("same_day_open_interest_contracts", None,
-                                 blank="no_activity" if present else "feed_missing")
     read.add_observation("vwap_points", scan.get("vwap"))
     for level in components.WALL_TYPES:
         read.add_observation("level_price_points", views.get(f"{level}_gamma"), level_type=level)

@@ -145,6 +145,30 @@ def symbol_bars(rows, symbol):
     return [dict(bars[ts], at=parse_iso(ts)) for ts in sorted(bars)]
 
 
+def es_bars(day, cut):
+    """/ES bars of a day file at or before the cut, each with a parsed 'at', oldest first: the watchlist's 1-minute
+    bars (live), else the futures file's regular-session bars (1-minute when it has them, else 5-minute), which
+    Mirai saves after the close, so only a rebuild of history ever reaches them."""
+    bars = symbol_bars(read_watchlist_bars(day, cut), ES_SYMBOL)
+    if bars:
+        return bars
+    rows = [row for row in read_jsonl(day_file_path(FILES["futures_bars"], day))
+            if row.get("symbol") == ES_SYMBOL and row.get("session") == "regular" and row.get("ts")]
+    minutes = 1 if any(row.get("bar_minutes") == 1 for row in rows) else 5
+    bars = [dict(row, at=parse_iso(row["ts"])) for row in rows if row.get("bar_minutes") == minutes]
+    return sorted((bar for bar in bars if bar["at"] <= cut), key=lambda bar: bar["at"])
+
+
+def es_prior_session_close(day, prior_day, prior_close_at):
+    """/ES's last bar close of the prior session at or before its close: from the prior day's file, else from the
+    prior-session bars the futures file of the day itself carries; None when neither has one."""
+    for bars in (es_bars(prior_day, prior_close_at), es_bars(day, prior_close_at)):
+        kept = [bar for bar in bars if bar["at"].date() == prior_day]
+        if kept:
+            return kept[-1]["close"]
+    return None
+
+
 def bar_close_at_or_before(bars, moment):
     """The close of the last bar starting at or before a moment, or None."""
     return next((bar["close"] for bar in reversed(bars) if bar["at"] <= moment), None)
