@@ -13,7 +13,7 @@ from engine import paths, session_clock
 from engine.collect import mirai_files
 from engine.grade import grade
 from engine.range import range_fit
-from engine.push_pull import reading_specs
+from engine.push_pull import net_and_odds, reading_specs
 from engine.store import components, registry, store, store_queries
 
 PHONE_WORD_FOR_FEED_STATUS = {"ok": "live", "late": "partial", "stale": "partial", "missing": "blind"}
@@ -30,8 +30,8 @@ CHANNEL_KEYS = ("swing", "stretch", "average_stretch", "fit_sessions", "fit_wind
                 "stays_inside_share", "options_swing", "options_check", "clipped", "ends_at", "dials",
                 "dials_product", "bands", "status", "reason")
 DIRECTION_KEYS = ("chance_up_if_moves", "weight_applied", "text")
-READING_KEYS = ("name", "label", "group", "status", "in_the_net", "speaks", "raw", "raw_blank", "unit", "z",
-                "z_blank", "strength", "weight", "booster", "points_by_channel", "side", "live")
+READING_KEYS = ("name", "label", "group", "status", "in_the_net", "speaks", "raw", "raw_blank", "unit", "shape",
+                "z", "z_blank", "strength", "weight", "booster", "points_by_channel", "side", "live")
 CALL_KEYS = ("net", "groups", "odds", "wind", "centres", "chance_up_if_moves", "weight_applied", "text")
 # The finished-window facts the Read page draws, as the window's outcome values name them.
 FINISHED_FACTS = {"price": "grade_start_price_points", "end": registry.WINDOW_PRICE_MEASURE["end"],
@@ -158,6 +158,9 @@ def range_block(forecast):
     block["push_pull"] = {"readings": [{key: entry[key] for key in READING_KEYS} for entry in forces["readings"]],
                           "context": forces["context"],
                           "groups": {letter: name for letter, (name, _) in reading_specs.GROUPS.items()},
+                          "caps": {"young_group_swings": net_and_odds.YOUNG_GROUP_CAP_SWINGS,
+                                   "total_swings": net_and_odds.TOTAL_CAP_SWINGS,
+                                   "promoted_groups": sorted(forces.get("promoted_groups", ()))},
                           "channels": {name: {key: call[key] for key in CALL_KEYS}
                                        for name, call in forces["channels"].items()}}
     block["wind"] = {"levels": components.WIND_LEVELS, "dot_steps": components.WIND_DOT_STEPS}

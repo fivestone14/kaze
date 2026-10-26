@@ -1204,14 +1204,26 @@ function pushPullModel() {
                                                && reading.points !== undefined);
   const pull = counted.reduce((sum, reading) => sum + Math.max(0, -reading.points), 0);
   const push = counted.reduce((sum, reading) => sum + Math.max(0, reading.points), 0);
-  // live: the engine's net (its group caps already applied) moves by the trend's change and is held to the total
-  // cap; the odds then follow the engine's spread of the average (its sigma and edge) so the card's numbers move
-  // with the tape between reads
+  // live: the net is summed again from the readings under the engine's own caps (each young group held to its cap,
+  // then the total), so it is the net the next read would give; the odds then follow the engine's spread of the
+  // average (its sigma and edge) so the card's numbers move with the tape between reads
   let net = call.net === null || call.net === undefined ? null : call.net;
-  if (net !== null && live && swing) net = clamp(net + liveDelta, -0.35 * swing, 0.35 * swing);
+  if (net !== null && live && swing && liveDelta !== 0) net = cappedNet(counted, swing, forces.caps);
   const odds = net === null ? null : live && call.odds ? liveOdds(net, call.odds) : call.odds;
   return { readings, swing, live, pull, push, net, odds, groups: call.groups || {},
            weight: call.weight_applied, context: forces.context || {} };
+}
+
+/** The engine's net_of: the readings' points summed per group, a group nobody has promoted held to its cap, the sum
+ *  held to the total cap. */
+function cappedNet(counted, swing, caps) {
+  const limits = caps || { young_group_swings: 0.15, total_swings: 0.35, promoted_groups: [] };
+  const groups = {};
+  counted.forEach((reading) => { groups[reading.group] = (groups[reading.group] || 0) + reading.points; });
+  const total = Object.entries(groups).reduce((sum, [group, points]) => sum
+    + ((limits.promoted_groups || []).includes(group) ? points
+       : clamp(points, -limits.young_group_swings * swing, limits.young_group_swings * swing)), 0);
+  return clamp(total, -limits.total_swings * swing, limits.total_swings * swing);
 }
 
 /** The odds of up, flat and down for a live net, with the engine's sigma and edge: the same normal curve it uses. */
@@ -1282,8 +1294,10 @@ function readingFigure(reading) {
   const raw = `${fmt(reading.raw, reading.unit === "points" || reading.unit === "issues"
                                   || reading.unit === "orders" ? 1 : 3, true)} ${units[reading.unit] || ""}`.trim();
   const z = reading.z === null || reading.z === undefined ? "" : ` · z ${fmt(reading.z, 2, true)}`;
+  // a percent only for the tanh shapes (−1..1); the clipped give-back and the catch-up's points show as numbers
+  const tanhShape = ["steady", "reversing", "one_sided"].includes(reading.shape);
   const strength = reading.strength === null || reading.strength === undefined ? ""
-    : ` · ${fmt(reading.strength * 100, 0, true)}%`;
+    : tanhShape ? ` · ${fmt(reading.strength * 100, 0, true)}%` : ` · s ${fmt(reading.strength, 2, true)}`;
   return `${raw}${z}${strength}`;
 }
 
@@ -1299,7 +1313,10 @@ function readingShort(reading) {
 /** The card's moving parts at one frame: the wind chip, the net, the tug bar, the odds and each row's bar and words. */
 function drawPushPull(model) {
   const net = model ? model.net : null;
-  const even = net === null || Math.abs(net) < PUSH_PULL.evenPoints;
+  // even by the engine's rule: up and down within half a point of a percent of each other (by the net while there
+  // are no odds)
+  const odds0 = model ? model.odds : null;
+  const even = net === null || (odds0 ? Math.abs(odds0.up - odds0.down) < 0.005 : Math.abs(net) < PUSH_PULL.evenPoints);
   const netColour = even ? COLOUR.mute : net < 0 ? COLOUR.rust : COLOUR.blue;
   const strength = net === null || !model.swing ? null : Math.abs(net) / model.swing;
   const wind = windLevel(strength);

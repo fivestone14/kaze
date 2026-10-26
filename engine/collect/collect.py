@@ -101,7 +101,7 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
         prior_close = stored_prior_session_close(conn, day)
     collect_breadth(read, quotes_rows)
     watch_rows = mirai_files.read_watchlist_bars(day, cut_at)
-    collect_watchlist_bars(read, watch_rows, day, cut_at, prior_close, half_days)
+    collect_watchlist_bars(read, watch_rows, quotes_rows, day, cut_at, prior_close, half_days)
     note_daily_bars(read, conn, day, cut_at)
     collect_options_scan(read, mirai_files.read_native_scans(day, cut_at, file_limits.get("options_scan")),
                          is_open_interest_read(cut_at, day, half_days))
@@ -114,7 +114,7 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     collect_feed_health(read, day, {"spx_bars": len(bars),
                                     "watchlist_quotes": sum(1 for r in quotes_rows if r.get("quotes")),
                                     "nyse_breadth": sum(1 for r in quotes_rows if r.get("bars")),
-                                    "watchlist_bars": len(watch_rows)})
+                                    **({"watchlist_bars": len(watch_rows)} if watch_rows else {})})
     bars_state = read.feed_states["spx_bars"]["status"]
     snapshot["snapshot_status"] = "blind" if bars_state == "missing" else "built"
     snapshot["snapshot_status_reason"] = {"missing": "spx_bars_missing", "late": "cut_bar_missing"}.get(bars_state)
@@ -224,24 +224,71 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
     return spx.get("close")
 
 
-def collect_watchlist_bars(read, rows, day, cut_at, prior_close, half_days):
-    """From the watchlist's minute bars: the true open (/ES from the prior session's last bar to its 09:30 bar, on
-    the prior close), the leaders' change over each bar window, and breadth's net change over each window."""
-    newest = rows[-1]["at"] if rows else None
-    read.note_feed("watchlist_bars", newest, received_at=newest, present=bool(rows))
-    true_open = true_open_points(day, cut_at, prior_close, half_days)
-    read.add_observation("true_open_points", true_open,
-                         blank="not_applicable" if day in mirai_files.es_roll_days() else "feed_missing",
-                         source="watchlist_quotes" if true_open is None and prior_close is None else None)
+def collect_watchlist_bars(read, rows, quotes_rows, day, cut_at, prior_close, half_days):
+    """The true open, the leaders' change over each window and breadth's net change over each window. Mirai writes
+    the watchlist's minute bars only after the close, so whenever the minute quotes hold what a value needs at the
+    cut (every day since they began, 2026-09-28, live and rebuilt alike) the quotes are the source; the bars serve
+    history before that."""
+    if rows:
+        read.note_feed("watchlist_bars", rows[-1]["at"], received_at=rows[-1]["at"])
+    quoted = bool(quotes_rows)
+    true_open = quoted_true_open(quotes_rows, day) if quoted else None
+    if true_open is None:
+        true_open = true_open_points(day, cut_at, prior_close, half_days)
+    source = "watchlist_quotes" if quoted or prior_close is None else "watchlist_bars"
+    read.add_observation("true_open_points", true_open, source=source,
+                         blank="not_applicable" if day in mirai_files.es_roll_days() else "feed_missing")
     for symbol in LEADER_SYMBOLS:
-        bars = mirai_files.symbol_bars(rows, symbol)
+        series = quoted_series(quotes_rows, symbol) if quoted else mirai_files.symbol_bars(rows, symbol)
         for minutes in BAR_WINDOW_MINUTES:
-            change, blank = window_change(bars, cut_at, minutes, rows)
-            read.add_observation("fund_change_window_pct", change, blank=blank, symbol=symbol, window_minutes=minutes)
-    breadth = mirai_files.symbol_bars(rows, mirai_files.BREADTH_NET_SYMBOL)
+            change, blank = window_change(series, cut_at, minutes, quotes_rows if quoted else rows)
+            read.add_observation("fund_change_window_pct", change, blank=blank, symbol=symbol, window_minutes=minutes,
+                                 source="watchlist_quotes" if quoted else "watchlist_bars")
+    breadth = quoted_series(quotes_rows, mirai_files.BREADTH_NET_SYMBOL) if quoted \
+        else mirai_files.symbol_bars(rows, mirai_files.BREADTH_NET_SYMBOL)
     for minutes in BAR_WINDOW_MINUTES:
-        change, blank = window_change(breadth, cut_at, minutes, rows, as_percent=False)
-        read.add_observation("breadth_net_change_count", change, blank=blank, window_minutes=minutes)
+        change, blank = window_change(breadth, cut_at, minutes, quotes_rows if quoted else rows, as_percent=False)
+        read.add_observation("breadth_net_change_count", change, blank=blank, window_minutes=minutes,
+                             source="watchlist_quotes" if quoted else "watchlist_bars")
+
+
+# The poll that stands for the open: the newest at or before 09:30:00, else the first after it within this many
+# seconds; a later first poll leaves the quotes' true open blank (the bars, when they exist, then serve).
+OPEN_POLL_LATE_SECONDS = 180
+
+
+def quoted_true_open(quotes_rows, day):
+    """SPX's prior close plus /ES's move from its prior settlement to its last trade at the open, from the minute
+    quotes; None without both quotes near the open or across a contract roll."""
+    if day in mirai_files.es_roll_days():
+        return None
+    opened = session_clock.session_open(day)
+    polls = [row for row in quotes_rows if ((row.get("quotes") or {}).get(mirai_files.ES_SYMBOL) or {}).get("last")]
+    before = [row for row in polls if row["at"] <= opened]
+    after = [row for row in polls if opened < row["at"] <= opened + timedelta(seconds=OPEN_POLL_LATE_SECONDS)]
+    poll = before[-1] if before else after[0] if after else None
+    spx = next((((row.get("quotes") or {}).get(registry.SPX_SYMBOL) or {}).get("close") for row in quotes_rows
+                if ((row.get("quotes") or {}).get(registry.SPX_SYMBOL) or {}).get("close")), None)
+    if poll is None or spx is None:
+        return None
+    es = poll["quotes"][mirai_files.ES_SYMBOL]
+    if es.get("close") is None:
+        return None
+    return store.rounded(spx + (es["last"] - es["close"]))
+
+
+def quoted_series(quotes_rows, symbol):
+    """One symbol's value at each minute poll since the open, oldest first, shaped like bars ({at, close}): a quote's
+    last trade, or a breadth bar's close for $ADD."""
+    series = []
+    for row in quotes_rows:
+        if symbol.startswith("$") and symbol in (row.get("bars") or {}):
+            value = row["bars"][symbol].get("close")
+        else:
+            value = ((row.get("quotes") or {}).get(symbol) or {}).get("last")
+        if value is not None and row["at"] >= session_clock.session_open(row["at"].astimezone(session_clock.EASTERN).date()):
+            series.append({"at": row["at"], "close": value})
+    return series
 
 
 def stored_prior_session_close(conn, day):

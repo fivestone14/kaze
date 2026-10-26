@@ -25,13 +25,15 @@ def measure_window(conn, decision, day, series, known_at_by_minute, snapshot_row
     first, last = window_minute_span(decision, day)
     facts = range_fit.window_facts(*series, first, last)
     # The push/pull readings' grade skips the window's first minute: Kaze publishes 30–55 s after the cut and the
-    # bar lands ~62 s late, so the average from the second minute is the first a reader could have acted on.
+    # bar lands ~62 s late, so a reader can act at the first minute's close; the grade is the average of the minutes
+    # after it, measured from that close.
     after_publish = range_fit.window_facts(*series, first + 1, last) if last > first else None
+    first_close = range_fit.window_facts(*series, first, first)
     start_price, start_bar_at = store_queries.read_price_and_bar(conn, snapshot_rowid)
     held = [known_at_by_minute[minute] for minute in range(first, last + 1) if minute in known_at_by_minute]
     return {"start_price": start_price, "start_bar_at": start_bar_at, "facts": facts,
-            "average_from_publish": after_publish["average"] - start_price
-            if after_publish is not None and start_price is not None else None,
+            "average_from_publish": after_publish["average"] - first_close["end"]
+            if after_publish is not None and first_close is not None else None,
             "moves": signed_moves(start_price, facts), "minutes_wanted": last - first + 1,
             "known_at": max(held) if held else None}
 

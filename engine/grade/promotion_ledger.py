@@ -24,7 +24,7 @@ MINIMUM_DAYS_FOR_FIT = 2
 
 def weight_specs():
     """The specs grouped by the weight they are scored under: {weight name: [specs]}; logged readings are scored too,
-    they just never join the net."""
+    they just never join the net and never lift a group's cap."""
     groups = {}
     for spec in reading_specs.SPECS:
         groups.setdefault(spec.weight_name, []).append(spec)
@@ -49,9 +49,10 @@ def claimed_sign(spec, trend_ness):
 
 
 def day_scores(sample, specs, first_day):
-    """Per day (after first_day), the reads with their (summed) strength, the grade in swings and the day's
-    trend-ness; the score of a read is strength × grade turned the way the reading claims to push. Days with no
-    strength are left out."""
+    """Per day (after first_day), the reads with their (summed) strength × booster, the grade in swings and the
+    day's trend-ness; the score of a read is that sized strength × grade turned the way the reading claims to push.
+    A day counts only when the reading spoke (some sized strength not 0), so a reading's live days, its e-value and
+    its promotion minimum count the days it said something (the events, for an event reading)."""
     days = {}
     for read in sample:
         if first_day and read["trade_date"] <= first_day or not read["swing"]:
@@ -59,10 +60,11 @@ def day_scores(sample, specs, first_day):
         strengths = [read["strengths"].get(spec.name) for spec in specs]
         if any(s is None for s in strengths):
             continue
+        sized = sum(s * read.get("boosters", {}).get(spec.name, 1.0) for s, spec in zip(strengths, specs))
         grade = read["average_from_publish"] / read["swing"]
-        days.setdefault(read["trade_date"], []).append((sum(strengths), grade, read["trend_ness"],
+        days.setdefault(read["trade_date"], []).append((sized, grade, read["trend_ness"],
                                                         claimed_sign(specs[0], read["trend_ness"])))
-    return {day: reads for day, reads in sorted(days.items())}
+    return {day: reads for day, reads in sorted(days.items()) if any(s for s, _, _, _ in reads)}
 
 
 def e_values(scores):

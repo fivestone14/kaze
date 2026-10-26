@@ -20,15 +20,18 @@ def read_forces(conn, snapshot, observations, forecast, cut_at, half_days):
     """Run every reading for a read and put the push/pull block on the forecast; returns the block."""
     facts = ReadFacts(conn, snapshot, observations, forecast, cut_at, half_days)
     raw_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE)
+    day_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE, baseline.WHOLE_DAY_MINUTES) \
+        if any(spec.whole_day_baseline for spec in reading_specs.SPECS) else {}
     context = ctx.context_of(facts, baseline.history(conn, facts.trade_date, cut_at, ctx.CONTEXT_MEASURE))
     ledger = store_queries.push_pull_ledger_known(conn, facts.trade_date, facts.cut_iso)
-    readings = [reading_entry(spec, facts, raw_history, context, ledger.get(spec.weight_name))
-                for spec in reading_specs.SPECS]
+    readings = [reading_entry(spec, facts, day_history if spec.whole_day_baseline else raw_history, context,
+                              ledger.get(spec.weight_name)) for spec in reading_specs.SPECS]
     promoted_groups = {spec.group for spec in reading_specs.SPECS
-                       if (ledger.get(spec.weight_name) or {}).get("promoted")}
+                       if spec.in_the_net and (ledger.get(spec.weight_name) or {}).get("promoted")}
     channels = {name: channel_block(readings, channel, name, forecast["price"], promoted_groups)
                 for name, channel in forecast["channels"].items()}
-    return place_on_forecast(forecast, {"readings": readings, "context": context, "channels": channels})
+    return place_on_forecast(forecast, {"readings": readings, "context": context, "channels": channels,
+                                        "promoted_groups": sorted(promoted_groups)})
 
 
 def empty_forces(forecast):
@@ -72,6 +75,7 @@ def reading_entry(spec, facts, raw_history, context, ledger_entry):
         "raw_side": reading.side, "unit": spec.unit, "usual": usual, "spread": spread, "sessions": sessions,
         "z": z, "z_blank": z_blank, "strength": strength, "weight": weight, "booster": booster,
         "points_by_channel": points, "side": side_of(points.get(components.HEADLINE_HORIZON)), "live": None,
+        "shape": spec.shape,
     }
     if spec.name == LIVE_READING and strength is not None and facts.true_open is not None:
         entry["live"] = {"follows": registry.LIVE_PRICE_FEED, "since_price": facts.true_open, "usual": usual,

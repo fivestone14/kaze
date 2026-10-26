@@ -9,6 +9,9 @@ from engine.store import store_queries
 
 SESSIONS = 60
 CLOCK_POOL_MINUTES = 15
+# A rarely firing gated reading pools its history across the whole session instead (the grind fires on a few reads
+# a day, so ten sessions firing within ±15 minutes of one clock may never come).
+WHOLE_DAY_MINUTES = 400
 MIN_SESSIONS = 10
 MAD_TO_SPREAD = 1.4826
 USUAL_ZERO, USUAL_SAME_CLOCK = "zero", "same_clock_median"
@@ -17,9 +20,10 @@ USUAL_RULES = (USUAL_ZERO, USUAL_SAME_CLOCK)
 TOO_FEW_SESSIONS = "too_few_sessions"
 
 
-def history(conn, trade_date, cut_at, measure_name):
-    """Every stored value of a measure at the same clock (±CLOCK_POOL_MINUTES) over the past SESSIONS sessions, by
-    subject: {subject_key: [(sessions_ago, value), ...]}, sessions_ago counting 1 for the newest past session."""
+def history(conn, trade_date, cut_at, measure_name, pool_minutes=CLOCK_POOL_MINUTES):
+    """Every stored value of a measure at the same clock (±pool_minutes, the whole session at WHOLE_DAY_MINUTES) over
+    the past SESSIONS sessions, by subject: {subject_key: [(sessions_ago, value), ...]}, sessions_ago counting 1 for
+    the newest past session."""
     minute = session_clock.minute_of_session(cut_at, session_clock.to_eastern(cut_at).date())
     sessions = store_queries.read_sessions_before(conn, trade_date, SESSIONS)
     if not sessions:
@@ -27,9 +31,9 @@ def history(conn, trade_date, cut_at, measure_name):
     ages = {day: len(sessions) - index for index, day in enumerate(sessions)}
     by_subject = {}
     for row in store_queries.values_at_same_clock(conn, measure_name, sessions[0], trade_date, cut_at,
-                                                 CLOCK_POOL_MINUTES + 60):
+                                                 pool_minutes + 60):
         at = session_clock.parse_iso(row["cut_at"])
-        if abs(session_clock.minute_of_session(at, session_clock.to_eastern(at).date()) - minute) > CLOCK_POOL_MINUTES:
+        if abs(session_clock.minute_of_session(at, session_clock.to_eastern(at).date()) - minute) > pool_minutes:
             continue
         by_subject.setdefault(row["subject_key"], []).append((ages[row["trade_date"]], row["value_number"]))
     return by_subject

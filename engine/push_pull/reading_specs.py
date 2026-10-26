@@ -61,7 +61,8 @@ class Spec:
 
     def __init__(self, name, label, group, measure, unit, shape, speaks, history_size, status, *, usual=baseline.USUAL_ZERO,
                  spread_floor=0.0, half_life_sessions=30, weight_rule=FIXED, day_type=None, history_days=None,
-                 boosters=(), fixed_booster=None, shared_weight=None, gated=False, counts="days", evidence=""):
+                 boosters=(), fixed_booster=None, shared_weight=None, gated=False, whole_day_baseline=False,
+                 counts="days", evidence=""):
         self.name, self.label, self.group, self.measure, self.unit = name, label, group, measure, unit
         self.shape, self.speaks, self.history_size, self.status = shape, speaks, history_size, status
         self.usual, self.spread_floor, self.half_life_sessions = usual, spread_floor, half_life_sessions
@@ -72,6 +73,8 @@ class Spec:
         self.boosters, self.fixed_booster, self.shared_weight = dict(boosters), fixed_booster, shared_weight
         # A gated reading's zeros (gate shut) stay out of its baseline; an event reading counts events, not days.
         self.gated, self.counts, self.evidence = gated, counts, evidence
+        # A rarely firing gated reading pools its baseline across the whole session (same_clock_baseline).
+        self.whole_day_baseline = whole_day_baseline
         if shape not in shapes.SHAPES or usual not in baseline.USUAL_RULES or status not in STATUSES \
                 or group not in GROUPS:
             raise ValueError(f"reading {name} has a word outside its lists")
@@ -113,7 +116,7 @@ SPECS = (
          evidence="IC +0.09 (p 0.02) raw; 0 near the day's high or low (reversing: the weight is the fade's size)"),
     Spec("grind_at_extreme", "Grind At Extreme", "H", heavyweights.grind_at_extreme, "issues", shapes.ONE_SIDED,
          Speaks(from_minute=60, until_minutes_before_close=20), +0.39, EARNING, spread_floor=60.0,
-         half_life_sessions=20, gated=True, evidence="IC 0.06; the conditional form of Trend (r 0.81 when it fires); joint fit +0.39"),
+         half_life_sessions=20, gated=True, whole_day_baseline=True, evidence="IC 0.06; the conditional form of Trend (r 0.81 when it fires); joint fit +0.39"),
     # ---- B · dealers --------------------------------------------------------------------------------------------------
     Spec("pin_to_centre", "Pin To Centre", "B", dealers.pin_to_centre, "swings", shapes.STEADY,
          Speaks(from_minutes_before_close=45, until_minutes_before_close=20), +0.525, LIVE, spread_floor=0.15,
@@ -125,7 +128,7 @@ SPECS = (
          evidence="the hedge need has a usual positive level (~+0.4bn): usual = same-clock median"),
     Spec("option_wall_untested", "Option Wall", "B", dealers.option_wall_untested, "share_per_swing",
          shapes.STEADY, Speaks(from_minute=30, until_minutes_before_close=50), +0.06, EARNING, spread_floor=0.01,
-         gated=True, fixed_booster=lambda read: ctx.wall_clock_booster(read.minutes_left),
+         gated=True, whole_day_baseline=True, fixed_booster=lambda read: ctx.wall_clock_booster(read.minutes_left),
          evidence="IC +0.060 (Holm 0.27); fragile to a one-strike tolerance; clock booster √(195 ÷ min left)"),
     # ---- C · catch-up --------------------------------------------------------------------------------------------------
     Spec("spy_basis", "SPY Basis", "C", catch_up.spy_basis, "points", shapes.CATCH_UP,
@@ -169,6 +172,7 @@ def spec_rows():
     return [{"name": spec.name, "label": spec.label, "group": spec.group, "group_name": GROUPS[spec.group][0],
              "unit": spec.unit, "shape": spec.shape, "usual": spec.usual, "speaks": spec.speaks.words(),
              "spread_floor": spec.spread_floor, "half_life_sessions": spec.half_life_sessions, "gated": spec.gated,
+             "whole_day_baseline": spec.whole_day_baseline,
              "history_size": spec.history_size, "history_days": spec.history_days, "day_type": spec.day_type,
              "status": spec.status, "weight_rule": spec.weight_rule, "boosters": sorted(spec.boosters),
              "fixed_booster": spec.fixed_booster is not None, "shared_weight": spec.shared_weight,

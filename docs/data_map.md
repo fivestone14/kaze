@@ -46,7 +46,7 @@ gzipped copies of older days read the same way):
 | `options_scan` | `spx/scanner/spx_options_scanner_results_by_scan/{day}.jsonl` | 300 s | minute |
 | `options_tape` | `market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl` | 180 s | minute |
 | `futures_bars` | `market/futures_price_bars_by_minute/{day}.jsonl` | 1 day | once_a_day |
-| `watchlist_bars` | `market/watchlist_price_bars_by_minute/{day}.jsonl` (/ES, SPY, SMH, QQQ, $ADD by bar start) | 180 s | minute |
+| `watchlist_bars` | `market/watchlist_price_bars_by_minute/{day}.jsonl` (/ES, SPY, SMH, QQQ, $ADD by bar start; written after the close) | 2 days | once_a_day |
 | `daily_bars` | `market/spx_vix_rates_price_bars_by_day/{symbol}.jsonl` ($SPX, $TNX, ten years) | 2 days | once_a_day |
 | `event_calendar` | `settings/market_event_calendar_by_event.json` | 100 days | hand_kept |
 | `claude_forecast` | `spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl` | 40 min | minute |
@@ -55,10 +55,12 @@ gzipped copies of older days read the same way):
 
 The cadence (`registry.FEEDS`, also in each feed's component parameters) says how often a feed lands: `live` (a tick
 about every second), `minute` (through the session, judged by its age), `once_a_day` (the night's futures, the
-daily closes, the login check) or `hand_kept` (the calendar, extended by hand). The watchlist bars are the live
-source for /ES (the true open), SPY (the SPY basis and SPY's own bars in the price table), SMH and QQQ (the leader
-surge) and $ADD (breadth's change); the futures file is saved after the close, so only a rebuild of history before
-2026-08-11 reaches it for the true open. The daily bars are one snapshot file refetched after each close: the store
+daily closes, the login check) or `hand_kept` (the calendar, extended by hand). The watchlist bars are a
+file Mirai writes only after the close (~16:20 ET): it gives SPY's bars to the price table and the SPY basis, and
+the true open, the leaders' and breadth's change for history before the minute quotes began (2026-09-28); from then
+on those three come from the minute quotes, live and rebuilt alike (/ES's last trade at the open against its prior
+settlement, SMH and QQQ last trades, the $ADD breadth bar). The futures file is also saved after the close, so only
+a rebuild of history before 2026-08-11 reaches it for the true open. The daily bars are one snapshot file refetched after each close: the store
 keeps each day's bar with the fetch moment as its `known_at`, and the feed's row on a read comes from the store, so a
 rebuilt read never claims a fetch it could not have seen.
 
@@ -456,7 +458,7 @@ in time). The phone shows every reading, logged ones dimmed.
    same-clock ranks, `straightness_since_open`, `side_share_since_open`, `closeness_to_extreme`, eased in by a ramp
    from 0 at 10:00 to 1 at 12:30, 0.5 before), `path_straightness` (the 30-minute path), `dealer_gamma` (+1 positive,
    −1 negative), `rates_tide` (the 10-year yield's 20-session change as a z against 250 sessions, floor 5 bp),
-   `vix_level`, `time_of_day` (share of the session gone), `down_day` (±1 against the prior close).
+   `vix_level`, `time_of_day` (share of the session gone), `down_day` (+1 below the prior close, −1 above it).
 6. **Points** `push_pull_points` (factor, per channel) = strength × weight × booster × the channel's swing; a catch-up
    reading's weight is a plain ratio on its points. **Group sums** `push_pull_group_points` (kind = the group's name):
    a group nobody has promoted yet is held to ±0.15 swing; the **net** `push_pull_net_points` is the groups' sum held

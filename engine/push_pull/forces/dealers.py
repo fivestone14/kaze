@@ -84,7 +84,7 @@ def pin_to_centre(read):
 
 def dealer_drift(read):
     """Billions of dollars dealers must trade if price stays put while the same-day book (customers long the calls,
-    short the puts) decays to expiry: positive means dealers buy."""
+    short the puts) decays to expiry, signed so that positive has pushed price up in the tested history."""
     book, spot, iv = read.option_book, read.price, implied_vol(read)
     if not book or spot is None:
         return book_blank(read)

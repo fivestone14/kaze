@@ -106,8 +106,8 @@ FEEDS = (
     ("spx_bars", "SPX 1-minute bars", paths.MIRAI_FILES["spx_bars"], 180, "minute"),
     ("watchlist_quotes", "one minute's quotes for the watchlist (SPX, VIX family, funds, stocks, rates)",
      paths.MIRAI_FILES["watchlist_quotes"], 180, "minute"),
-    ("watchlist_bars", "one minute's bars for the watchlist (SPY, /ES, $ADD, the leaders, sectors)",
-     paths.MIRAI_FILES["watchlist_bars"], 180, "minute"),
+    ("watchlist_bars", "the day's minute bars for the watchlist (SPY, /ES, $ADD, the leaders, sectors), written by "
+     "Mirai after the close", paths.MIRAI_FILES["watchlist_bars"], 2 * 86400, "once_a_day"),
     ("daily_bars", "daily bars of $SPX and $TNX, ten years, fetched after each close", paths.MIRAI_FILES["daily_bars"],
      2 * 86400, "once_a_day"),
     ("nyse_breadth", "NYSE advancers and decliners carried in the quotes rows' bars field",
@@ -193,9 +193,10 @@ MEASURES = [
     measure_row("vwap_points", "volume-weighted average price from the options scan", "points", "number", "id",
                 "spx_level", feed="options_scan", blank=SCAN_MISSING, **POINTS_RANGE),
     measure_row("true_open_points", "the open SPX would have printed had every stock traded: the prior close plus "
-                "/ES's move from its last bar of the prior session to its 09:30 bar", "points", "number", "id",
-                "spx_level", feed="watchlist_bars",
-                blank="feed_missing when either /ES bar is absent; not_applicable across a contract roll",
+                "/ES's move to the open (from its prior settlement to its last trade at 09:30 in the minute quotes, "
+                "or from its prior session's last bar to its 09:30 bar before the quotes began)", "points",
+                "number", "id", "spx_level", feed="watchlist_quotes",
+                blank="feed_missing when either /ES price is absent; not_applicable across a contract roll",
                 **POINTS_RANGE),
     measure_row("range_so_far_points", "session high minus session low", "points", "number", "range", "spx_move_size",
                 feed="spx_bars", blank=BARS_MISSING_MEANING, low=0, high=2000),
@@ -246,7 +247,7 @@ MEASURES = [
                 group="breadth_side", feed="nyse_breadth", blank="feed_missing when no breadth bar has landed",
                 low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5),
     measure_row("breadth_net_change_count", "NYSE advancers less decliners now against a window of minutes earlier",
-                "count", "whole_number", group="breadth_change", subjects="window_minutes", feed="watchlist_bars",
+                "count", "whole_number", group="breadth_change", subjects="window_minutes", feed="watchlist_quotes",
                 blank="not_formed_yet until the window has formed; provider_refused_symbol when the $ADD bars are "
                 "absent from landed rows; feed_missing when no rows have landed",
                 low=-6000, high=6000, **PUSH_PULL_LANE_DEFAULTS),
@@ -255,7 +256,7 @@ MEASURES = [
                 group="fund_change_sign", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING,
                 low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("fund_change_window_pct", "a fund's bar close now against its close a window of minutes earlier",
-                "pct", "number", group="fund_change_window", subjects="symbol|window_minutes", feed="watchlist_bars",
+                "pct", "number", group="fund_change_window", subjects="symbol|window_minutes", feed="watchlist_quotes",
                 blank="not_formed_yet until the window has formed; provider_refused_symbol when the fund's bars "
                       "are missing", low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("sector_funds_up_count", "how many of the 11 sector funds are above their prior close", "count",
@@ -460,9 +461,9 @@ MEASURES = [
                 "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row(WINDOW_MOVE_MEASURE["low"], "window low minus grade-start price", "points", "number", "label",
                 "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
-    measure_row(AVERAGE_FROM_PUBLISH_MEASURE, "average price over the window from its second minute (publish time + 1 "
-                "minute, after Kaze has spoken and the bar has landed) minus grade-start price: the push/pull "
-                "readings' grade", "points", "number", "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
+    measure_row(AVERAGE_FROM_PUBLISH_MEASURE, "average price over the window's minutes after its first (publish time + "
+                "1 minute, after Kaze has spoken and the bar has landed) minus the first minute's close: the "
+                "push/pull readings' grade, with nothing a reader could not act on", "points", "number", "label", "window_result", blank=NO_WINDOW_MOVE, **OUTCOME_VALUE),
     measure_row("minutes_covered_count", "window minutes with a bar held in the store", "count", "whole_number",
                 "health", "window_coverage", blank=NO_END_BAR, low=0, high=390, **OUTCOME_VALUE),
     measure_row("stayed_inside_rung", "price never reached either edge of the rung during the window", "yes_no",

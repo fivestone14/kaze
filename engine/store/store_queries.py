@@ -305,8 +305,8 @@ def push_pull_ledger_known(conn, trade_date, cut_at_iso):
 def push_pull_live_sample(conn, horizon_name, through_day, row_origin="live_frozen"):
     """The promotion ledger's sample: every live first-built read through a day whose headline-channel decision has a
     counting grade, with the window's average move from publish, the channel's swing, the day's trend-ness and
-    each reading's strength: rows of (trade_date, cut_at, snapshot_rowid, average_from_publish, swing, trend_ness,
-    {factor: strength})."""
+    each reading's strength and booster: rows of (trade_date, cut_at, snapshot_rowid, average_from_publish, swing,
+    trend_ness, {factor: strength}, {factor: booster})."""
     rows = conn.execute(
         "SELECT d.decision_rowid, d.trade_date, d.cut_at, s.snapshot_rowid, v.value_number AS average_from_publish, "
         " (SELECT value_number FROM reads_decision_values w WHERE w.decision_rowid = d.decision_rowid "
@@ -330,11 +330,16 @@ def push_pull_live_sample(conn, horizon_name, through_day, row_origin="live_froz
         strengths = conn.execute("SELECT subject_key, value_number FROM collect_observations WHERE snapshot_rowid = ? "
                                  "AND measure_name = 'push_pull_strength' AND value_number IS NOT NULL",
                                  (row["snapshot_rowid"],)).fetchall()
+        boosters = conn.execute("SELECT subject_key, value_number FROM reads_decision_values WHERE decision_rowid = ? "
+                                "AND measure_name = 'push_pull_booster' AND value_number IS NOT NULL",
+                                (row["decision_rowid"],)).fetchall()
         sample.append({"trade_date": row["trade_date"], "cut_at": row["cut_at"], "snapshot_rowid": row["snapshot_rowid"],
                        "average_from_publish": row["average_from_publish"], "swing": row["swing"],
                        "trend_ness": row["trend_ness"],
                        "strengths": {registry.subject_parts(r["subject_key"])["factor"]: r["value_number"]
-                                     for r in strengths}})
+                                     for r in strengths},
+                       "boosters": {registry.subject_parts(r["subject_key"])["factor"]: r["value_number"]
+                                    for r in boosters}})
     return sample
 
 

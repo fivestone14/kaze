@@ -7,7 +7,10 @@ from engine import session_clock
 from engine.store import registry, store, store_queries
 
 NUMBER_TOLERANCE = 10 ** -store.STORED_DECIMALS
-TOLERATED_FEEDS = ("options_tape", "options_scan")
+# The watchlist's minute bars are written by Mirai only after the close: a live read blank on them beside a rebuild
+# that read them is expected, not a broken rebuild (live reads take those inputs from the minute quotes since
+# 2026-10-26).
+TOLERATED_FEEDS = ("options_tape", "options_scan", "watchlist_bars")
 PARITY_SUBJECT = "collect_observations.value"
 
 

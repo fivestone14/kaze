@@ -96,10 +96,10 @@ class ReadFacts:
 
     @property
     def down_day(self):
-        """−1 below the prior close, +1 above, 0 at it or unknown."""
+        """+1 below the prior close (a down day), −1 above it, 0 at it or unknown."""
         if self.price is None or self.prior_close is None:
             return 0
-        return (self.price > self.prior_close) - (self.price < self.prior_close)
+        return (self.price < self.prior_close) - (self.price > self.prior_close)
 
     # ---- bars -----------------------------------------------------------------------------------------------------------
     @property

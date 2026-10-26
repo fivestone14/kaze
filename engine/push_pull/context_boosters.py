@@ -70,7 +70,8 @@ def trend_ness(rank_of_mean, minute_of_session):
 
 def normalised_inputs(context):
     """Each context input as u_j, centred so that the usual case reads 0: tn − 0.5, straightness − 0.5, gamma ±1,
-    the rates tide z, ln(VIX ÷ 18), time of day − 0.5 (share of the session gone), down day −1/+1."""
+    the rates tide z, ln(VIX ÷ 18), time of day − 0.5 (share of the session gone), down day +1 (below the prior close)
+    / −1 (above it)."""
     return {
         TREND_NESS: context[TREND_NESS] - 0.5 if context.get(TREND_NESS) is not None else 0.0,
         PATH_STRAIGHTNESS: context[PATH_STRAIGHTNESS] - 0.5 if context.get(PATH_STRAIGHTNESS) is not None else 0.0,
