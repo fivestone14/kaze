@@ -257,13 +257,14 @@ def rebuild_session(conn, day, calendar, half_days):
 
 
 def write_session_bars(conn, day, row_origin, half_days, written_at):
-    """Store every SPX and SPY bar of the session up to the close not stored yet, stamped by arrival when it came
-    after its slot."""
+    """Store every SPX and SPY bar of the session up to the close not stored yet: SPX's stamped by arrival when it
+    came after its slot, SPY's at the moment Mirai wrote its after-close file."""
     close = session_clock.session_close(day, half_days)
     bars = mirai_files.read_spx_bars(day, close)
     rows = collect.session_bar_rows(conn, bars, day, row_origin, written_at, written_at, collect.SPX_INSTRUMENT)
     spy = mirai_files.symbol_bars(mirai_files.read_watchlist_bars(day, close), registry.SPY_SYMBOL)
-    rows += collect.session_bar_rows(conn, spy, day, row_origin, written_at, written_at, collect.SPY_INSTRUMENT)
+    rows += collect.session_bar_rows(conn, spy, day, row_origin, written_at, written_at, collect.SPY_INSTRUMENT,
+                                     mirai_files.watchlist_bars_written_at(day))
     return store.write_bars(conn, rows)
 
 

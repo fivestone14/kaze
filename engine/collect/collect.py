@@ -1,6 +1,7 @@
 # Builds one read: Mirai's files as they stood at a cut become one snapshot row, one observation per measure (a blank
-# carries its reason, never 0.0), the calendar facts as known, and the session's new SPX and SPY bars stamped by
-# arrival. Raw inputs only; the range engine and the push/pull pipeline read them back from the store.
+# carries its reason, never 0.0), the calendar facts as known, and the session's new SPX bars stamped by arrival
+# (SPY's at the write of Mirai's after-close file). Raw inputs only; the range engine and the push/pull pipeline read
+# them back from the store.
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -97,6 +98,7 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     collect_clock(read, cut_at, day, half_days)
     quotes_rows = mirai_files.read_quotes_rows(day, cut_at)
     prior_close = collect_watchlist_quotes(read, quotes_rows, bars)
+    collect_spy_basis(read, quotes_rows, day)
     if prior_close is None:
         prior_close = stored_prior_session_close(conn, day)
     collect_breadth(read, quotes_rows)
@@ -121,7 +123,7 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     snapshot["build_seconds"] = round(time.monotonic() - started, 3)
     bar_rows = session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, SPX_INSTRUMENT)
     bar_rows += session_bar_rows(conn, mirai_files.symbol_bars(watch_rows, registry.SPY_SYMBOL), day, row_origin,
-                                 cut_at, written_at, SPY_INSTRUMENT)
+                                 cut_at, written_at, SPY_INSTRUMENT, mirai_files.watchlist_bars_written_at(day))
     return snapshot, read.observations, bar_rows, read.feed_states
 
 
@@ -222,6 +224,30 @@ def collect_watchlist_quotes(read, quotes_rows, bars):
     read.add_observation("ten_year_yield_annual_pct", yield_pct, blank=blank_reason_for_symbol(row))
     read.add_observation("ten_year_yield_change_basis_points", yield_change, blank=blank_reason_for_symbol(row))
     return spx.get("close")
+
+
+def collect_spy_basis(read, quotes_rows, day):
+    """SPY's basis to SPX from the minute quotes, which land live: each poll carries both last trades at one moment.
+    SPY is scaled onto SPX at the session's first poll holding both; the value is the newest poll's basis less
+    today's median of the series, in points. The watchlist's minute bars are not used: Mirai writes them only after
+    the close, so no live read could ever see them."""
+    opened = session_clock.session_open(day)
+    polls = []
+    for row in quotes_rows:
+        quotes = row.get("quotes") or {}
+        spy = (quotes.get(registry.SPY_SYMBOL) or {}).get("last")
+        spx = (quotes.get(registry.SPX_SYMBOL) or {}).get("last")
+        if spy and spx and row["at"] >= opened:
+            polls.append((spy, spx))
+    if len(polls) < 2:
+        read.add_observation("spy_basis_points", None, blank=registry.NOT_FORMED_REASON if polls else "feed_missing")
+        return
+    ratio = polls[0][1] / polls[0][0]
+    basis = sorted(spy * ratio - spx for spy, spx in polls)
+    middle = len(basis) // 2
+    median = basis[middle] if len(basis) % 2 else (basis[middle - 1] + basis[middle]) / 2
+    newest = polls[-1][0] * ratio - polls[-1][1]
+    read.add_observation("spy_basis_points", store.rounded(newest - median))
 
 
 def collect_watchlist_bars(read, rows, quotes_rows, day, cut_at, prior_close, half_days):
@@ -616,11 +642,12 @@ def collect_feed_health(read, day, rows_received):
         read.add_observation("are_needed_feeds_all_ok", all(read.feed_ok(feed) for feed in needed), consumer=consumer)
 
 
-def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, instrument):
+def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, instrument, file_written_at=None):
     """Price rows for an instrument's 1-minute bars not yet stored under this origin, each stamped with the moment it
     became known."""
-    # A bar of the read's own slot, or any bar a rebuild writes once the session has closed, is known 62 s after it
-    # ends; anything else is known when it is written.
+    # A bar from a file Mirai writes whole after the close (the watchlist's, given as file_written_at) is known when
+    # that file was written. Otherwise a bar of the read's own slot, or any bar a rebuild writes once the session has
+    # closed, is known 62 s after it ends; anything else is known when it is written.
     already = store_queries.stored_bar_times(conn, day.isoformat(), row_origin, instrument[0])
     own_slot_starts_at = cut_at - timedelta(minutes=session_clock.SLOT_MINUTES)
     session_closed = written_at >= session_clock.session_close(day, store_queries.half_day_sessions(conn))
@@ -629,7 +656,9 @@ def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, instrument
         priced_at = session_clock.iso_utc(bar["at"])
         if priced_at in already:
             continue
-        if (session_closed if row_origin == "history_rebuilt" else bar["at"] >= own_slot_starts_at):
+        if file_written_at is not None:
+            known_at, rule = session_clock.iso_utc(file_written_at), "file_modified_at"
+        elif (session_closed if row_origin == "history_rebuilt" else bar["at"] >= own_slot_starts_at):
             arrival = timedelta(seconds=session_clock.BAR_LENGTH_SECONDS + registry.BAR_ARRIVAL_SECONDS)
             known_at = session_clock.iso_utc(bar["at"] + arrival)
             rule = registry.BAR_ARRIVAL_RULE

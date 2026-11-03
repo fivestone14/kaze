@@ -41,7 +41,7 @@ class ReadFacts:
         self.half_day = self.day in half_days
         self.session_length = session_clock.session_length_minutes(self.day, half_days)
         self.minute = session_clock.minute_of_session(cut_at, self.day)
-        self._bars, self._spy_bars, self._book, self._daily, self._prior_close = None, None, None, {}, None
+        self._bars, self._book, self._daily, self._prior_close = None, None, {}, None
 
     # ---- observations ---------------------------------------------------------------------------------------------------
     def row(self, measure_name, **subject):
@@ -110,15 +110,6 @@ class ReadFacts:
                           for bar in store_queries.session_bars(self.conn, self.trade_date, self.cut_iso,
                                                                 self.bars_known_by)]
         return self._bars
-
-    @property
-    def spy_bars(self):
-        """SPY 1-minute bars of the session known by the cut, oldest first."""
-        if self._spy_bars is None:
-            self._spy_bars = [dict(bar, at=session_clock.parse_iso(bar["priced_at"]))
-                              for bar in store_queries.session_bars(self.conn, self.trade_date, self.cut_iso,
-                                                                    self.bars_known_by, registry.SPY_SYMBOL)]
-        return self._spy_bars
 
     def close_at_minute(self, minute):
         """SPX's price at a session minute: the close of the bar that started the minute before; None if not held."""

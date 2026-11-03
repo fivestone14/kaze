@@ -56,8 +56,9 @@ gzipped copies of older days read the same way):
 The cadence (`registry.FEEDS`, also in each feed's component parameters) says how often a feed lands: `live` (a tick
 about every second), `minute` (through the session, judged by its age), `once_a_day` (the night's futures, the
 daily closes, the login check) or `hand_kept` (the calendar, extended by hand). The watchlist bars are a
-file Mirai writes only after the close (~16:20 ET): it gives SPY's bars to the price table and the SPY basis, and
-the true open, the leaders' and breadth's change for history before the minute quotes began (2026-09-28); from then
+file Mirai writes only after the close (~16:20 ET): it gives SPY's bars to the price table (each known at the file's
+write, never before; schema step 13 restamped the rows stored earlier; no reading uses them) and the true open, the
+leaders' and breadth's change for history before the minute quotes began (2026-09-28); from then
 on those three come from the minute quotes, live and rebuilt alike (/ES's last trade at the open against its prior
 settlement, SMH and QQQ last trades, the $ADD breadth bar). The futures file is also saved after the close, so only
 a rebuild of history before 2026-08-11 reaches it for the true open. The daily bars are one snapshot file refetched after each close: the store
@@ -142,7 +143,8 @@ Rules every row follows:
 - **Point in time.** `cut_at` is the market moment a row describes; `known_at` is when it became usable. Reads carry
   `known_at = written_at`. Bars seen in their own slot are known 62 seconds after the bar ends
   (`bar_end_plus_62_seconds`); bars that turn up later are stamped with their write (`written_at`); backfilled
-  sessions with the file's change time (`file_modified_at`). An outcome's `label_resolved_at` is when its label
+  sessions, and SPY's bars from the watchlist file Mirai writes after the close, with the file's change time
+  (`file_modified_at`). An outcome's `label_resolved_at` is when its label
   became knowable: for a rebuilt window the `known_at` of the last-arriving bar inside it, for a live window and
   for any window with no bars the write. A live read, its grading and its phone block use only bars known by the
   read's own write or its cut bar's arrival stamp, whichever is later, so a read sees every bar it stored itself and
@@ -185,11 +187,14 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   $VVIX)
 - breadth: `nyse_advancing_count`, `nyse_declining_count`, `nyse_advancing_portion`
 - leaders, rates, dollar, oil: `fund_change_from_prior_close_pct` (symbol = SPY, RSP, QQQ, IWM, SMH, UUP, USO),
-  `fund_change_window_pct` (symbol = SMH, QQQ; window_minutes = 60, from the watchlist bars), `sector_funds_up_count`
-  (of 11), `largest_stocks_up_count` (of 9), `ten_year_yield_annual_pct`, `ten_year_yield_change_basis_points`
+  `fund_change_window_pct` (symbol = SMH, QQQ; window_minutes = 60, from the minute quotes' last trades),
+  `sector_funds_up_count` (of 11), `largest_stocks_up_count` (of 9), `ten_year_yield_annual_pct`,
+  `ten_year_yield_change_basis_points`
 - the true open: `true_open_points` = prior close + /ES's move from the prior session's last bar to its 09:30 bar
   (the printed open shows only ~77% of the gap); `not_applicable` across a contract roll
 - breadth's change: `breadth_net_change_count` (window_minutes = 60; $ADD now less $ADD an hour earlier)
+- SPY's basis: `spy_basis_points` = SPY's last quote scaled onto SPX at the first poll since the open, less SPX's, at
+  the newest poll, less today's median of that series (from the minute quotes; blank before 2026-09-28)
 - the same-day option book: `same_day_open_interest_contracts` (side, strike_points; strikes within 3% of spot), kept
   on the first read of the day and the read fifty minutes before the close only
 - overnight: `overnight_high_points`, `overnight_low_points` (symbol = /ES, 18:00 to 09:30)
@@ -421,7 +426,7 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | B dealers | `pin_to_centre` | gamma-weighted centre of the same-day strikes within 1% − price, swings | steady | 45→20 min before close | live, shared 0.525 (⅓ = 0.175) |
 | B | `dealer_drift` | bn $ dealers must trade as the book decays to expiry | steady, usual = same-clock median | 45→20 min before close | live, shared with the pin |
 | B | `option_wall_untested` | nearest untested wall's share ÷ (1 + distance in swings), signed towards it | steady, clock booster √(195 ÷ min left) | 10:00 → 50 min before close | earning, +0.06 |
-| C catch-up | `spy_basis` | SPY-implied SPX − SPX on the same bar, less today's median, points | catch-up (points) | 09:40–15:45 | logged |
+| C catch-up | `spy_basis` | SPY-implied SPX − SPX at the same minute-quote poll, less today's median, points (`spy_basis_points`; blank before the quotes began, 2026-09-28) | catch-up (points) | 09:40–15:45 | logged |
 | D option bets | `urgent_orders` | signed bursts + 50-lots over 30 min, every trade condition | steady | 10:00–close | live, −0.25 (⅓ = −0.083) |
 | D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
 | F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
@@ -435,7 +440,7 @@ in time). The phone shows every reading, logged ones dimmed.
 **How one reading becomes points** (every step stored, `engine/push_pull/push_pull_read.py`):
 
 1. **Raw value** `push_pull_raw_value` (factor): the force's answer in its own unit (`read_facts.py` is all a force may
-   look at: the read's observations, its bars and SPY's known by the cut, the true open, the day's high and low, the
+   look at: the read's observations, its bars known by the cut, the true open, the day's high and low, the
    same-day option book the day's reads kept, the daily closes; so every force is point-in-time by construction).
 2. **How unusual** `push_pull_z_score` = (raw − usual) ÷ spread (`same_clock_baseline.py`): the history is the
    reading's own stored raw values at the same clock ±15 minutes over the past 60 sessions, each session counting

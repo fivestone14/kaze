@@ -2,9 +2,10 @@
 # registry's word lists, the indexes, the numbered schema steps and the open-time check that a store matches the code.
 # Header tables (snapshots, decisions, outcomes) carry the design's text ids; the long value tables hang off them by
 # integer rowid and keep one unique index on the design's own grain.
+from engine.session_clock import iso_utc
 from engine.store import components, registry
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -379,10 +380,30 @@ def schema_step_12(conn):
     rebuild_tables(conn, LEDGER_TABLES)
 
 
+def schema_step_13(conn):
+    """SPY's stored minute bars restamped as known when Mirai wrote their after-close file, not 62 s after each bar:
+    the file is written only after the close, so no read during the session could have seen them. Days whose file
+    is gone keep their stamps, counted in the log line."""
+    from engine.collect import mirai_files
+    days = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM collect_market_prices "
+                                           "WHERE instrument_symbol = ? AND price_kind = 'bar'", (registry.SPY_SYMBOL,))]
+    kept = 0
+    for day in days:
+        written = mirai_files.watchlist_bars_written_at(day)
+        if written is None:
+            kept += 1
+            continue
+        conn.execute("UPDATE collect_market_prices SET known_at = MAX(known_at, ?), known_at_rule = 'file_modified_at' "
+                     "WHERE trade_date = ? AND instrument_symbol = ? AND price_kind = 'bar' "
+                     "AND known_at_rule = ?", (iso_utc(written), day, registry.SPY_SYMBOL, registry.BAR_ARRIVAL_RULE))
+    if kept:
+        print(f"kaze: schema step 13 kept the stamps of {kept} SPY session(s) whose watchlist bar file is gone")
+
+
 # Step 9 repeated step 8 for the second verdict word; both numbers stay so a stored version 8 still upgrades.
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
                 6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10,
-                11: schema_step_11, 12: schema_step_12}
+                11: schema_step_11, 12: schema_step_12, 13: schema_step_13}
 
 
 def upgrade(conn):

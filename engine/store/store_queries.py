@@ -205,16 +205,15 @@ def full_sessions(conn):
             if minutes == session_clock.session_length_minutes(date.fromisoformat(day), half_days)]
 
 
-def session_bars(conn, trade_date, up_to_iso=None, known_by_iso=None, symbol=registry.SPX_SYMBOL):
-    """One 1-minute bar per minute of a session for one instrument (SPX unless named), oldest first, live rows
-    preferred, each with when it was known."""
+def session_bars(conn, trade_date, up_to_iso=None, known_by_iso=None):
+    """One SPX 1-minute bar per minute of a session, oldest first, live rows preferred, each with when it was known."""
     # Only bars starting by up_to_iso and known by known_by_iso (no limit when None).
     rows = conn.execute(
         "SELECT priced_at, known_at, open_in_quote_units AS open, high_in_quote_units AS high, "
         " low_in_quote_units AS low, close_in_quote_units AS close FROM collect_market_prices "
         "WHERE trade_date = ? AND instrument_symbol = ? AND price_kind = 'bar' AND (? IS NULL OR priced_at <= ?) "
         f"AND (? IS NULL OR known_at <= ?) ORDER BY priced_at, {ORIGIN_PREFERENCE_SQL}",
-        (trade_date, symbol, up_to_iso, up_to_iso, known_by_iso, known_by_iso))
+        (trade_date, registry.SPX_SYMBOL, up_to_iso, up_to_iso, known_by_iso, known_by_iso))
     bars = {}
     for row in rows:
         bars.setdefault(row["priced_at"], row)

@@ -133,7 +133,8 @@ SPECS = (
     # ---- C · catch-up --------------------------------------------------------------------------------------------------
     Spec("spy_basis", "SPY Basis", "C", catch_up.spy_basis, "points", shapes.CATCH_UP,
          Speaks(from_minute=10, until_minutes_before_close=15), 0.0, LOGGED, spread_floor=0.1,
-         evidence="IC +0.074 at the bar → 0.027 at publish + 1–2 min: the catch-up is over before Kaze speaks"),
+         evidence="IC +0.074 at the bar → 0.027 at publish + 1–2 min, measured on SPY bars Mirai writes only "
+                  "after the close (no live read saw them); since 2026-11-03 read from the minute quotes, untested"),
     # ---- D · option bets -----------------------------------------------------------------------------------------------
     Spec("urgent_orders", "Urgent Orders", "D", option_bets.urgent_orders, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.25, LIVE, spread_floor=8.0,

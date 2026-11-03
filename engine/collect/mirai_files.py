@@ -134,6 +134,13 @@ def read_watchlist_bars(day, cut):
     return rows_at_or_before(FILES["watchlist_bars"], day, cut)
 
 
+def watchlist_bars_written_at(day):
+    """When the watchlist's minute-bar file of a day was last written (Mirai writes it after the close, often again
+    after the next session's), or None when it does not exist."""
+    path = day_file_path(FILES["watchlist_bars"], day)
+    return file_modified_at(path) if path else None
+
+
 def symbol_bars(rows, symbol):
     """One symbol's bars out of watchlist rows, one per bar start (the newest poll wins), oldest first, each with
     its parsed 'at'."""
@@ -147,8 +154,8 @@ def symbol_bars(rows, symbol):
 
 def es_bars(day, cut):
     """/ES bars of a day file at or before the cut, each with a parsed 'at', oldest first: the watchlist's 1-minute
-    bars (live), else the futures file's regular-session bars (1-minute when it has them, else 5-minute), which
-    Mirai saves after the close, so only a rebuild of history ever reaches them."""
+    bars, else the futures file's regular-session bars (1-minute when it has them, else 5-minute). Mirai writes
+    both after the close, so for the day itself only a rebuild ever reaches them."""
     bars = symbol_bars(read_watchlist_bars(day, cut), ES_SYMBOL)
     if bars:
         return bars

@@ -255,10 +255,16 @@ MEASURES = [
     measure_row("fund_change_from_prior_close_pct", "a fund's last quote against its prior close", "pct", "number",
                 group="fund_change_sign", subjects="symbol", feed="watchlist_quotes", blank=SYMBOL_MISSING,
                 low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
-    measure_row("fund_change_window_pct", "a fund's bar close now against its close a window of minutes earlier",
+    measure_row("fund_change_window_pct", "a fund's last trade now against its last trade a window of minutes "
+                "earlier (its bar closes before the minute quotes began, 2026-09-28)",
                 "pct", "number", group="fund_change_window", subjects="symbol|window_minutes", feed="watchlist_quotes",
-                blank="not_formed_yet until the window has formed; provider_refused_symbol when the fund's bars "
-                      "are missing", low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
+                blank="not_formed_yet until the window has formed; provider_refused_symbol when the fund's quotes "
+                      "(or bars) are missing", low=-50, high=50, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("spy_basis_points", "SPY's last quote scaled onto SPX at the session's first poll holding both, less "
+                "SPX's last quote, at the newest poll, minus today's median of that series: how far SPY has run ahead "
+                "of (positive) or behind SPX", "points", "number", group="spy_basis", feed="watchlist_quotes",
+                blank="feed_missing when no poll since the open holds both quotes; not_formed_yet before the second "
+                      "such poll", low=-1000, high=1000, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("sector_funds_up_count", "how many of the 11 sector funds are above their prior close", "count",
                 "whole_number", group="sector_breadth", feed="watchlist_quotes",
                 blank="partial_coverage until all 11 quote", low=0, high=11, lane="push_pull",
