@@ -205,7 +205,8 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `bullish_portion_of_sided_premium`, `tape_gap_markers_last_30_minutes_count`,
   `feed_coverage_last_30_minutes_portion`, `urgent_orders_count` (kind = total, near, far; window_minutes = 30:
   signed bursts of three strikes one way inside two seconds plus prints of 50 contracts or more, bought calls and sold
-  puts counting up, every trade condition including the legs of complex trades, near = the strike within 0.5% of SPX)
+  puts counting up, legs of multi-leg packages left out, a big print only when it took the bid or ask outright, near =
+  the strike within 0.5% of SPX)
 - headlines (60-minute window): `headlines_last_60_minutes_count` (kind = all)
 - Mirai's Claude forecast: `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes,
   to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes
@@ -417,17 +418,17 @@ per reading, one file per mechanism group, each saying only what it measures). B
 |---|---|---|---|---|---|
 | A own path | `gap` | true open − prior close, points | steady | 10:05–15:40 | earning, +0.047 |
 | A | `trend_since_open` | price − true open, points | steady | 10:00–15:40 | earning, w = −0.37 + 0.59·tn |
-| A | `give_back` | the trend's z, clipped ±3 | clipped | 15:45–close, full days | live, −0.111 (⅓ = −0.037) |
+| A | `give_back` | the trend's z, clipped ±3 | clipped | 15:45–close, full days | earning, −0.111 |
 | A | `fresh_burst` | last 15 min − 15 min of the day's pace, points | steady | 10:00–close | earning, −0.008 |
 | A | `fade_15_00` | SPX 15:00 − 14:30, points | reversing | 15:00–15:45 | earning, +0.16 (the fade's size) |
 | A | `gap_across_average` | averages (50/100/200-day) the gap crossed, signed against the gap | steady | 09:35–10:00 | logged |
 | H heavyweights | `leader_surge_fade` | SMH 60-min % − QQQ 60-min %; 0 within 0.25 swing of the high/low | reversing | 10:30–15:40 | earning, +0.10 |
 | H | `grind_at_extreme` | −side × breadth's 60-min change, issues; 0 away from an extreme or after a fast approach | one-sided | 10:30–15:40 | earning, +0.39 |
-| B dealers | `pin_to_centre` | gamma-weighted centre of the same-day strikes within 1% − price, swings | steady | 45→20 min before close | live, shared 0.525 (⅓ = 0.175) |
-| B | `dealer_drift` | bn $ dealers must trade as the book decays to expiry | steady, usual = same-clock median | 45→20 min before close | live, shared with the pin |
+| B dealers | `pin_to_centre` | gamma-weighted centre of the same-day strikes within 1% − price, swings | steady | 45→20 min before close | earning, shared 0.525 |
+| B | `dealer_drift` | bn $ dealers must trade as the book decays to expiry | steady, usual = same-clock median | 45→20 min before close | earning, shared with the pin |
 | B | `option_wall_untested` | nearest untested wall's share ÷ (1 + distance in swings), signed towards it | steady, clock booster √(195 ÷ min left) | 10:00 → 50 min before close | earning, +0.06 |
 | C catch-up | `spy_basis` | SPY-implied SPX − SPX at the same minute-quote poll, less today's median, points (`spy_basis_points`; blank before the quotes began, 2026-09-28) | catch-up (points) | 09:40–15:45 | logged |
-| D option bets | `urgent_orders` | signed bursts + 50-lots over 30 min, every trade condition | steady | 10:00–close | live, −0.25 (⅓ = −0.083) |
+| D option bets | `urgent_orders` | signed bursts + clear-side 50-lots over 30 min, multi-leg legs left out | steady | 10:00–close | logged |
 | D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
 | F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
 
@@ -488,9 +489,10 @@ The read's stored call stays what the read said.
 minute, the first a reader could act on, since Kaze publishes 30–55 s after the cut and the bar lands ~62 s late).
 A day's score is the mean over its live reads of strength × that grade in swings; the evidence is an e-value, the
 product over days of 1 + 0.25 × clip(score ÷ the spread of the earlier days' scores, ±1), which under no skill never
-grows in expectation. `promotion_e_value` ≥ 20 with ≥ 30 days (≥ 15 for an event reading) is `promoted` (the word in
+grows in expectation. `promotion_e_value` ≥ 140 with ≥ 60 days (≥ 40 for an event reading) is `promoted` (the word in
 `metric_text`; its group leaves the young cap); `reversed_e_value` (the same evidence for the opposite sign) ≥ 10 is
-`demoted`; else `earning`. `live_weight_fit` is the slope of the grade on the strength over those days (ŵ_live),
+`demoted`; else `earning`. `live_weight_fit` is the slope of the grade on the strength over those days (ŵ_live, shrunk by the day count,
+not the read count; until promoted, live days may shrink a weight to 0 but never turn it against its history's sign),
 `live_day_type_a_fit` / `live_day_type_c_fit` the Trend's pair, `live_days_count` n. The recipe is frozen by its hash
 (`detail_text` = the reading's `registry_components` parameters hash; a pair's is the hash of both): a changed recipe
 makes a new revision row, and the ledger's clock restarts after the last run written under the old hash. The reads

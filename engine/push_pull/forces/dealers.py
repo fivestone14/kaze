@@ -7,7 +7,10 @@ import math
 from engine.push_pull.read_facts import Reading
 from engine.store import components, registry
 
-YEAR_MINUTES = 390.0 * 252.0
+# The broker quotes implied volatility on a calendar-year clock (every minute of 365 days), so the time left must be
+# counted on that same clock: a trading-year clock (390 × 252 minutes) made every strike look about 2.3 times as
+# jumpy as the market prices it. On the day of expiry the minutes left to the close are the same on either clock.
+YEAR_MINUTES = 365.0 * 24.0 * 60.0
 # Strikes within this share of spot make the pin's centre; within this share the drift's hedge is counted.
 PIN_SHARE, DRIFT_SHARE = 0.01, 0.04
 # The pin needs a book: at least this many strikes near spot holding at least this many contracts in all.
@@ -51,7 +54,7 @@ def book_near(book, spot, share):
 
 
 def implied_vol(read):
-    """The same-day at-the-money implied volatility as a fraction, or None."""
+    """The same-day at-the-money implied volatility as a fraction on the calendar-year clock, or None."""
     iv = read.value("same_day_atm_iv_calendar_year_pct")
     return iv / 100.0 if iv else None
 

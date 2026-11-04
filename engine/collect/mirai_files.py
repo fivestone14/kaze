@@ -314,8 +314,9 @@ def tape_window_totals(day, cut, minutes, max_bytes=None):
 def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
     """Signed urgent orders in the window to the cut, bullish less bearish: bursts (three strikes on one side inside
     one two-second bin, counted once when the third strike lands) and big prints, in total and split by whether
-    the trade's strike sat near the money (a trade before SPX's first bar counts in the total only); every trade
-    condition counts, a big print that completes a burst counts as both."""
+    the trade's strike sat near the money (a trade before SPX's first bar counts in the total only); legs of multi-leg
+    packages are left out (59-80% of big prints were spread legs, whose side says nothing), a big print counts only
+    when it took the bid or the ask outright, and a big print that completes a burst counts as both."""
     # A trade's side is the quote side it took (at or past the ask bought, at or past the bid sold, else the nearer
     # side); bought calls and sold puts are bullish. spx_close_at(ts_ms) gives SPX at the trade's minute.
     tape = read_tape_day(day)
@@ -324,7 +325,7 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
     on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
     usable = (on_disk & (tape["ts_ms"] >= start_ms) & (tape["ts_ms"] <= end_ms) & (tape["bid"] > 0)
               & (tape["ask"] >= tape["bid"]) & (tape["price"] >= tape["bid"]) & (tape["price"] <= tape["ask"])
-              & (tape["strike"] > 0))
+              & (tape["strike"] > 0) & ~np.isin(tape["condition"], list(MULTI_LEG_CONDITIONS)))
     counts = dict.fromkeys(URGENT_KINDS, 0)
     bins = {}
     for index in np.flatnonzero(usable)[np.argsort(tape["ts_ms"][usable], kind="stable")]:
@@ -340,7 +341,8 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
         if len(strikes) < URGENT_BURST_STRIKES:
             strikes.add(float(tape["strike"][index]))
             completes_burst = len(strikes) == URGENT_BURST_STRIKES
-        for _ in range(int(tape["size"][index] >= BIG_PRINT_CONTRACTS) + int(completes_burst)):
+        clear_side = price >= ask or price <= bid
+        for _ in range(int(tape["size"][index] >= BIG_PRINT_CONTRACTS and clear_side) + int(completes_burst)):
             counts["total"] += bull
             if kind:
                 counts[kind] += bull

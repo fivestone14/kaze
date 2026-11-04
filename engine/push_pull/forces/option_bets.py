@@ -1,5 +1,5 @@
 # D · Option bets: who bets which way on the same-day tape. Urgent orders (bursts across strikes and 50-lot prints,
-# bullish less bearish over 30 minutes, every trade condition including the legs of complex trades), which the market
+# bullish less bearish over 30 minutes, legs of multi-leg packages left out, big prints only when they took the bid or ask), which the market
 # tends to give back; and the burst tilt, near-the-money urgency less far-from-the-money urgency.
 from engine.collect import collect
 from engine.push_pull.read_facts import Reading

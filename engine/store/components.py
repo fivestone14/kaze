@@ -128,11 +128,13 @@ UNDIALED_BAND, NO_SKILL = "undialed_band", "no_skill"
 BASELINES = (UNDIALED_BAND, NO_SKILL)
 DIAL_ON, DIAL_OFF, FAKE_BASELINE = "dial_on", "dial_off", "fake_baseline"
 DIAL_TEST = ("dial_band_test", "2")
-# The promotion ledger judges the push/pull readings: a daily score per reading, an e-value, promotion at 20-to-1
-# with enough days, demotion at 10-to-1 (grade/promotion_ledger.py).
+# The promotion ledger judges the push/pull readings: a daily score per reading, an e-value, promotion at 140-to-1
+# with enough days, demotion at 10-to-1 (grade/promotion_ledger.py). 140 = 14 weights tested at once ÷ a 10% chance
+# that any one with no skill is ever promoted (at 20-to-1 that chance was up to 70%); every 5-minute read overlaps its
+# neighbours, so a day is one piece of evidence and a reading needs at least 60 of them (40 events for an event one).
 PROMOTION_LEDGER = ("promotion_ledger", COMPONENT_VERSION)
-PROMOTE_AT, DEMOTE_AT = 20.0, 10.0
-PROMOTE_MINIMUM_DAYS, PROMOTE_MINIMUM_EVENTS = 30, 15
+PROMOTE_AT, DEMOTE_AT = 140.0, 10.0
+PROMOTE_MINIMUM_DAYS, PROMOTE_MINIMUM_EVENTS = 60, 40
 E_VALUE_BET = 0.25
 PROMOTION_LEDGER_PARAMETERS = {
     "sample": "live first-built base decisions on the headline channel whose grade counts",

@@ -315,8 +315,8 @@ MEASURES = [
                 low=0, high=1, lane="push_pull", overlap="direction_all_sources", leans="leans_up", neutral=0.5,
                 twin=TAPE_TWIN),
     measure_row("urgent_orders_count", "signed urgent option orders in the window: bursts over three strikes on "
-                "one side within two seconds, and prints of fifty contracts or more, bullish less bearish; every "
-                "trade condition counts (multi-leg legs included)", "count", "whole_number",
+                "one side within two seconds, and prints of fifty contracts or more that took the bid or the ask "
+                "outright, bullish less bearish; legs of multi-leg packages left out", "count", "whole_number",
                 group="options_urgent_flow", subjects="kind|window_minutes", feed="options_tape", blank=TAPE_BLANK,
                 low=-10000, high=10000, twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",

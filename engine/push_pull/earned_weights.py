@@ -3,7 +3,8 @@
 # 0 by a prior worth forty days: w = (h·ŵ_hist + n·ŵ_live) ÷ (h + n + 40). A live reading so starts at a third of its
 # tested size and an earning one at 0; either moves only as live days vouch for it. The Trend's weight is a day-type
 # pair, a + c·tn, blended the same way coefficient by coefficient. The live fit and its day count come from the
-# promotion ledger (grade/promotion_ledger.py), as known at the read's cut.
+# promotion ledger (grade/promotion_ledger.py), as known at the read's cut. Until a reading is promoted, live days
+# may shrink its fixed weight to 0 but never turn it against the way its history says it pushes.
 from engine.push_pull import reading_specs
 
 PRIOR_DAYS = 40
@@ -27,5 +28,6 @@ def weight_for(spec, trend_ness, ledger):
         a = earned(a_hist, spec.history_days, a_live, live_days)
         c = earned(c_hist, spec.history_days, c_live, live_days)
         return a + c * (trend_ness if trend_ness is not None else 0.5)
-    return earned(spec.history_size, spec.history_days, ledger["live_size"] if ledger else 0.0, live_days)
+    weight = earned(spec.history_size, spec.history_days, ledger["live_size"] if ledger else 0.0, live_days)
+    return weight if (ledger and ledger.get("promoted")) or weight * spec.history_size > 0 else 0.0
 

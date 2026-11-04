@@ -1,10 +1,11 @@
 # The promotion ledger: every push/pull reading scored nightly on live days only, on the average grade from publish
 # time + 1 minute (the first a reader could act on), under a recipe frozen by its hash. Each day's score is the mean
 # of strength × grade (in swings) over the day's live reads; the evidence runs as an e-value, the product over days of
-# 1 + bet × clip(score ÷ spread, ±1), which under no skill never grows in expectation. 20-to-1 with enough days
+# 1 + bet × clip(score ÷ spread, ±1), which under no skill never grows in expectation. 140-to-1 with enough days
 # promotes a reading (its group leaves the young cap); the same evidence for the reversed sign reaching 10-to-1
 # demotes it; both standings stick (the running peak counts) until the recipe changes. The live weight the earned
-# blend uses is the slope of grade on strength over those days (a + c·tn for the Trend). A recipe change restarts the
+# blend uses is the slope of grade on strength over those days (its size is shrunk by the day count, not the read count, so
+# overlapping reads do not inflate it) (a + c·tn for the Trend). A recipe change restarts the
 # clock. Written as results_evaluations rows the reads look up at their cut. The e-value is a valid test under no
 # skill only as far as a day's score is symmetric about 0 given the past; the clip at a level set from earlier days
 # keeps it so under symmetry, which is the honest reading of "no skill" here.
@@ -114,7 +115,7 @@ def day_type_fit(reads):
 
 
 def verdict(e, reversed_e, days, spec):
-    """promoted at 20-to-1 with enough days (events for an event reading), demoted when the reversed sign reaches
+    """promoted at 140-to-1 with enough days (events for an event reading), demoted when the reversed sign reaches
     10-to-1, else earning."""
     minimum = components.PROMOTE_MINIMUM_EVENTS if spec.counts == "events" else components.PROMOTE_MINIMUM_DAYS
     if reversed_e >= components.DEMOTE_AT:

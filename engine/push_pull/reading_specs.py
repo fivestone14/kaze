@@ -98,8 +98,9 @@ SPECS = (
          weight_rule=DAY_TYPE, day_type=(-0.37, 0.59), boosters={ctx.PATH_STRAIGHTNESS: 0.0, ctx.DEALER_GAMMA: 0.0},
          evidence="w = −0.37 + 0.59·tn (joint fit): carries on trend days, fades on range days; fails Holm"),
     Spec("give_back", "Give-Back", "A", own_path.give_back, "points", shapes.CLIPPED,
-         Speaks(from_minutes_before_close=15, sits_out_half_days=True), -0.111, LIVE, spread_floor=4.0,
-         evidence="β −0.111 (p 0.004) on clip(z of the trend, ±3); ~55% confidence; launches at ⅓ = −0.037"),
+         Speaks(from_minutes_before_close=15, sits_out_half_days=True), -0.111, EARNING, spread_floor=4.0,
+         evidence="β −0.111 (p 0.004 counting overlapping reads as separate; ~0.1 with the day as the unit) on "
+                  "clip(z of the trend, ±3); earning since 2026-11-04"),
     Spec("fresh_burst", "Fresh Burst", "A", own_path.fresh_burst, "points", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.008, EARNING, spread_floor=2.0,
          evidence="w −0.008: the newest 15 minutes beyond the day's pace say little"),
@@ -119,11 +120,12 @@ SPECS = (
          half_life_sessions=20, gated=True, whole_day_baseline=True, evidence="IC 0.06; the conditional form of Trend (r 0.81 when it fires); joint fit +0.39"),
     # ---- B · dealers --------------------------------------------------------------------------------------------------
     Spec("pin_to_centre", "Pin To Centre", "B", dealers.pin_to_centre, "swings", shapes.STEADY,
-         Speaks(from_minutes_before_close=45, until_minutes_before_close=20), +0.525, LIVE, spread_floor=0.15,
+         Speaks(from_minutes_before_close=45, until_minutes_before_close=20), +0.525, EARNING, spread_floor=0.15,
          shared_weight="pin_and_dealer_drift",
-         evidence="pin + drift IC +0.37 (day-shuffle p 0.0008); shared weight 0.525 → ⅓ = 0.175; ~25–30% confidence"),
+         evidence="pin + drift IC +0.37 (day-shuffle p 0.0008) on the trading-year clock; earning since 2026-11-04: "
+                  "the clock fix changed its inputs, its book is the overnight open interest, and live it reversed"),
     Spec("dealer_drift", "Dealer Drift", "B", dealers.dealer_drift, "bn_usd", shapes.STEADY,
-         Speaks(from_minutes_before_close=45, until_minutes_before_close=20), +0.525, LIVE,
+         Speaks(from_minutes_before_close=45, until_minutes_before_close=20), +0.525, EARNING,
          usual=baseline.USUAL_SAME_CLOCK, spread_floor=0.2, shared_weight="pin_and_dealer_drift",
          evidence="the hedge need has a usual positive level (~+0.4bn): usual = same-clock median"),
     Spec("option_wall_untested", "Option Wall", "B", dealers.option_wall_untested, "share_per_swing",
@@ -137,9 +139,10 @@ SPECS = (
                   "after the close (no live read saw them); since 2026-11-03 read from the minute quotes, untested"),
     # ---- D · option bets -----------------------------------------------------------------------------------------------
     Spec("urgent_orders", "Urgent Orders", "D", option_bets.urgent_orders, "orders", shapes.STEADY,
-         Speaks(from_minute=30, until_minutes_before_close=0), -0.25, LIVE, spread_floor=8.0,
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.25, LOGGED, spread_floor=8.0,
          boosters={ctx.DOWN_DAY: 0.0},
-         evidence="w −0.25 (urgent buying is given back); holds at publish + 2 min (p 0.002); ⅓ = −0.083"),
+         evidence="w −0.25 (urgent buying is given back) at p 0.002 counting overlapping reads as separate, ~0.2 with "
+                  "the day as the unit; live it reversed (+0.20); logged since 2026-11-04"),
     Spec("burst_tilt", "Burst Tilt", "D", option_bets.burst_tilt, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.28, EARNING, spread_floor=15.0,
          evidence="w +0.28 in history; near- vs far-money urgency"),

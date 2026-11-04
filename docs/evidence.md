@@ -70,3 +70,25 @@ since 2026-10-23 every factor with a lean counts at an equal share and the same 
   observations live (145 rebuilt) and 123 decision values; the ledger writes 138 rows a night (0.11 MB).
 - The nightly's gzipped backup is about 12% of the file (35 MB). There is no retention rule yet; one is due at about
   100 sessions.
+
+## Options inputs and the weight tests (2026-11-04)
+
+- **Volatility clock.** The scan's ATM volatility (`same_day_atm_iv_calendar_year_pct`) is quoted on a calendar
+  year; the dealer readings counted time left on a 390 × 252 trading year, so σ√τ came out √(525,600 ÷ 98,280) =
+  2.31 times too wide. Measured on Nov 2–4 the broker's number runs 2.2–2.5 times the volatility the same-day
+  straddle implies on the trading clock (it drifts late in the day because the scan's straddle freezes after about
+  15:00). Against a per-strike benchmark built from the tape's quotes on 53 reads (Oct 21 – Nov 2): the clock fix
+  halves the pin's error (1.9 → 0.9 points), cuts wrong-way drift reads 7 → 3, and wall strike mismatches 19 → 9
+  (call) and 23 → 5 (put). Fixed in `forces/dealers.py` (`YEAR_MINUTES` = 365 × 24 × 60). Mirai's walls use broker
+  volatility on the trading clock too; not changed here.
+- **Overlapping reads.** Neighbouring 5-minute reads graded over 30 minutes correlate 0.53–0.74, so a live day's
+  ~36 reads carry about 10 independent checks. The history p-values behind the live readings counted reads as
+  separate: urgent_orders p 0.002 → ~0.2 by day (and live it reversed, +0.20 against −0.25), give_back p 0.004 →
+  ~0.1. pin_to_centre and dealer_drift passed on a day shuffle, but their inputs changed with the clock fix, their
+  book is the overnight open interest (by 15:15 the near-money volume is ~22 times it) and their live fit reversed
+  (−0.31 against +0.525). So: urgent_orders → logged; give_back, pin_to_centre, dealer_drift → earning. The promotion
+  bar rises to 140-to-1 with 60 days (14 weights at once at 10% family-wise); live days may shrink an unpromoted
+  weight to 0 but not flip its sign. A mean of per-day slopes was tried for the live weight and dropped: days with
+  three reads gave slopes of ±2 (give_back −2.75, option_wall −2.21), so the pooled slope stays, shrunk by days.
+- **Big prints.** 59–80% of 50-lot prints were legs of multi-leg packages; the urgent count now leaves every
+  multi-leg leg out and counts a big print only when it took the bid or ask outright.
