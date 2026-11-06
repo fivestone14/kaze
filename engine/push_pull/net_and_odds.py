@@ -58,9 +58,14 @@ def odds(net, swing, average_stretch, stretch, rung_points):
     if net is None or not swing or not average_stretch or not stretch:
         return None
     sigma = swing * average_stretch / EIGHTY_PERCENT_Z
-    edge = rung_points * average_stretch / stretch
+    edge = edge_of(rung_points, average_stretch, stretch)
     up, down = normal_cdf((net - edge) / sigma), normal_cdf((-net - edge) / sigma)
     return {"up": up, "flat": max(0.0, 1.0 - up - down), "down": down, "sigma": sigma, "edge": edge}
+
+
+def edge_of(rung_points, average_stretch, stretch):
+    """The flat zone's half width in points: the average must move beyond it to count as up or down."""
+    return rung_points * average_stretch / stretch
 
 
 def chance_up_if_moves(odds_of):

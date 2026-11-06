@@ -11,6 +11,14 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+<svg class="defs" aria-hidden="true">
+  <symbol id="wind-dir" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M5 7.5h8a2.5 2.5 0 1 0-2.34-3.24"/><path d="M2.5 12H20"/>
+    <path d="M16.5 8.5 20 12l-3.5 3.5"/><path d="M5 16.5h4.5a2.5 2.5 0 1 1-2.34 3.24"/></g></symbol>
+  <symbol id="wind-calm" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h8.5a2.5 2.5 0 1 0-2.34-3.24"/>
+    <path d="M3 12h15.5a2.5 2.5 0 1 1-2.34 3.24"/><path d="M4 16h5.5a2.5 2.5 0 1 1-2.34 3.24"/></g></symbol>
+</svg>
 <main>
   <p class="notice" id="notice" role="status" hidden></p>
   <p class="block-note" id="clock-note" hidden></p>
@@ -28,11 +36,28 @@
         <button role="tab" data-channel="60_minutes">60 Min</button>
       </div>
       <div class="range-row">
-        <span class="range-line" id="range-line">—</span><span class="pill pill-blue" id="held">—</span>
+        <span class="range-line" id="range-line">—</span>
+        <span class="range-side"><span id="range-chance">—</span><span id="held"></span></span>
       </div>
       <svg class="chart" id="chart" viewBox="0 0 336 214" role="img"
            aria-label="Today's price with each past read's band as a box and the live band ahead"></svg>
       <p class="block-note" id="chart-note" hidden></p>
+    </div>
+    <div class="card lean-card">
+      <div class="verdict">
+        <span class="lean-badge" id="lean-badge">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#wind-calm"/></svg></span>
+        <span class="verdict-words"><span class="verdict-title" id="lean-title">—</span>
+          <span class="faint-small" id="lean-sub"></span></span>
+        <span class="wind-dots lean-dots" id="lean-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      </div>
+      <div class="lean-sides"><span class="down" id="lean-pull"></span><span class="up" id="lean-push"></span></div>
+      <svg class="lean-tug" id="lean-tug" viewBox="0 0 312 40" role="img"
+           aria-label="The pulls stacked left and the pushes stacked right, the wind at the net"></svg>
+      <div class="reasons" id="lean-reasons"></div>
+      <button class="lean-more" id="lean-more" type="button">
+        <span id="lean-more-words">—</span><b>See all ›</b></button>
+      <p class="block-note" id="lean-note" hidden></p>
     </div>
     <div class="card strip-card">
       <div class="row-between small-bold"><span>Average Since The Read</span><span id="strip-verdict">—</span></div>
@@ -90,7 +115,7 @@
       </div>
       <p class="block-note" id="sight-note" hidden></p>
     </div>
-    <div class="card">
+    <div class="card" id="push-pull-card">
       <div class="row-between">
         <span class="card-title">Which Way · Push / Pull</span>
         <span class="wind-chip" id="wind-chip">

@@ -119,7 +119,17 @@ main {
 .switch-small button { height: 26px; padding: 0 9px; border-radius: 8px; font-size: 11px; }
 
 /* Read: range line, chart, strip, list, scores */
-.range-row { display: flex; justify-content: space-between; align-items: baseline; padding: 0 2px; }
+.range-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 2px; }
+.range-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--faint);
+  text-align: right;
+}
 .range-line { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
 .chart, .strip, .range-bar { width: 100%; height: auto; display: block; }
 .chart[hidden], .strip[hidden], .range-bar[hidden] { display: none; }
@@ -159,6 +169,60 @@ main {
 .score b { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
 .score b small { font-size: 12px; color: var(--faint); font-weight: 600; }
 .score span { font-size: 10px; font-weight: 600; color: var(--mute); }
+
+/* Read: the lean card under the chart. The wind badge and the lean in words, each side's total, the tug, the
+   biggest readings in plain words in their tug piece's shade, and the way through to every reading on Sight. */
+.defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.lean-card { gap: 7px; }
+.verdict { display: flex; align-items: center; gap: 10px; }
+.lean-badge {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #FFFFFF;
+  background: var(--mute);
+}
+.lean-badge svg { width: 20px; height: 20px; display: block; }
+.lean-badge.pull svg { transform: scaleX(-1); }
+.verdict-words { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.verdict-title { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+.lean-dots i { width: 6px; height: 6px; }
+.lean-sides {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.lean-tug { width: 100%; height: auto; display: block; }
+.reasons { display: flex; flex-direction: column; gap: 6px; }
+.reasons:empty { display: none; }
+.reason { display: grid; grid-template-columns: 4px minmax(0, 1fr) auto; column-gap: 9px; align-items: center; }
+.reason svg { width: 4px; height: 100%; min-height: 14px; align-self: stretch; display: block; }
+.reason .words { display: flex; flex-direction: column; min-width: 0; }
+.reason b { font-size: 12.5px; font-weight: 700; }
+.reason .words small { font-size: 11px; color: var(--faint); }
+.reason em { font-style: normal; font-size: 12.5px; font-weight: 700; white-space: nowrap; }
+.reason em small { font-size: 10px; font-weight: 600; }
+.lean-quiet { margin: 0; font-size: 11.5px; color: var(--faint); }
+.lean-more {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+  font-size: 11px;
+  color: var(--faint);
+  text-align: left;
+}
+.lean-more[hidden] { display: none; }
+.lean-more b { color: var(--ink); font-weight: 700; }
 
 /* Sight: speed, chain, range bar, checks, push/pull, feeds */
 .speed-row { display: flex; align-items: center; gap: 10px; }

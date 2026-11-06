@@ -617,8 +617,10 @@ step crashed); the 5-minute channel follows every read, the 30- and 60-minute ch
   and `chain`: how that read worked its band out, read back from its stored values so Sight and Steps explain the
   read the Read page shows (`speed`, `speed_fast`, `speed_slow`, `swing`, `stretch`, `average_stretch`,
   `fit_sessions`, `fit_windows`, `stays_inside_share`, `dials`, `dials_product`, `straddle`, `minutes_left`,
-  `options_swing`, `options_check`, `chance_up_if_moves`, `weight_applied`). Null when the day has no live read yet
-  for that lane.
+  `options_swing`, `options_check`, `chance_up_if_moves`, `weight_applied`, and that read's push/pull `net` and
+  `odds` (`up`, `flat`, `down`, `edge`: the flat zone's half width in points, so the phone splits this window's cone
+  into up, flat and down at the read price ± `edge`; null while any side is blank)). Null when the day has no live
+  read yet for that lane.
 - `running[channel]`: the channel's earlier windows whose read is written but whose window has not ended at the cut
   (the live window's own read left out), newest first, what the Read page draws as dashed boxes and Running rows:
   `read_at`, `price`, `window_from`, `ends_at`, `half_width`, `bands`, `minutes_held`, and so far, measured the

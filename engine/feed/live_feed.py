@@ -280,13 +280,15 @@ def read_chain(conn, read, decision, channel, rung):
     direction = next((row for row in rows if row["measure_name"] == "chance_up_if_moves_probability"), None)
     end_band = registry.subject_key(band=components.BAND, horizon=channel)
     average_band = registry.subject_key(band=components.AVERAGE_BAND, horizon=channel)
+    stretch = values.get(store.value_key_for("stretch_multiplier", end_band))
+    average_stretch = values.get(store.value_key_for("stretch_multiplier", average_band))
     return {
         "speed": values.get("today_typical_1_minute_move_points"),
         "speed_fast": seen.get("speed_fast_5_minute_half_life_points"),
         "speed_slow": seen.get("speed_slow_30_minute_half_life_points"),
         "swing": values.get(store.value_key_for("typical_swing_points", horizon)),
-        "stretch": values.get(store.value_key_for("stretch_multiplier", end_band)),
-        "average_stretch": values.get(store.value_key_for("stretch_multiplier", average_band)),
+        "stretch": stretch,
+        "average_stretch": average_stretch,
         "fit_sessions": values.get(store.value_key_for("fit_sessions_count", horizon)),
         "fit_windows": values.get(store.value_key_for("fit_windows_count", horizon)),
         "stays_inside_share": values.get(store.value_key_for(
@@ -302,7 +304,21 @@ def read_chain(conn, read, decision, channel, rung):
         "options_check": values.get(store.value_key_for("options_vs_tape_check_word", horizon)),
         "chance_up_if_moves": direction and direction["value_number"],
         "weight_applied": direction and direction["trust_weight_applied_portion"],
+        "net": values.get("push_pull_net_points"),
+        "odds": window_odds(rows, rung, stretch, average_stretch),
     }
+
+
+def window_odds(rows, rung, stretch, average_stretch):
+    """The read's own odds of its window's average ending up, flat or down, with the flat zone's half width in points
+    (so the phone draws the zones on this window's cone, not the newest read's); None while any side is blank."""
+    sides = {registry.subject_parts(row["subject_key"])["side"]: row["value_number"]
+             for row in rows if row["measure_name"] == "push_pull_odds_probability"}
+    if any(sides.get(side) is None for side in ("up", "flat", "down")) or rung is None or not stretch \
+            or not average_stretch:
+        return None
+    return {**{side: sides[side] for side in ("up", "flat", "down")},
+            "edge": net_and_odds.edge_of(rung, average_stretch, stretch)}
 
 
 def farthest_moves(moves):

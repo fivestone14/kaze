@@ -32,7 +32,11 @@ const FONT = "Plus Jakarta Sans, sans-serif";
 const COLOUR = { ink: "#161A17", blue: "#2F44B8", rust: "#A8492F", green: "#2e9e5b", greenDeep: "#1f6b3e",
                  faint: "#5C6459", sand: "#B9B2A4", band: "#D5D0C6", rule: "#E4E0D8", cream: "#F4F1EB",
                  white: "#FFFFFF", grey: "#8a8a8a", track: "#C9D1F4", mute: "#535B52", well: "#E6E1D8" };
-const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, dotHalo: 9, averageDot: 4.5 };
+// The live window keeps coneShare of the chart's width however much history the channel shows, so its cone, where
+// the call is drawn, stays wide enough to read; the history before it shares the rest. While there is a live window
+// the cone ends rail short of the right edge: its odds and band prices sit in that column, clear of the price line.
+const CHART = { width: 336, left: 4, right: 330, top: 14, bottom: 198, labelY: 213, dotHalo: 9, averageDot: 4.5,
+                badge: 9, coneShare: 0.38, rail: 44, railText: 334 };
 // The strip: the two numbers on its top line at the card's edges, each after its key; every needle ends 4 px above
 // the average band's bottom, so the labels under the strip keep clear of them.
 const STRIP = { width: 312, centre: 156, reach: 110.9, edge: 6, inset: 2, topY: 10, keyY: 6.5, keyRadius: 3.5,
@@ -46,6 +50,16 @@ const METER = { width: 86, small: 50 };
 const PUSH_PULL = { centre: 156, trackLeft: 16, trackRight: 296, top: 16, height: 16, labelY: 45, sideSwings: 0.4,
                     glideMs: 700, evenPoints: 0.005 };
 const SEGMENT_OPACITY = [1, 0.72, 0.52, 0.4, 0.32, 0.26, 0.22];
+// The Read page's lean card: its tug on the same track, each side drawn to fit the bigger side with a quarter to
+// spare (never tighter than the wind's first dot, so a calm net stays short), its biggest readings listed under it.
+// The bar shows who is winning and with what; the word and the dots say how strong.
+const LEAN = { centre: 156, trackLeft: 6, trackRight: 306, top: 15, height: 18, room: 1.25, rowsShown: 3 };
+// One shade per reading on each side, the biggest darkest and nearest the centre; a reading's row wears its shade.
+const LEAN_SHADES = { push: ["#2F44B8", "#5568C9", "#8693D8", "#A9B2E3"],
+                      pull: ["#A8492F", "#BE6E55", "#D3957F", "#E2B5A5"] };
+// The live cone's up, flat and down zones, tinted on the end band and again on the average band inside it.
+const ZONE = { up: COLOUR.blue, flat: COLOUR.sand, down: COLOUR.rust, endOpacity: 0.12, averageOpacity: 0.16,
+               flatOpacity: 0.28 };
 const ROW = { width: 120, trackLeft: 20, trackRight: 100, centre: 60, reach: 40 };
 const FEED_LABELS = { spx_live_price: "SPX Price", spx_bars: "SPX Bars", watchlist_quotes: "Quotes",
                       nyse_breadth: "Breadth", options_scan: "Options Scan", options_tape: "Options Tape",
@@ -561,15 +575,18 @@ function renderRead() {
   const minutes = CHANNELS[state.channel];
   const band = current && current.bands["80"];
   el("range-line").textContent = band && band.half_width !== null ? `${fmt(band.low)} – ${fmt(band.high)}` : "—";
-  const standing = isLive() ? "" : current && current.ended ? " · Ended" : " · Last";
-  el("held").textContent = current ? `${fmt(current.minutes_held)} / ${minutes} Min${standing}`
-                                   : `— / ${minutes} Min`;
+  const portion = bandPortion();
+  el("range-chance").textContent = !current ? "—" : current.ended && !isLive() ? `Ended ${clock(current.ends_at)}`
+    : portion === null ? `By ${clock(current.ends_at)}` : `${fmt(portion * 100)}% chance by ${clock(current.ends_at)}`;
+  const score = windows() ? windows().score[state.channel] : null;
+  const ends = score && score.ends_inside;
+  el("held").textContent = ends && ends.graded ? `Held ${fmt(ends.yes)} of ${fmt(ends.graded)} today` : "";
   renderChart(current, windowList("running"), windowList("finished"), minutes);
 }
 
 /** The day's price, each past read's band as a box (running ones dashed) and the live cone, on a time axis that ends
- *  at the live window's end and spans the channel's PAST_SPAN_MINUTES (from the open while the day is shorter), with
- *  a price axis fitted to what is on screen. */
+ *  at the live window's end and spans the channel's PAST_SPAN_MINUTES (from the open while the day is shorter), the
+ *  live window across its fixed share of the width, with a price axis fitted to what is on screen. */
 function renderChart(current, running, finished, minutes) {
   const chart = el("chart");
   const anchorEnd = current ? current.ends_at : running[0] ? running[0].ends_at : finished[0] ? finished[0].ends_at
@@ -588,10 +605,19 @@ function renderChart(current, running, finished, minutes) {
                : state.bars.length ? ms(state.bars[0].at) : -Infinity;
   const startMs = Math.min(Math.max(openMs, endMs - PAST_SPAN_MINUTES[state.channel] * 60000),
                            endMs - minutes * 60000);
-  const x = (iso) => CHART.left + (ms(iso) - startMs) / (endMs - startMs) * (CHART.right - CHART.left);
+  const fromMs = current ? ms(current.window_from) : Infinity;
+  const right = current ? CHART.right - CHART.rail : CHART.right;
+  const split = CHART.left + (right - CHART.left) * (1 - CHART.coneShare);
+  const x = (iso) => {
+    const at = ms(iso);
+    if (fromMs <= startMs || fromMs >= endMs) {
+      return CHART.left + (at - startMs) / (endMs - startMs) * (right - CHART.left);
+    }
+    return at < fromMs ? CHART.left + (at - startMs) / (fromMs - startMs) * (split - CHART.left)
+                       : split + (at - fromMs) / (endMs - fromMs) * (right - split);
+  };
   const shown = (window) => ms(window.window_from) >= startMs && window.half_width !== null;
   const boxes = finished.filter(shown), runs = running.filter(shown);
-  const fromMs = current ? ms(current.window_from) : Infinity;
   const before = state.bars.filter((bar) => ms(bar.at) >= startMs && ms(bar.at) <= endMs && ms(bar.at) < fromMs);
   const now = current ? liveNow(current) : null;
   const bars = before.concat(now ? now.series : []);
@@ -619,6 +645,9 @@ function renderChart(current, running, finished, minutes) {
   if (liveHalf !== null) parts.push(liveCone(current, x, y, marks));
   parts.push(priceLines(current, before, now, x, y),
              axisLabels(current, boxes, bars, x, startMs === openMs ? "Open" : ""));
+  const zones = current && windowOdds(current) ? oddsPercents(windowOdds(current)) : null;
+  chart.setAttribute("aria-label", "Today's price with each past read's band as a box and the live band ahead"
+    + (zones ? `, split into up ${zones.up}%, flat ${zones.flat}% and down ${zones.down}%` : ""));
   chart.innerHTML = parts.join("");
 }
 
@@ -711,21 +740,109 @@ function coneLabel(text, right, wanted, outward, marks) {
   return svgText(Math.min(...marks.map((mark) => mark.left - 2)), baseline, text, attrs);
 }
 
+/** The live cone, the end band with the average band inside it, opening from the read. With the read's own odds
+ *  (the window's, not the newest read's) each is split into up, flat and down zones at the read price ± the odds'
+ *  edge, and the wind badge at the read shows which way that read leaned; without them the cone is plain blue. */
 function liveCone(current, x, y, marks) {
   const xr = x(current.read_at), xe = x(current.ends_at);
-  const cone = (reachAtEnd, opacity) => {
+  const shape = (reachAtEnd) => {
     const upper = [], lower = [];
     for (let step = 0; step <= CONE_STEPS; step += 1) {
       const t = step / CONE_STEPS, px = xr + t * (xe - xr), reach = reachAtEnd * Math.sqrt(t);
       upper.push(`${px.toFixed(1)},${y(current.price + reach).toFixed(1)}`);
       lower.unshift(`${px.toFixed(1)},${y(current.price - reach).toFixed(1)}`);
     }
-    return `<polygon points="${upper.concat(lower).join(" ")}" fill="${COLOUR.blue}" fill-opacity="${opacity}"/>`;
+    return upper.concat(lower).join(" ");
   };
   const endHalf = halfWidth(current.bands, "80"), averageHalf = halfWidth(current.bands, "average_80");
   const upper = current.price + endHalf, lower = current.price - endHalf;
-  return cone(endHalf, 0.12) + (averageHalf !== null ? cone(averageHalf, 0.2) : "")
-       + coneLabel(fmt(upper), xe, y(upper) - 4, -1, marks) + coneLabel(fmt(lower), xe, y(lower) + 11, 1, marks);
+  const odds = windowOdds(current);
+  const parts = [];
+  if (odds) {
+    parts.push(coneZones(current, x, y, shape(endHalf), averageHalf === null ? null : shape(averageHalf), odds,
+                         marks));
+  } else {
+    parts.push(`<polygon points="${shape(endHalf)}" fill="${COLOUR.blue}" fill-opacity="0.12"/>`);
+    if (averageHalf !== null) {
+      parts.push(`<polygon points="${shape(averageHalf)}" fill="${COLOUR.blue}" fill-opacity="0.2"/>`);
+    }
+  }
+  parts.push(coneLabel(fmt(upper), CHART.railText, y(upper) - 4, -1, marks),
+             coneLabel(fmt(lower), CHART.railText, y(lower) + 11, 1, marks));
+  if (odds) parts.push(windBadge(xr, y(current.price), CHART.badge, oddsSide(odds)));
+  return parts.join("");
+}
+
+/** The window's read's own odds when they count (the direction call's trust weight is on), else null. */
+function windowOdds(current) {
+  const chain = current.chain;
+  return chain && chain.odds && chain.weight_applied ? chain.odds : null;
+}
+
+/** The cone's three zones, clipped to each band's shape: up above the read price + edge, flat between, down below;
+ *  the zones' edges dashed with their prices by the read, and each zone's odds in the rail beside the cone's end,
+ *  level with the zone where it is tall enough to hold them. */
+function coneZones(current, x, y, endShape, averageShape, odds, marks) {
+  const xr = x(current.read_at), xe = x(current.ends_at), left = xr.toFixed(1), width = (xe - xr).toFixed(1);
+  const yUp = y(current.price + odds.edge), yDown = y(current.price - odds.edge);
+  const tint = (clip, opacity) => `<g clip-path="url(#${clip})">`
+    + svgRect(left, -40, width, (yUp + 40).toFixed(1), 0, ZONE.up, opacity)
+    + svgRect(left, yUp.toFixed(1), width, (yDown - yUp).toFixed(1), 0, ZONE.flat, ZONE.flatOpacity)
+    + svgRect(left, yDown.toFixed(1), width, (300 - yDown).toFixed(1), 0, ZONE.down, opacity) + "</g>";
+  const parts = [`<defs><clipPath id="cone-end"><polygon points="${endShape}"/></clipPath>`
+                 + (averageShape ? `<clipPath id="cone-average"><polygon points="${averageShape}"/></clipPath>` : "")
+                 + "</defs>", tint("cone-end", ZONE.endOpacity)];
+  if (averageShape) parts.push(tint("cone-average", ZONE.averageOpacity));
+  const dash = `stroke-dasharray="2 2" stroke-opacity="0.6"`;
+  const edgeLine = (at) => svgLine(left, at.toFixed(1), xe.toFixed(1), at.toFixed(1), COLOUR.mute, 1, dash);
+  parts.push(`<g clip-path="url(#cone-end)">${edgeLine(yUp)}${edgeLine(yDown)}</g>`);
+  const scale = textScale();
+  const endHalf = halfWidth(current.bands, "80");
+  const top = y(current.price + endHalf), bottom = y(current.price - endHalf);
+  const halo = `stroke="${COLOUR.cream}" stroke-width="3" paint-order="stroke"`;
+  const zoneText = (from, to, text, size, colour) => {
+    const a = clamp(from, top, bottom), b = clamp(to, top, bottom);
+    if (b - a < (size + 3) * scale) return "";
+    const tries = [(a + b) / 2 + size * 0.36 * scale, a + (size + 1) * scale, b - 3 * scale];
+    const baseline = tries.find((at) => !labelTouches(text, CHART.railText, at, marks)) || tries[0];
+    return svgText(CHART.railText, baseline.toFixed(1), text,
+                   `font-size="${size}" font-weight="800" fill="${colour}" text-anchor="end" ${halo}`);
+  };
+  const { up, flat, down } = oddsPercents(odds);
+  parts.push(zoneText(top, yUp, `▲ ${up}%`, 11, COLOUR.blue), zoneText(yUp, yDown, `${flat}% flat`, 9, COLOUR.mute),
+             zoneText(yDown, bottom, `▼ ${down}%`, 11, COLOUR.rust));
+  if (yDown - yUp >= 6) {
+    const faint = `font-size="9.5" font-weight="600" fill="${COLOUR.mute}" ${halo}`;
+    parts.push(svgText((xr + 14).toFixed(1), (yUp - 3).toFixed(1), fmt(current.price + odds.edge), faint),
+               svgText((xr + 14).toFixed(1), (yDown + 10 * scale).toFixed(1), fmt(current.price - odds.edge), faint));
+  }
+  return parts.join("");
+}
+
+/** Whole percents of up, flat and down that add to 100, flat taking the rounding. */
+function oddsPercents(odds) {
+  const up = Math.round(odds.up * 100), down = Math.round(odds.down * 100);
+  return { up, flat: Math.max(0, 100 - up - down), down };
+}
+
+/** Which way odds lean by the engine's rule: even while up and down sit within half a point of a percent. */
+function oddsSide(odds) {
+  return Math.abs(odds.up - odds.down) < 0.005 ? "even" : odds.up > odds.down ? "push" : "pull";
+}
+
+/** A round wind badge: blue with its arrow pointing right for a push, rust pointing left for a pull, grey with a dash
+ *  when even. */
+function windBadge(cx, cy, r, side) {
+  const fill = side === "push" ? COLOUR.blue : side === "pull" ? COLOUR.rust : COLOUR.mute;
+  const half = r * 0.55, head = half * 0.65, sign = side === "pull" ? -1 : 1;
+  const tip = cx + sign * half;
+  const d = side === "even" ? `M${(cx - half * 0.8).toFixed(1)} ${cy.toFixed(1)}h${(half * 1.6).toFixed(1)}`
+    : `M${(cx - sign * half).toFixed(1)} ${cy.toFixed(1)}H${tip.toFixed(1)}`
+      + `M${(tip - sign * head).toFixed(1)} ${(cy - head).toFixed(1)}L${tip.toFixed(1)} ${cy.toFixed(1)}`
+      + `L${(tip - sign * head).toFixed(1)} ${(cy + head).toFixed(1)}`;
+  return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r}" fill="${fill}" stroke="${COLOUR.cream}" `
+       + `stroke-width="${r > 8 ? 2.5 : 2}"/><path d="${d}" stroke="${COLOUR.white}" stroke-width="1.8" fill="none" `
+       + `stroke-linecap="round" stroke-linejoin="round"/>`;
 }
 
 /** The day's line before the live window in ink, up to the read's price at the read; inside it, the window's closes
@@ -1159,6 +1276,63 @@ function keepFocus(name) {
   if (row) row.focus();
 }
 
+// Each reading in plain words: a name, and what it saw in a short sentence from its raw value. Where it is plain,
+// the sentence ends with why it leans as it does: its points either follow what it saw (carry) or oppose it (fade),
+// judged by its z where it has one, so a usual level is taken off first.
+const READING_WORDS = {
+  gap: { name: "Morning gap", saw: (r) => `Opened ${fmt(Math.abs(r), 1)} pts ${r > 0 ? "higher" : "lower"}`,
+         carry: "gaps tend to run", fade: "gaps tend to fill" },
+  trend_since_open: { name: "Move since the open", saw: (r) => `${r > 0 ? "Up" : "Down"} ${fmt(Math.abs(r), 1)} pts`,
+                      carry: "trends often continue", fade: "may fade back" },
+  give_back: { name: "Late give-back", saw: (r) => `${r > 0 ? "Up" : "Down"} ${fmt(Math.abs(r), 1)} pts today`,
+               carry: "may keep going", fade: "some may come back" },
+  fresh_burst: { name: "Last 15 minutes", saw: (r) => (r > 0 ? "Faster than the day" : "Slower than the day"),
+                 carry: "may keep going", fade: (r) => (r > 0 ? "may cool off" : "may catch up") },
+  fade_15_00: { name: "Late-day run", saw: (r) => `Ran ${r > 0 ? "up" : "down"} ${fmt(Math.abs(r), 1)} pts late`,
+                carry: "may keep going", fade: "late runs tend to fade" },
+  gap_across_average: { name: "Gap past long averages",
+                        saw: (r) => `Crossed ${fmt(Math.abs(r))} long-term average${Math.abs(r) === 1 ? "" : "s"}` },
+  leader_surge_fade: { name: "Chips vs. the Nasdaq",
+                       saw: (r) => `Chips ${r < 0 ? "lagged" : "led"} by ${fmt(Math.abs(r), 2)}%`,
+                       carry: "may keep going", fade: (r) => (r < 0 ? "may catch up" : "may cool off") },
+  grind_at_extreme: { name: "Grind at the day's edge",
+                      saw: (r) => `Breadth out of step by ${fmt(Math.abs(r))} stocks` },
+  pin_to_centre: { name: "Options pin", saw: (r) => `The pin sits ${r > 0 ? "above" : "below"} price`,
+                   carry: "price may drift to it" },
+  dealer_drift: { name: "Dealer hedging",
+                  saw: (r, z) => `Dealers ${r > 0 ? "buy" : "sell"} $${fmt(Math.abs(r), 1)}bn`
+                    + (z === null || z === undefined || z === 0 ? "" : `, ${z > 0 ? "more" : "less"} than usual`) },
+  option_wall_untested: { name: "Option wall", saw: (r) => `A big option level sits ${r > 0 ? "above" : "below"}`,
+                          carry: "price may drift to it" },
+  spy_basis: { name: "SPY vs. SPX", saw: (r) => `SPY ran ${fmt(Math.abs(r), 2)} pts ${r > 0 ? "ahead" : "behind"}`,
+               carry: "SPX may follow", fade: "it may snap back" },
+  urgent_orders: { name: "Urgent option orders",
+                   saw: (r) => `${fmt(Math.abs(r))} more urgent ${r > 0 ? "bullish" : "bearish"} orders`,
+                   carry: "may keep going", fade: "these tend to be given back" },
+  burst_tilt: { name: "Option order tilt",
+                saw: (r) => `Near-money orders ${r > 0 ? "lead" : "trail"} by ${fmt(Math.abs(r))}` },
+  claude_beyond_base: { name: "Claude's view",
+                        saw: (r) => `Leans ${r > 0 ? "up" : "down"}, ${fmt(Math.abs(r) * 100)}% past its usual` },
+};
+
+function readingName(entry) {
+  const words = READING_WORDS[entry.name];
+  return words ? words.name : entry.label || titleCase(entry.name);
+}
+
+/** A reading's plain name and its one line: what it saw and, where its points carry or fade that, why. */
+function readingWords(reading) {
+  const words = READING_WORDS[reading.name];
+  const raw = reading.raw;
+  if (!words || raw === null || raw === undefined || raw === 0) return { name: readingName(reading), line: "" };
+  const saw = words.saw(raw, reading.z);
+  const lean = reading.z === null || reading.z === undefined ? raw : reading.z;
+  const points = reading.points || 0;
+  const tail = points === 0 || lean === 0 ? null : (points > 0) === (lean > 0) ? words.carry : words.fade;
+  const why = typeof tail === "function" ? tail(raw) : tail;
+  return { name: words.name, line: why ? `${saw}; ${why}` : saw };
+}
+
 const SIDE_WORDS = { push: "Push", pull: "Pull", even: "Even" };
 const STATUS_WORDS = { live: "Live", earning: "Earning", logged: "Logged" };
 
@@ -1281,7 +1455,9 @@ function shownModel(now) {
 function glideFrame(now) {
   const glide = state.glide;
   glide.frame = null;
-  guarded(() => drawPushPull(glide.to ? shownModel(now) : null), "push-pull-note");
+  const shown = glide.to ? shownModel(now) : null;
+  guarded(() => drawPushPull(shown), "push-pull-note");
+  guarded(() => drawLean(shown), "lean-note");
   const moving = glide.from && now - glide.startMs < PUSH_PULL.glideMs && !(REDUCED_MOTION && REDUCED_MOTION.matches);
   if (moving) glide.frame = requestAnimationFrame(glideFrame);
 }
@@ -1313,10 +1489,8 @@ function readingShort(reading) {
 /** The card's moving parts at one frame: the wind chip, the net, the tug bar, the odds and each row's bar and words. */
 function drawPushPull(model) {
   const net = model ? model.net : null;
-  // even by the engine's rule: up and down within half a point of a percent of each other (by the net while there
-  // are no odds)
-  const odds0 = model ? model.odds : null;
-  const even = net === null || (odds0 ? Math.abs(odds0.up - odds0.down) < 0.005 : Math.abs(net) < PUSH_PULL.evenPoints);
+  const side = netSide(model);
+  const even = side === null || side === "even";
   const netColour = even ? COLOUR.mute : net < 0 ? COLOUR.rust : COLOUR.blue;
   const strength = net === null || !model.swing ? null : Math.abs(net) / model.swing;
   const wind = windLevel(strength);
@@ -1357,6 +1531,98 @@ function drawPushPull(model) {
     row.querySelector(".figure").textContent = readingFigure(reading);
     row.querySelector("svg").innerHTML = factorBar(reading, model.swing);
   });
+}
+
+/** Which way the net leans by the engine's rule: even while up and down sit within half a point of a percent of
+ *  each other (by the net while there are no odds), else push or pull; null without a net. */
+function netSide(model) {
+  if (!model || model.net === null || model.net === undefined) return null;
+  const even = model.odds ? oddsSide(model.odds) === "even" : Math.abs(model.net) < PUSH_PULL.evenPoints;
+  return even ? "even" : model.net < 0 ? "pull" : "push";
+}
+
+/** The readings moving the net, biggest first, each with the side it leans and the shade of its piece on the tug
+ *  (by its rank on its side). */
+function leanRanked(model) {
+  if (!model) return [];
+  const taken = { push: 0, pull: 0 };
+  return model.readings
+    .filter((reading) => reading.inNet && reading.points !== null && reading.points !== undefined
+                         && Math.abs(reading.points) >= PUSH_PULL.evenPoints)
+    .sort((a, b) => Math.abs(b.points) - Math.abs(a.points))
+    .map((reading) => {
+      const leans = reading.points < 0 ? "pull" : "push";
+      const shades = LEAN_SHADES[leans];
+      return { ...reading, leans, shade: shades[Math.min(taken[leans]++, shades.length - 1)] };
+    });
+}
+
+/** The Read page's lean card at one frame of the glide: the wind badge and the lean in words with the wind's dots,
+ *  each side's total, the tug, the biggest readings in plain words, and what waits behind See all. */
+function drawLean(model) {
+  const side = netSide(model);
+  const colour = side === "push" ? COLOUR.blue : side === "pull" ? COLOUR.rust : COLOUR.mute;
+  const wind = windLevel(side && model.swing ? Math.abs(model.net) / model.swing : null);
+  const ranked = leanRanked(model);
+  const leans = side === "push" || side === "pull";
+  const lean = { push: "Pushing up", pull: "Pulling down", even: "No clear lean" }[side] || "—";
+  el("lean-title").textContent = leans && wind.name ? `${lean}, ${wind.name.replace(/_/g, " ")}` : lean;
+  el("lean-title").style.color = colour;
+  el("lean-sub").textContent = side ? `Net ${fmt(model.net, 2, leans)} pts from ${ranked.length} `
+    + `reading${ranked.length === 1 ? "" : "s"}${model.live ? " · Live" : ""}` : "";
+  const badge = el("lean-badge");
+  badge.style.background = colour;
+  badge.classList.toggle("pull", side === "pull");
+  badge.querySelector("use").setAttribute("href", leans ? "#wind-dir" : "#wind-calm");
+  el("lean-dots").querySelectorAll("i").forEach((dot, index) => {
+    dot.style.background = index < wind.dots ? colour : "";
+  });
+  el("lean-pull").textContent = side ? `◂ Pull ${fmt(-model.pull, 2)}` : "";
+  el("lean-push").textContent = side ? `Push ${fmt(model.push, 2, true)} ▸` : "";
+  el("lean-tug").innerHTML = leanTug(model, ranked, side);
+  el("lean-reasons").innerHTML = ranked.slice(0, LEAN.rowsShown).map(reasonRow).join("")
+    || (side ? `<p class="lean-quiet">Nothing is pushing or pulling right now</p>` : "");
+  const shown = Math.min(ranked.length, LEAN.rowsShown);
+  const rest = model ? model.readings.length - shown : 0, moving = ranked.length - shown;
+  el("lean-more").hidden = !model || !model.readings.length;
+  el("lean-more-words").textContent = moving ? `${moving} more moving, ${rest - moving} flat or quiet`
+    : rest ? `${rest} more ${rest === 1 ? "is" : "are"} flat or quiet` : "Every reading";
+}
+
+/** One reading under the tug: its shade, its plain name and line, its points. */
+function reasonRow(reading) {
+  const words = readingWords(reading);
+  return `<div class="reason"><svg viewBox="0 0 4 10" preserveAspectRatio="none" aria-hidden="true">`
+       + `${svgRect(0, 0, 4, 10, 2, reading.shade)}</svg><span class="words"><b>${esc(words.name)}</b>`
+       + (words.line ? `<small>${esc(words.line)}</small>` : "") + "</span>"
+       + `<em class="${reading.points < 0 ? "down" : "up"}">${fmt(reading.points, 2, true)} <small>pts</small>`
+       + "</em></div>";
+}
+
+/** The lean card's tug: the pull half and the push half, each moving reading its own piece in its shade (the biggest
+ *  nearest the centre), and the wind badge on the net. */
+function leanTug(model, ranked, side) {
+  const { centre, trackLeft, trackRight, top, height } = LEAN;
+  const parts = [svgRect(trackLeft, top, centre - trackLeft, height, height / 2, COLOUR.rust, 0.12),
+                 svgRect(centre, top, trackRight - centre, height, height / 2, COLOUR.blue, 0.12)];
+  const centreLine = svgLine(centre, top - 4, centre, top + height + 4, COLOUR.ink, 1.6);
+  if (!side) return parts.join("") + centreLine;
+  const wind = range() && range().wind;
+  const floor = wind && model.swing ? wind.dot_steps[0] * model.swing : 0;
+  const scale = (centre - trackLeft) / (Math.max(model.pull, model.push, floor, PUSH_PULL.evenPoints) * LEAN.room);
+  [["pull", -1], ["push", 1]].forEach(([leans, sign]) => {
+    let edge = centre;
+    ranked.filter((reading) => reading.leans === leans).forEach((reading) => {
+      const width = Math.min(Math.abs(reading.points) * scale, sign < 0 ? edge - trackLeft : trackRight - edge);
+      if (width <= 0) return;
+      parts.push(svgRect((sign < 0 ? edge - width : edge).toFixed(1), top, width.toFixed(1), height, 0, reading.shade));
+      edge += sign * width;
+    });
+  });
+  const netX = clamp(centre + model.net * scale, trackLeft + 9, trackRight - 9);
+  parts.push(centreLine, svgLine(netX.toFixed(1), top - 2, netX.toFixed(1), top + height + 3, COLOUR.ink, 2.2),
+             windBadge(netX, 8, 7.5, side));
+  return parts.join("");
 }
 
 /** The tug bar: the pulls stacked left of the centre and the pushes right, each group one segment sized in points
@@ -1432,8 +1698,10 @@ function renderPushPull() {
   const readings = forces ? forces.readings || [] : [];
   const groupNames = forces && forces.groups ? forces.groups : {};
   const failed = reasons().includes("push_pull_failed");
-  note("push-pull-note", !block ? emptyReason() : failed ? "Readings Failed On This Read"
-                                                         : readings.length ? "" : "No Readings On This Read");
+  const empty = !block ? emptyReason() : failed ? "Readings Failed On This Read"
+              : readings.length ? "" : "No Readings On This Read";
+  note("push-pull-note", empty);
+  note("lean-note", empty);
   const rows = el("push-pull-rows");
   const key = readings.map((entry) => `${entry.name}:${entry.status}`).join("|");
   if (rows.dataset.key !== key) {
@@ -1444,7 +1712,7 @@ function renderPushPull() {
         + `${esc(titleCase(groupNames[entry.group] || entry.group))}</div>`;
       group = entry.group;
       return head + `<button class="push-pull-row" type="button" data-factor="${esc(entry.name)}" aria-expanded="false">`
-        + `<span class="label">${esc(entry.label || titleCase(entry.name))}<span class="side"></span>`
+        + `<span class="label">${esc(readingName(entry))}<span class="side"></span>`
         + `<span class="status ${esc(entry.status)}">${esc(STATUS_WORDS[entry.status] || entry.status)}</span></span>`
         + `<svg viewBox="0 0 ${METER.width} 12" aria-hidden="true"></svg>`
         + `<span class="short"></span><span class="figure" hidden></span></button>`;
@@ -1686,6 +1954,13 @@ document.addEventListener("click", (event) => {
     state.factorsOpen = !state.factorsOpen;
     remember("factors", state.factorsOpen ? "open" : "closed");
     guarded(renderPushPull, "push-pull-note");
+  }
+  if (event.target.closest("#lean-more")) {
+    state.factorsOpen = true;
+    remember("factors", "open");
+    showTab("sight");
+    guarded(renderPushPull, "push-pull-note");
+    el("push-pull-card").scrollIntoView({ block: "start" });
   }
   const factorRow = event.target.closest("[data-factor]");
   if (factorRow) {
