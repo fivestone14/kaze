@@ -20,6 +20,10 @@ TAPE_WINDOW_MINUTES = 30
 # The windows the watchlist bars are measured over (the leaders' and breadth's change), and the two reads a day the
 # same-day open interest is kept on: the first read, and the read fifty minutes before the close.
 BAR_WINDOW_MINUTES = (60,)
+# From this session on the minute quotes are the only source of the true open and the leaders' and breadth's
+# changes: the watchlist and futures bar files land after the close, so a rebuilt read that fell back to them would
+# hold a value its live read never could.
+MINUTE_QUOTES_BEGAN = date(2026, 9, 28)
 OPEN_INTEREST_READS = {"first_minutes_after_open": session_clock.FIRST_SLOT_MINUTES_AFTER_OPEN,
                        "minutes_before_close": 50}
 LEADER_SYMBOLS = ("SMH", "QQQ")
@@ -253,14 +257,13 @@ def collect_spy_basis(read, quotes_rows, day):
 def collect_watchlist_bars(read, rows, quotes_rows, day, cut_at, prior_close, half_days):
     """The true open, the leaders' change over each window and breadth's net change over each window. Mirai writes
     the watchlist's minute bars only after the close, so whenever the minute quotes hold what a value needs at the
-    cut (every day since they began, 2026-09-28, live and rebuilt alike) the quotes are the source; the bars serve
-    history before that."""
+    cut (every day since they began, 2026-09-28, live and rebuilt alike) the quotes are the only source, and a value
+    they cannot give stays blank; the bars serve history before that."""
     if rows:
         read.note_feed("watchlist_bars", rows[-1]["at"], received_at=rows[-1]["at"])
-    quoted = bool(quotes_rows)
-    true_open = quoted_true_open(quotes_rows, day) if quoted else None
-    if true_open is None:
-        true_open = true_open_points(day, cut_at, prior_close, half_days)
+    quoted = bool(quotes_rows) or day >= MINUTE_QUOTES_BEGAN
+    true_open = quoted_true_open(quotes_rows, day) if quoted \
+        else true_open_points(day, cut_at, prior_close, half_days)
     source = "watchlist_quotes" if quoted or prior_close is None else "watchlist_bars"
     read.add_observation("true_open_points", true_open, source=source,
                          blank="not_applicable" if day in mirai_files.es_roll_days() else "feed_missing")
@@ -279,7 +282,7 @@ def collect_watchlist_bars(read, rows, quotes_rows, day, cut_at, prior_close, ha
 
 
 # The poll that stands for the open: the newest at or before 09:30:00, else the first after it within this many
-# seconds; a later first poll leaves the quotes' true open blank (the bars, when they exist, then serve).
+# seconds; a later first poll leaves the true open blank, live and rebuilt alike.
 OPEN_POLL_LATE_SECONDS = 180
 
 

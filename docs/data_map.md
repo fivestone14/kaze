@@ -60,7 +60,8 @@ file Mirai writes only after the close (~16:20 ET): it gives SPY's bars to the p
 write, never before; schema step 13 restamped the rows stored earlier; no reading uses them) and the true open, the
 leaders' and breadth's change for history before the minute quotes began (2026-09-28); from then
 on those three come from the minute quotes, live and rebuilt alike (/ES's last trade at the open against its prior
-settlement, SMH and QQQ last trades, the $ADD breadth bar). The futures file is also saved after the close, so only
+settlement, SMH and QQQ last trades, the $ADD breadth bar), and stay blank when the quotes cannot give them: a
+rebuilt read never falls back to the bars a live read could not have seen. The futures file is also saved after the close, so only
 a rebuild of history before 2026-08-11 reaches it for the true open. The daily bars are one snapshot file refetched after each close: the store
 keeps each day's bar with the fetch moment as its `known_at`, and the feed's row on a read comes from the store, so a
 rebuilt read never claims a fetch it could not have seen.
@@ -190,8 +191,10 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `fund_change_window_pct` (symbol = SMH, QQQ; window_minutes = 60, from the minute quotes' last trades),
   `sector_funds_up_count` (of 11), `largest_stocks_up_count` (of 9), `ten_year_yield_annual_pct`,
   `ten_year_yield_change_basis_points`
-- the true open: `true_open_points` = prior close + /ES's move from the prior session's last bar to its 09:30 bar
-  (the printed open shows only ~77% of the gap); `not_applicable` across a contract roll
+- the true open: `true_open_points` = prior close + /ES's move from its prior settlement to its last trade at the
+  open, from the minute quotes (before 2026-09-28: from the prior session's last bar to its 09:30 bar); the printed
+  open shows only ~77% of the gap; blank `feed_missing` when the quotes hold no /ES poll near the open,
+  `not_applicable` across a contract roll
 - breadth's change: `breadth_net_change_count` (window_minutes = 60; $ADD now less $ADD an hour earlier)
 - SPY's basis: `spy_basis_points` = SPY's last quote scaled onto SPX at the first poll since the open, less SPX's, at
   the newest poll, less today's median of that series (from the minute quotes; blank before 2026-09-28)

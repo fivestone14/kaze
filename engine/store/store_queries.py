@@ -231,16 +231,24 @@ def read_sessions_before(conn, trade_date, count):
 
 def values_at_same_clock(conn, measure_name, first_day, before_day, cut_at, slack_minutes):
     """A measure's filled observations on reads of past sessions whose cut falls within ±slack of the cut's UTC clock
-    (the caller narrows to the session clock), one read per cut (live first, then rebuilt), with subject and day."""
+    (the caller narrows to the session clock), one read per cut (live first, then rebuilt), with subject and day. A
+    window that runs past midnight on the UTC clock wraps round it (the whole-session pool does from 16:20 UTC on),
+    and one a whole day wide takes every clock."""
     lower = session_clock.iso_utc(cut_at - timedelta(minutes=slack_minutes))[11:]
     upper = session_clock.iso_utc(cut_at + timedelta(minutes=slack_minutes))[11:]
+    if 2 * slack_minutes >= 24 * 60:
+        clock_sql, clock_args = "", ()
+    elif lower <= upper:
+        clock_sql, clock_args = "AND substr(s.cut_at, 12) >= ? AND substr(s.cut_at, 12) <= ? ", (lower, upper)
+    else:
+        clock_sql, clock_args = "AND (substr(s.cut_at, 12) >= ? OR substr(s.cut_at, 12) <= ?) ", (lower, upper)
     rows = conn.execute(
         "SELECT s.trade_date, s.cut_at, s.row_origin, o.subject_key, o.value_number FROM collect_snapshots s "
         "JOIN collect_observations o ON o.snapshot_rowid = s.snapshot_rowid "
-        "WHERE s.snapshot_kind = 'read' AND s.trade_date >= ? AND s.trade_date < ? AND substr(s.cut_at, 12) >= ? "
-        "AND substr(s.cut_at, 12) <= ? AND o.measure_name = ? AND o.value_number IS NOT NULL "
+        f"WHERE s.snapshot_kind = 'read' AND s.trade_date >= ? AND s.trade_date < ? {clock_sql}"
+        "AND o.measure_name = ? AND o.value_number IS NOT NULL "
         f"ORDER BY s.trade_date, s.cut_at, {ORIGIN_PREFERENCE_SQL}",
-        (first_day, before_day, lower, upper, measure_name)).fetchall()
+        (first_day, before_day, *clock_args, measure_name)).fetchall()
     kept, seen = [], set()
     for row in rows:
         key = (row["trade_date"], row["cut_at"], row["subject_key"])
