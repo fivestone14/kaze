@@ -222,6 +222,14 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   when it traded: Black–Scholes with no rates, the session's close as expiry, SPX's close in the minute before the
   trade as spot and the volatility that prices the quote's mid (halving between 1% and 500%); trades before SPX's
   first finished minute are left out. Each process prices a day's trades once and keeps them on the cached tape.
+- options tape (the skew, what same-day protection costs): `option_skew_last_30_minutes_pct` and
+  `option_skew_prior_30_minutes_pct` (the 30 minutes to the cut, and the 30 before them): the median implied
+  volatility of the puts less that of the calls among trades with a two-sided quote and a delta of 0.15 to 0.35 in
+  size, in volatility points, each trade's volatility the one the ladder already backs out of its quote's mid (one at
+  the halving's floor or ceiling left out). Blank with SPX's bars' reason when they are missing or stale, and
+  `no_activity` when puts or calls had fewer than 20 such trades in the window; a median, so a day the recorder
+  partly missed still measures it where it has the trades. The earlier window is kept for a later test of the skew's
+  shift (over the 2026-09-23→10-23 history the 30-minute change sized +0.02, t 0.3, so it is not a reading).
 - headlines (60-minute window): `headlines_last_60_minutes_count` (kind = all)
 - Mirai's Claude forecast: `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes,
   to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes
@@ -452,6 +460,7 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | D | `option_sentiment` | calls bought − sold less puts bought − sold since the open, over the contracts that took a side (a share, so late trades and older days' unsided quotes do not shrink it) | steady, usual = same-clock median | 10:00–close | earning, −0.138 |
 | D | `sentiment_shift` | the same over the last 30 minutes | steady | 10:00–close | earning, −0.063 |
 | D | `strike_reach` | share of the day's call contracts with delta under 0.25 − that share of its puts | steady, usual = same-clock median | 10:00–close | earning, +0.095 |
+| E option prices | `put_insurance` | the skew, puts' − calls' implied volatility near 25 delta over the last 30 min, volatility points (`option_skew_last_30_minutes_pct`) | steady, usual = same-clock median | 10:00 → 15 min before close | earning, +0.175 |
 | F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
 
 A reading outside its speak window is `not_applicable`; a gate shut (the surge at an extreme, the grind away from
@@ -526,7 +535,8 @@ G ÷ (G − 1), from five days on: overlapping reads share a day, so the day is 
 `live_day_type_c_fit` and their noise the Trend's pair; `live_days_count` n. The price family (`reading_specs`: gap,
 trend since open, give-back, fresh burst, 15:00 fade, grind at extreme) is fitted together on one design, so each is
 credited only with what the others do not already explain; so is the options family (urgent orders, burst tilt,
-option sentiment, sentiment shift, strike reach), the readings built from the same-day tape. A family fit with no
+option sentiment, sentiment shift, strike reach, put insurance), the readings built from the same-day tape. A
+family fit with no
 coefficient for a weight falls back to that weight's own fit. A catch-up reading (points with no swing) is fitted
 on its strength in swings, so its slope is in points per point like its weight. A reading whose spec names booster inputs is also fitted
 on its own with a strength × input term per input; each term, shrunk by its noise like the weight, over the reading's

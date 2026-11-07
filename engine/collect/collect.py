@@ -480,6 +480,24 @@ def collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, 
         read.add_observation(measure, ladder[key] if ladder else None, blank=blank)
 
 
+def collect_skew(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars):
+    """The skew, puts' implied volatility less calls' near 25 delta, over the 30 minutes to the cut and the 30 before,
+    in volatility points. Each trade's volatility is priced off SPX's bars, so the skew is blank with the bars' reason
+    when they are missing or stale, and no_activity when a side traded too little in the window (a median, so a day
+    the recorder partly missed still measures it where it has the trades)."""
+    blank = None
+    if counted and not (bars and read.feed_ok("spx_bars")):
+        blank = "feed_stale" if read.feed_states.get("spx_bars", {}).get("status") in ("stale", "late") \
+            else "feed_missing"
+    spot_at_minute_ms = {moment.timestamp() * 1000.0: close for moment, close in minute_closes.items()}
+    skew = mirai_files.tape_skew(day, cut_at, spot_at_minute_ms, close_at, max_bytes) \
+        if counted and blank is None else None
+    for measure, key in (("option_skew_last_30_minutes_pct", "last_30"),
+                         ("option_skew_prior_30_minutes_pct", "prior_30")):
+        value = store.rounded(skew[key]) if skew and skew[key] is not None else None
+        read.add_observation(measure, value, blank=blank or ("no_activity" if skew else None))
+
+
 def collect_options_tape(read, day, cut_at, bars, max_bytes, close_at):
     """Trade count, call and put premium, bullish share and gap markers over 30 minutes, the delta ladder and the
     option sentiment since the open, plus the ATM quotes."""
@@ -507,6 +525,7 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes, close_at):
         read.add_observation("urgent_orders_count", urgent.get(kind) if counted else None, kind=kind,
                              window_minutes=TAPE_WINDOW_MINUTES)
     collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars)
+    collect_skew(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
     coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_FOR_EMPTY_WINDOW) if counted else None

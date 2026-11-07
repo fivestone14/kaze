@@ -1321,6 +1321,10 @@ const READING_WORDS = {
   strike_reach: { name: "How far bets reach",
                   saw: (r) => `Far-out ${r > 0 ? "calls" : "puts"} lead by ${fmt(Math.abs(r) * 100)}%`,
                   carry: "the reach may pay", fade: "far bets tend to lose" },
+  put_insurance: { name: "Price of protection",
+                   saw: (r, z) => `Puts cost ${fmt(Math.abs(r), 1)} vol pts ${r < 0 ? "less" : "more"} than calls`
+                     + (z === null || z === undefined || z === 0 ? "" : `, ${z > 0 ? "dearer" : "cheaper"} than usual`),
+                   carry: "the crowd's hedging tends to be wrong", fade: "the hedgers may be right" },
   claude_beyond_base: { name: "Claude's view",
                         saw: (r) => `Leans ${r > 0 ? "up" : "down"}, ${fmt(Math.abs(r) * 100)}% past its usual` },
 };

@@ -177,6 +177,8 @@ TAPE_BLANK = "feed_missing when the tape is absent; feed_stale when its newest t
 TAPE_TWIN = "feed_coverage_last_30_minutes_portion"
 LADDER_BLANK = TAPE_BLANK + ("; feed_missing or feed_stale with SPX's bars, which price each trade; partial_coverage "
                              "when under 0.9 of the session's minutes so far have a trade in the file")
+SKEW_BLANK = TAPE_BLANK + ("; feed_missing or feed_stale with SPX's bars, which price each trade; no_activity when "
+                           "puts or calls had fewer than 20 such trades in the window")
 
 MEASURES = [
     # clock (no feed: the clock is the clock)
@@ -351,6 +353,14 @@ MEASURES = [
                 "cut in single-leg trades that took a side (the sentiment shift's denominator)", "contracts",
                 "whole_number", "push_pull", "options_sentiment", feed="options_tape", blank=LADDER_BLANK, low=0,
                 high=50_000_000, twin=TAPE_TWIN),
+    measure_row("option_skew_last_30_minutes_pct", "the skew over the 30 minutes to the cut, what same-day protection "
+                "costs: the median implied volatility of the puts less that of the calls among trades with a two-sided "
+                "quote and a delta of 0.15 to 0.35 in size, each trade's volatility from its quote's mid, in "
+                "volatility points", "pct", "number", "push_pull", "options_skew", feed="options_tape",
+                blank=SKEW_BLANK, low=-100, high=100, twin=TAPE_TWIN),
+    measure_row("option_skew_prior_30_minutes_pct", "the skew over the 30 minutes before the last 30 (from 60 to 30 "
+                "minutes before the cut), measured the same way", "pct", "number", "push_pull", "options_skew",
+                feed="options_tape", blank=SKEW_BLANK, low=-100, high=100, twin=TAPE_TWIN),
     measure_row("option_tape_minute_coverage_portion", "share of the session's minutes from the open to the cut with "
                 "at least one same-day trade in the file; under 0.9 the delta ladder is blank as partial_coverage",
                 "portion", "number", "health", "tape_health", feed="options_tape", blank=TAPE_BLANK, low=0, high=1),

@@ -40,6 +40,13 @@ VOLATILITY_LOW, VOLATILITY_HIGH, VOLATILITY_HALVINGS = 0.01, 5.0, 40
 YEAR_MINUTES = 365.0 * 24.0 * 60.0
 MINUTE_MS = 60_000
 SENTIMENT_WINDOW_MINUTES = 30
+# The skew, what same-day protection costs: among trades with a two-sided quote and a delta of 0.15 to 0.35 in size
+# (around 25 delta), the median implied volatility of the puts less that of the calls, in volatility points, over a
+# 30-minute window; a side with fewer than SKEW_MINIMUM_TRADES such trades leaves the window unmeasured. A trade whose
+# volatility sits at the halving's floor or ceiling (a quote no volatility prices) is left out.
+SKEW_DELTA_LOW, SKEW_DELTA_HIGH = 0.15, 0.35
+SKEW_WINDOW_MINUTES = 30
+SKEW_MINIMUM_TRADES = 20
 # Same-day open interest is kept for strikes within this share of spot; the scan's rows are [strike, calls, puts].
 OPEN_INTEREST_SPOT_SHARE = 0.03
 ES_SYMBOL = "/ES"
@@ -379,26 +386,32 @@ def option_value(spot, strike, volatility, years, is_call):
     return np.where(is_call, calls, calls - spot + strike)
 
 
-def trade_deltas(spot, strike, years, is_call, quote):
-    """Each trade's delta from the volatility that prices its quote, found by halving between 1% and 500%; a quote
+def trade_volatilities(spot, strike, years, is_call, quote):
+    """Each trade's implied volatility, the one that prices its quote, found by halving between 1% and 500%; a quote
     under the option's floor takes the low end and one over its ceiling the high end."""
     low, high = np.full(spot.shape, VOLATILITY_LOW), np.full(spot.shape, VOLATILITY_HIGH)
     for _ in range(VOLATILITY_HALVINGS):
         middle = (low + high) / 2.0
         rich = option_value(spot, strike, middle, years, is_call) > quote
         high, low = np.where(rich, middle, high), np.where(rich, low, middle)
-    volatility = (low + high) / 2.0
+    return (low + high) / 2.0
+
+
+def trade_deltas(spot, strike, years, is_call, volatility):
+    """Each trade's delta at its implied volatility."""
     root = volatility * np.sqrt(years)
     d1 = (np.log(spot / strike) + 0.5 * root * root) / root
     return np.where(is_call, normal_cdf(d1), normal_cdf(d1) - 1.0)
 
 
 def tape_deltas(day, spot_at_minute_ms, close_at):
-    """The day's trades' deltas, priced once and kept on the cached tape (NaN until the trade's spot is known): a
-    trade's spot is SPX's close in the minute before its own, read from {minute start in ms: close}."""
+    """The day's trades' deltas, priced once and kept on the cached tape with each trade's implied volatility (both
+    NaN until the trade's spot is known): a trade's spot is SPX's close in the minute before its own, read from
+    {minute start in ms: close}."""
     tape = read_tape_day(day)
     if "delta" not in tape:
         tape["delta"] = np.full(tape["ts_ms"].shape, np.nan)
+        tape["volatility"] = np.full(tape["ts_ms"].shape, np.nan)
     close_ms = close_at.timestamp() * 1000.0
     minute_before = (tape["ts_ms"] // MINUTE_MS - 1) * MINUTE_MS
     keys = np.array(sorted(spot_at_minute_ms), dtype=float)
@@ -413,9 +426,38 @@ def tape_deltas(day, spot_at_minute_ms, close_at):
         bid, ask, price = tape["bid"][waiting], tape["ask"][waiting], tape["price"][waiting]
         quote = np.where((bid > 0) & (ask >= bid), (bid + ask) / 2.0, price)
         years = (close_ms - tape["ts_ms"][waiting]) / MINUTE_MS / YEAR_MINUTES
-        tape["delta"][waiting] = trade_deltas(spot, tape["strike"][waiting], years, tape["is_call"][waiting] > 0,
-                                              np.maximum(quote, 0.0))
+        strike, is_call = tape["strike"][waiting], tape["is_call"][waiting] > 0
+        volatility = trade_volatilities(spot, strike, years, is_call, np.maximum(quote, 0.0))
+        tape["volatility"][waiting] = volatility
+        tape["delta"][waiting] = trade_deltas(spot, strike, years, is_call, volatility)
     return tape["delta"]
+
+
+def tape_skew(day, cut, spot_at_minute_ms, close_at, max_bytes=None):
+    """The skew over the 30 minutes to the cut and over the 30 before them: the median implied volatility of the puts
+    less that of the calls, in volatility points, among trades with a two-sided quote and a delta of SKEW_DELTA_LOW to
+    SKEW_DELTA_HIGH in size, each window None when a side has fewer than SKEW_MINIMUM_TRADES; with the fewer side's
+    trade count per window. Returns {last_30, prior_30, last_30_trades, prior_30_trades}."""
+    tape = read_tape_day(day)
+    delta = tape_deltas(day, spot_at_minute_ms, close_at)
+    volatility = tape["volatility"]
+    end_ms = cut.timestamp() * 1000.0
+    on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
+    size_of_delta = np.abs(np.nan_to_num(delta))
+    with np.errstate(invalid="ignore"):
+        priced = (volatility > VOLATILITY_LOW * 1.01) & (volatility < VOLATILITY_HIGH * 0.99)
+    usable = (on_disk & ~np.isnan(delta) & priced & (tape["bid"] > 0) & (tape["ask"] >= tape["bid"])
+              & (size_of_delta >= SKEW_DELTA_LOW) & (size_of_delta <= SKEW_DELTA_HIGH))
+    is_call = tape["is_call"] > 0
+    skew = {}
+    for key, window_end_ms in (("last_30", end_ms), ("prior_30", end_ms - SKEW_WINDOW_MINUTES * MINUTE_MS)):
+        inside = usable & (tape["ts_ms"] > window_end_ms - SKEW_WINDOW_MINUTES * MINUTE_MS) \
+            & (tape["ts_ms"] <= window_end_ms)
+        puts, calls = volatility[inside & ~is_call], volatility[inside & is_call]
+        skew[key + "_trades"] = int(min(puts.size, calls.size))
+        skew[key] = float((np.median(puts) - np.median(calls)) * 100.0) \
+            if min(puts.size, calls.size) >= SKEW_MINIMUM_TRADES else None
+    return skew
 
 
 def tape_delta_ladder(day, cut, spot_at_minute_ms, close_at, max_bytes=None):

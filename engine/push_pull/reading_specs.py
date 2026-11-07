@@ -14,7 +14,7 @@ import json
 from engine import session_clock
 from engine.push_pull import context_boosters as ctx, read_facts, strength_shapes as shapes
 from engine.push_pull import same_clock_baseline as baseline
-from engine.push_pull.forces import catch_up, dealers, heavyweights, option_bets, outside_view, own_path
+from engine.push_pull.forces import catch_up, dealers, heavyweights, option_bets, option_prices, outside_view, own_path
 
 # Mechanism groups, by who is trading: letter, name and what it means.
 GROUPS = {
@@ -23,6 +23,7 @@ GROUPS = {
     "B": ("dealers", "forced hedging"),
     "C": ("catch_up", "another market leads SPX"),
     "D": ("option_bets", "who bets which way"),
+    "E": ("option_prices", "what protection costs"),
     "F": ("outside_view", "Claude beyond its base rate"),
 }
 # Status: live readings count in the net from a third of their history size; earning ones count from 0 and grow
@@ -182,6 +183,14 @@ SPECS = (
          spread_floor=0.02, family=OPTIONS_FAMILY,
          evidence="w +0.095 (t 1.2) alone and in the options joint fit, 20 days 2026-09-23→10-23: calls reaching "
                   "further out than puts lean up"),
+    # ---- E · option prices ---------------------------------------------------------------------------------------------
+    Spec("put_insurance", "Put Insurance", "E", option_prices.put_insurance, "pct", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=15), +0.175, EARNING, usual=baseline.USUAL_SAME_CLOCK,
+         spread_floor=0.3, family=OPTIONS_FAMILY,
+         evidence="w +0.175 (t 3.1) alone, +0.207 (t 3.4) in the options joint fit, +0.192 (t 2.6) beside the price "
+                  "and option readings, 15 of 20 days its way, +0.156..+0.215 leaving out any one day, 20 days "
+                  "2026-09-23→10-23: protection dearer than usual for the time of day leans up (the hedging is "
+                  "given back); 0.08 correlated with Trend Since Open"),
     # ---- F · outside view ----------------------------------------------------------------------------------------------
     Spec("claude_beyond_base", "Claude Beyond Base", "F", outside_view.claude_beyond_base, "share",
          shapes.STEADY, Speaks(from_minute=30, until_minutes_before_close=0), +0.06, EARNING, spread_floor=0.05,
