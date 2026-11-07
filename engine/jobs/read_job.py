@@ -10,7 +10,7 @@ from datetime import date
 from engine import paths, session_clock
 from engine.collect import collect, mirai_files
 from engine.feed import live_feed
-from engine.grade import grade, parity, promotion_ledger, trust
+from engine.grade import call_ledger, grade, parity, promotion_ledger, trust
 from engine.jobs import job_log
 from engine.push_pull import push_pull_read
 from engine.range import range_fit, range_read
@@ -18,6 +18,8 @@ from engine.store import backup, components, registry, store, store_queries
 
 BAR_POLL_SECONDS = 5
 MISMATCH_LINES_LOGGED = 20
+# Days read live the nightly re-scores at most per run when a recipe change left them unscored (about 45 s each).
+RESCORE_DAYS_PER_NIGHT = 10
 JOB_READ, JOB_NIGHTLY, JOB_BY_HAND = "read", "nightly", "by_hand"
 RANGE_FAILED, PUSH_PULL_FAILED, GRADE_FAILED = "range_failed", "push_pull_failed", "grade_failed"
 WHOLE_SCOREBOARD = "every graded session"
@@ -36,11 +38,15 @@ def main():
     parser.add_argument("--scoreboard", nargs="?", const=WHOLE_SCOREBOARD, metavar="YYYY-MM-DD",
                         help="print the grades per session and channel (one session, or every graded one)")
     parser.add_argument("--pass-test", action="store_true", help="print the range band's walk-forward pass test")
+    parser.add_argument("--rescore", action="store_true",
+                        help="after the close: re-score every day a recipe change left unscored, then rewrite the "
+                        "promotion and call ledgers for the next session")
     parser.add_argument("--trust", action="store_true",
                         help="print the trust ledger (every dial per channel) and the promotion ledger (every push/pull reading)")
     args = parser.parse_args()
     job = JOB_NIGHTLY if args.nightly or args.nightly_if_due else JOB_READ
-    if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test or args.trust:
+    if args.at or args.rebuild_day or args.backfill_bars or args.scoreboard or args.pass_test or args.trust \
+            or args.rescore:
         job = JOB_BY_HAND
     try:
         if args.nightly_if_due:
@@ -51,6 +57,8 @@ def main():
             run_rebuild_moment(session_clock.parse_typed_eastern(args.at))
         elif args.rebuild_day:
             run_rebuild_day(date.fromisoformat(args.rebuild_day))
+        elif args.rescore:
+            run_rescore()
         elif args.backfill_bars:
             run_backfill_bars()
         elif args.scoreboard:
@@ -227,15 +235,40 @@ def run_rebuild_day(day):
     rebuild_and_settle(day, build)
 
 
+def run_rescore():
+    """Re-score by hand, after the close, every day read live that a recipe change left unscored (the nightly does
+    RESCORE_DAYS_PER_NIGHT a run), grade their windows, and rewrite the promotion and call ledgers for the next
+    session from the latest one."""
+    calendar, half_days = mirai_files.session_calendar()
+    now = session_clock.now_utc()
+    today = session_clock.latest_trading_day(session_clock.to_eastern(now).date())
+    if today == session_clock.to_eastern(now).date() and now < session_clock.session_close(today, half_days):
+        log(JOB_BY_HAND, f"re-score refused at {session_clock.iso_eastern(now)}: the session is open")
+        return
+    conn = store.open_store()
+    days = promotion_ledger.days_to_rescore(conn, today)
+    for day in days:
+        rebuild_session(conn, date.fromisoformat(day), calendar, half_days)
+        grade.close_windows(conn, date.fromisoformat(day), now, now)
+    filled = grade.fill_call_grades(conn)
+    next_session = session_clock.next_trading_day(today)
+    ledger = f"{filled} older grades gained the call's grade; "
+    ledger += promotion_ledger.write_ledger(conn, today, next_session, now)
+    ledger += "; " + call_ledger.write_ledger(conn, today, next_session, now)
+    log(JOB_BY_HAND, f"re-scored {', '.join(days) or 'no days'}; {ledger}")
+
+
 def run_scoreboard(day):
     """Print the scoreboard for one session (or every graded session) and the pooled last 20 sessions."""
     print("\n".join(grade.scoreboard_lines(store.open_store(), day)))
 
 
 def run_trust():
-    """Print the trust ledger (every dial per channel) and the promotion ledger (every push/pull reading)."""
+    """Print the trust ledger (every dial per channel), the promotion ledger (every push/pull reading) and the call
+    ledger (the push/pull call per channel)."""
     conn = store.open_store()
-    print("\n".join(trust.ledger_lines(conn) + [""] + promotion_ledger.ledger_lines(conn)))
+    print("\n".join(trust.ledger_lines(conn) + [""] + promotion_ledger.ledger_lines(conn) + [""]
+                    + call_ledger.ledger_lines(conn)))
 
 
 def run_pass_test():
@@ -337,13 +370,16 @@ def run_nightly():
     fits_rebuilt, fit_written = range_fit.write_fits(conn, next_session, written_at)
     rebuilt = [f"{trade_date} {rebuild_session(conn, date.fromisoformat(trade_date), calendar, half_days)[0]} reads"
                for trade_date in sessions]
+    rescored = rescore_days(conn, today, calendar, half_days, sessions)
     settled = []
     for trade_date in store_queries.sessions_with_open_windows(conn, session_clock.iso_utc(written_at),
                                                                components.RANGE_DECISION_KIND):
         windows, grades = grade.close_windows(conn, date.fromisoformat(trade_date), written_at, written_at)
         settled.append(f"{trade_date} {windows} windows ({grades} grades)")
+    grade.fill_call_grades(conn)
     ledger = trust.write_ledger(conn, today, next_session, written_at)
     ledger += "; " + promotion_ledger.write_ledger(conn, today, next_session, written_at)
+    ledger += "; " + call_ledger.write_ledger(conn, today, next_session, written_at)
     parity_phrase, mismatch_lines = parity.check_sessions(conn, half_days, written_at, MISMATCH_LINES_LOGGED)
     for line in mismatch_lines:
         log(JOB_NIGHTLY, line)
@@ -360,10 +396,22 @@ def run_nightly():
     grade_failures = store_queries.snapshots_with_reason(conn, today.isoformat(), GRADE_FAILED)
     log(JOB_NIGHTLY, f"nightly {today}: {live_reads} live reads, {missed} missed slots marked, {grade_failures} reads "
                      f"with a failed grading step, {live_bars} live bars ({bars}); rebuilt {', '.join(rebuilt)}; "
+                     f"re-scored {', '.join(rescored) or 'no days'} for a changed recipe; "
                      f"{fits}; settled {', '.join(settled) or 'nothing open'}; {ledger}; parity: {parity_phrase}; "
                      f"backup {packed.name} ({pruned} older removed)"
                      + "".join(f"; WARNING: {warning}" for warning in warnings))
     paths.nightly_done_file().write_text(today.isoformat() + "\n")
+
+
+def rescore_days(conn, today, calendar, half_days, rebuilt_already):
+    """Rebuild the days read live whose reads lack some reading's current recipe (a recipe changed since), oldest
+    first and at most RESCORE_DAYS_PER_NIGHT a run, so the promotion ledger scores every reading on them again; the
+    settling after it grades their windows. Returns the days rebuilt."""
+    days = [day for day in promotion_ledger.days_to_rescore(conn, today)
+            if day not in rebuilt_already][:RESCORE_DAYS_PER_NIGHT]
+    for day in days:
+        rebuild_session(conn, date.fromisoformat(day), calendar, half_days)
+    return days
 
 
 def write_missed_slots(conn, day, half_days, written_at):

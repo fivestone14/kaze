@@ -107,11 +107,12 @@ RANGE_RECIPE_PARAMETERS = {
 
 TRUST_WEIGHT_KIND, SKILL_METRIC_KIND = "trust_weight", "skill_metric"
 EVALUATION_KINDS = (TRUST_WEIGHT_KIND, SKILL_METRIC_KIND)
-PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND = "push_pull_factor", "width_dial"
-EVALUATED_KINDS = (PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND)
-# The dial's and the factor's trust is keyed by the measure that carries the applied weight; its lane and overlap
-# group are read off that measure's registry row.
-WEIGHTED_MEASURE = {PUSH_PULL_FACTOR_KIND: "push_pull_points", WIDTH_DIAL_KIND: "width_multiplier"}
+PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND, PUSH_PULL_CALL_KIND = "push_pull_factor", "width_dial", "push_pull_call"
+EVALUATED_KINDS = (PUSH_PULL_FACTOR_KIND, WIDTH_DIAL_KIND, PUSH_PULL_CALL_KIND)
+# The dial's and the factor's trust is keyed by the measure that carries the applied weight (the call's by its net);
+# its lane and overlap group are read off that measure's registry row.
+WEIGHTED_MEASURE = {PUSH_PULL_FACTOR_KIND: "push_pull_points", WIDTH_DIAL_KIND: "width_multiplier",
+                    PUSH_PULL_CALL_KIND: "push_pull_net_points"}
 VERDICT_COLUMN = "metric_text"
 VERDICT_PASSED, VERDICT_HELD, VERDICT_HELD_DOWN, VERDICT_FAILED = "passed", "held", "held_down", "failed"
 TOO_FEW_SESSIONS = "too_few_sessions"
@@ -133,6 +134,9 @@ DIAL_TEST = ("dial_band_test", "2")
 # that any one with no skill is ever promoted (at 20-to-1 that chance was up to 70%); every 5-minute read overlaps its
 # neighbours, so a day is one piece of evidence and a reading needs at least 60 of them (40 events for an event one).
 PROMOTION_LEDGER = ("promotion_ledger", COMPONENT_VERSION)
+# The first session the push/pull readings were read live: the days before it shaped their history sizes, so the
+# ledger scores the readings on the days read live from it on, never on those.
+PUSH_PULL_LIVE_SINCE = "2026-10-26"
 PROMOTE_AT, DEMOTE_AT = 140.0, 10.0
 PROMOTE_MINIMUM_DAYS, PROMOTE_MINIMUM_EVENTS = 60, 40
 E_VALUE_BET = 0.25
@@ -142,6 +146,19 @@ PROMOTION_LEDGER_PARAMETERS = {
     "e_value": f"product over days of 1 + {E_VALUE_BET} × clip(score ÷ spread, ±1); the reversed sign likewise",
     "promote": f"e ≥ {PROMOTE_AT} with ≥ {PROMOTE_MINIMUM_DAYS} days ({PROMOTE_MINIMUM_EVENTS} events)",
     "demote": f"reversed e ≥ {DEMOTE_AT}", "recipe": "frozen by hash; a change restarts the clock",
+}
+# The call ledger judges the push/pull call as a whole, nightly, on each channel over the last 20 sessions' live reads
+# (grade/call_ledger.py): how often a leaning call's average landed the side it leaned, its odds' log score against a
+# call with no push, and per band of its chance of up how often the average landed up. It measures; it moves nothing.
+CALL_LEDGER = ("call_ledger", COMPONENT_VERSION)
+CALL_EVALUATED_NAME = "net_call"
+CALL_LEDGER_SESSIONS = 20
+CALL_UP_BANDS = (0.0, 0.1, 0.2, 0.3, 0.4, 0.6, 1.0)
+CALL_LEDGER_PARAMETERS = {
+    "sample": "live first-built base decisions per channel whose grade counts, the last 20 sessions",
+    "side_right": "leaning calls (net not 0) whose average landed up or down: the share on the side the net leaned",
+    "log_score_gain": "mean of ln(odds given the side landed) − ln(odds a net of 0 gives it)",
+    "calibration": f"per band of the chance of up {CALL_UP_BANDS}: the share landed up beside the mean chance",
 }
 TRUST_MINIMUM_SESSIONS = 20
 FED_TEST_MINIMUM = {"windows": 20, "sessions": 5}

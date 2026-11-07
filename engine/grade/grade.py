@@ -1,8 +1,12 @@
 # Outcomes and grades: measures every range decision window from the store's bars once all its bars are held (or
-# the session is settled), writes the window's outcome and one grade per decision, and prints the scoreboard.
+# the session is settled), writes the window's outcome and one grade per decision, and prints the scoreboard. The
+# grade judges the decision's bands and rung and its push/pull call: which side the window's average price ended on
+# (up, flat or down against the call's flat zone), the chance the call gave that side, the chance a call with no push
+# would have given it, and how far the average landed from where the net said; the call ledger pools these nightly.
 import itertools
 
 from engine import session_clock
+from engine.push_pull import net_and_odds
 from engine.range import range_fit, range_read
 from engine.store import components, registry, store, store_queries
 
@@ -184,7 +188,79 @@ def grade_with_values(conn, decision, window, measured, written_iso):
     for band_side, side, sign in zip(registry.BAND_SIDES, ("high", "low"), (1, -1)):
         used = max(0.0, sign * moves[side]) / half if moves and half else None
         add("band_used_ratio", used, registry.subject_key(band=components.BAND, side=band_side), blank)
+    call_grade_rows(add, decision_call(conn, decision), moves, measured)
     return grade, rows
+
+
+def fill_call_grades(conn):
+    """The push/pull call's grade added to every forecast grade written before calls were graded, from the decision's
+    stored call and the window's stored average move; returns how many grades gained it."""
+    values = []
+    grades = store_queries.grades_without_call(conn)
+    for row in grades:
+        add = store.row_adder(store.outcome_value_row, {"outcome_id": row["outcome_id"]}, values)
+        measured = {"facts": {} if row["end_price"] is not None else None}
+        moves = {"average": row["average_move"]} if row["average_move"] is not None else None
+        call_grade_rows(add, decision_call(conn, row), moves, measured)
+    store.write_outcome_values(conn, values)
+    return len(grades)
+
+
+def decision_call(conn, decision):
+    """A decision's push/pull call from its value rows: the net, the odds per side, the swing and the two stretches;
+    the flat zone's half width (the rung scaled to the average) and the spread of the average (σ) when all are held."""
+    call = {"net": None, "odds": {}, "swing": None, "stretch": {}}
+    for row in store_queries.decision_values(conn, decision["decision_rowid"]):
+        subject = registry.subject_parts(row["subject_key"])
+        if row["measure_name"] == "push_pull_net_points":
+            call["net"] = row["value_number"]
+        elif row["measure_name"] == "push_pull_odds_probability" and row["value_number"] is not None:
+            call["odds"][subject["side"]] = row["value_number"]
+        elif row["measure_name"] == "typical_swing_points":
+            call["swing"] = row["value_number"]
+        elif row["measure_name"] == "stretch_multiplier" and row["value_number"] is not None:
+            call["stretch"][subject["band"]] = row["value_number"]
+    stretch, average = call["stretch"].get(components.BAND), call["stretch"].get(components.AVERAGE_BAND)
+    formed = call["swing"] and stretch and average
+    call["edge"] = net_and_odds.edge_of(components.RUNG_POINTS[decision["horizon_name"]], average, stretch) \
+        if formed else None
+    call["sigma"] = call["swing"] * average / net_and_odds.EIGHTY_PERCENT_Z if formed else None
+    return call
+
+
+def side_landed(move, edge):
+    """Where the average landed against the flat zone: up beyond +edge, down beyond −edge, flat between."""
+    return "up" if move > edge else "down" if move < -edge else "flat"
+
+
+def no_push_odds(side, edge, sigma):
+    """The chance a call with no push (net 0) gives a side: Φ(−edge ÷ σ) up or down, the rest flat."""
+    beyond = net_and_odds.normal_cdf(-edge / sigma)
+    return 1.0 - 2.0 * beyond if side == "flat" else beyond
+
+
+def call_grade_rows(add, call, moves, measured):
+    """The push/pull call's grade on the average price: the side it landed, the odds the call gave that side and the
+    odds no push would have, and the average's miss from the net; blank with the reason when the call or the window
+    has none."""
+    if measured["facts"] is None:
+        blank = registry.BARS_MISSING
+    elif moves is None:
+        blank = registry.NOT_APPLICABLE
+    elif call["net"] is None:
+        blank = registry.NOT_FORMED_REASON
+    elif len(call["odds"]) < 3 or call["edge"] is None:
+        blank = registry.TOO_FEW_SESSIONS
+    else:
+        blank = None
+    move = moves["average"] if blank is None else None
+    side = side_landed(move, call["edge"]) if move is not None else None
+    add("push_pull_side_landed_word", side, blank=blank)
+    add("push_pull_odds_given_probability", call["odds"][side] if side else None, blank=blank)
+    add("push_pull_no_push_odds_probability", no_push_odds(side, call["edge"], call["sigma"]) if side else None,
+        blank=blank)
+    add("push_pull_net_miss_points", move - call["net"] if move is not None and call["net"] is not None else None,
+        blank=blank)
 
 
 # ---- The scoreboard --------------------------------------------------------------------------------------------------

@@ -241,7 +241,7 @@ def write_ledger(conn, through_day, in_force_day, written_at):
 
 def ledger_lines(conn):
     """The newest ledger per dial and channel: sample, score, interval, fake baseline, verdict, weight."""
-    rows = store_queries.newest_evaluations(conn)
+    rows = [row for row in store_queries.newest_evaluations(conn) if row["judge_name"] == components.DIAL_TEST[0]]
     if not rows:
         return ["no trust ledger yet: the nightly writes it after its first run"]
     cells = defaultdict(dict)

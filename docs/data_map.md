@@ -236,11 +236,15 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `minutes_covered_count`, `stayed_inside_rung` (rung_points = 5, 10, 15)
 - forecast grade (`results_outcome_values`): the three grade-start measures again, `was_inside_band` and
   `band_miss_points` (band = 80, average_80), `stayed_inside_rung` (the channel's own rung), `band_used_ratio`
-  (band = 80; side = upper, lower)
+  (band = 80; side = upper, lower); the push/pull call's grade: `push_pull_side_landed_word` (up, flat, down),
+  `push_pull_odds_given_probability`, `push_pull_no_push_odds_probability`, `push_pull_net_miss_points`
 - trust ledger (`results_evaluations`): `trust_weight_portion`, `interval_score_gain_points`,
   `band_coverage_portion`
-- promotion ledger (`results_evaluations`): `live_weight_fit`, `live_day_type_a_fit`, `live_day_type_c_fit`,
-  `live_days_count`, `promotion_e_value`, `reversed_e_value`
+- promotion ledger (`results_evaluations`): `live_weight_fit`, `live_weight_noise`, `live_day_type_a_fit`,
+  `live_day_type_c_fit`, `live_day_type_a_noise`, `live_day_type_c_noise`, `live_booster_beta` (slice kind = the
+  input), `live_days_count`, `rescored_days_count`, `promotion_e_value`, `reversed_e_value`
+- call ledger (`results_evaluations`): `call_side_right_portion`, `call_log_score_gain`, `call_up_share_portion`
+  (slice odds_band)
 
 Every measure's lane and fact group are checked when the registry loads: one fact may reach the `range` lane (how
 far price travels) or the `push_pull` lane (which way: the readings that push price up or pull it down), never both.
@@ -404,7 +408,7 @@ rules the registry names and versions (grade-start rule `at_read@1`, outcome rul
   the rebuilt day's windows the same way. The window and its grades are written in one transaction, never replaced
   except with their rebuilt read.
 
-## 8. Push/pull readings, dials and the two ledgers
+## 8. Push/pull readings, dials and the ledgers
 
 Two questions, two lanes. The **range** (how far price travels over the window) is the band of sections 5 to 7;
 the width dials below are the only things that may widen it, and each starts at zero weight, changing the band only
@@ -455,14 +459,19 @@ in time). The phone shows every reading, logged ones dimmed.
 3. **Strength** `push_pull_strength` (`strength_shapes.py`): steady = sign(z) × tanh(max(0, |z| − 0.5)), nothing
    inside the wiggle, saturating towards ±1; reversing = −steady; one-sided = side × tanh(max(0, z − 0.5)); clipped =
    z held to ±3 (the give-back's size grows with the day); catch-up = the raw value in points, no z.
-4. **Weight** `push_pull_weight` (factor, on the decision; `earned_weights.py`): w = (h·ŵ_hist + n·ŵ_live) ÷
-   (h + n + 40), swings of points per unit strength, with h = 20 days for a live reading (so day one is a third of
-   the tested size) and 0 for an earning one, n the live days and ŵ_live the promotion ledger's fit, as known at the
-   cut. The Trend's weight is the day-type pair a + c·tn, blended the same way coefficient by coefficient. The pin
-   and the drift share one weight (`pin_and_dealer_drift`): the sum of their strengths × one weight, one day count.
+4. **Weight** `push_pull_weight` (factor, on the decision; `earned_weights.py`): w = (h·ŵ_hist + n·k·ŵ_live) ÷
+   (h + n·k + 40), swings of points per unit strength, with h = 20 days for a live reading (so day one is a third of
+   the tested size) and 0 for an earning one, n the scored days, ŵ_live the promotion ledger's fit and k = 1 −
+   (noise ÷ ŵ_live)² held to 0–1, the share of the fit that is signal (noise = its day-clustered standard error, so
+   a fit as shaky as its own size counts for no days, and under five scored days live days count for none), as known
+   at the cut. The Trend's weight is the day-type pair a + c·tn, blended the same way coefficient by coefficient.
+   Until a reading is promoted its weight is 0 whenever it points against its history (the Trend's checked at the
+   read's trend-ness). The pin and the drift share one weight (`pin_and_dealer_drift`): the sum of their strengths ×
+   one weight, one day count.
 5. **Context booster** `push_pull_booster` (`context_boosters.py`): the wider view, which adds no points and only
    sizes them: b = clip(exp(Σ β_j u_j), ×0.5, ×2) over the context inputs the reading's spec names, every β 0 at
-   launch (×1), learned later; the wall's fixed clock booster √(195 ÷ minutes left). The context inputs are stored
+   launch (×1), then the promotion ledger's learned β (`live_booster_beta`) once one is; the wall's fixed clock booster
+   √(195 ÷ minutes left). The context inputs are stored
    per read as `push_pull_context_input` (kind): `trend_ness` (0–1: the same-clock rank of the mean of three
    same-clock ranks, `straightness_since_open`, `side_share_since_open`, `closeness_to_extreme`, eased in by a ramp
    from 0 at 10:00 to 1 at 12:30, 0.5 before), `path_straightness` (the 30-minute path), `dealer_gamma` (+1 positive,
@@ -487,19 +496,52 @@ The read's stored call stays what the read said.
 
 **The promotion ledger** (`results_evaluations`, `engine/grade/promotion_ledger.py`; judge `promotion_ledger@1`,
 `evaluated_kind = push_pull_factor`, `evaluated_name` the weight's name, one run a night after the trust ledger,
-`baseline_name = no_skill`) scores every reading on live days only, on the headline channel, against the window's
+`baseline_name = no_skill`) scores every reading on the days read live (from `components.PUSH_PULL_LIVE_SINCE`,
+2026-10-26; the days before shaped the history sizes), on the headline channel, against the window's
 **average from publish time + 1 minute** (`average_move_from_publish_points`: the window's average from its second
 minute, the first a reader could act on, since Kaze publishes 30–55 s after the cut and the bar lands ~62 s late).
 A day's score is the mean over its live reads of strength × that grade in swings; the evidence is an e-value, the
 product over days of 1 + 0.25 × clip(score ÷ the spread of the earlier days' scores, ±1), which under no skill never
 grows in expectation. `promotion_e_value` ≥ 140 with ≥ 60 days (≥ 40 for an event reading) is `promoted` (the word in
 `metric_text`; its group leaves the young cap); `reversed_e_value` (the same evidence for the opposite sign) ≥ 10 is
-`demoted`; else `earning`. `live_weight_fit` is the slope of the grade on the strength over those days (ŵ_live, shrunk by the day count,
-not the read count; until promoted, live days may shrink a weight to 0 but never turn it against its history's sign),
-`live_day_type_a_fit` / `live_day_type_c_fit` the Trend's pair, `live_days_count` n. The recipe is frozen by its hash
-(`detail_text` = the reading's `registry_components` parameters hash; a pair's is the hash of both): a changed recipe
-makes a new revision row, and the ledger's clock restarts after the last run written under the old hash. The reads
-look the ledger up by their cut (`store_queries.push_pull_ledger_known`). `--trust` prints both ledgers.
+`demoted`; else `earning`. `live_weight_fit` is the least-squares slope of the grade on the bare strength (with an
+intercept) over those days and `live_weight_noise` its day-clustered standard error (the sandwich over day sums ×
+G ÷ (G − 1), from five days on: overlapping reads share a day, so the day is the unit); `live_day_type_a_fit` /
+`live_day_type_c_fit` and their noise the Trend's pair; `live_days_count` n. The price family (`reading_specs`: gap,
+trend since open, give-back, fresh burst, 15:00 fade, grind at extreme) is fitted together on one design, so each is
+credited only with what the others do not already explain. A reading whose spec names booster inputs is also fitted
+on its own with a strength × input term per input; each term, shrunk by its noise like the weight, over the reading's
+own weight is its `live_booster_beta` (held to ±1), learned only while that weight is at least half signal; the
+Trend learns none, since its weight a + c·tn changes sign with trend-ness. Until promoted, live days may shrink a weight to 0 but never turn
+it against its history's sign.
+
+**Recipes and re-scoring.** A reading's recipe is what it measures and how (`reading_specs.recipe_parameters`): its
+row's measuring words and numbers, the way its history claims it pushes, its force module's code (its syntax tree,
+docstrings left out, so every helper counts) and constants, and the code and constants of the shared steps
+(`read_facts`, the baseline, the shapes, the boosters); not its label, group, status, history size or evidence, nor
+the weights and caps, nor another group's force module. Every read stamps each reading's
+recipe hash beside its strength (`push_pull_recipe_sha256`, factor); `detail_text` on the ledger's rows is the same
+hash (a pair's is the hash of both). A day counts for a reading on its live reads when they carry the reading's
+current hash, else on the day's rebuilt reads when they do (`rescored_days_count` counts those), else not until it
+is re-scored: the nightly rebuilds up to 10 such days a run, oldest first, and `--rescore` does them all by hand
+after the close and rewrites the promotion and call ledgers. Only slot reads count (a hand `--at` rebuild of another
+moment is left out). A reading's same-clock baseline takes, per past read, the value stamped with its current recipe
+first, so a re-scored day is measured against re-scored days before it (days before the live era keep their stored
+values until they age out of the 60 sessions). A change to one reading's own math so re-scores its days on the
+current code instead of throwing them away, and a change elsewhere leaves them standing. The reads look
+the ledger up by their cut (`store_queries.push_pull_ledger_known`). `--trust` prints the three ledgers.
+
+**The call ledger** (`results_evaluations`, `engine/grade/call_ledger.py`; judge `call_ledger@1`, `evaluated_kind =
+push_pull_call`, `evaluated_name = net_call`, one run a night after the promotion ledger) judges the push/pull call
+as a whole on each channel over the last 20 sessions' live reads. Each read's call is graded when its window closes,
+on the same average price the average band is graded on: the side it landed (up beyond the flat zone's edge, down
+below it, flat between), the odds the call gave that side, the odds a net of 0 gives it (Φ(−edge ÷ σ_G) up or down),
+and the average's miss from the net. Pooled: `call_side_right_portion` (of leaning calls whose average landed up or
+down, the share on the side the net leaned; 0.5 is a coin), `call_log_score_gain` (mean ln(odds given) − ln(no-push
+odds); above 0 the readings' odds beat no push) and, per band of the chance of up (slice `odds_band`, 0–10, 10–20,
+20–30, 30–40, 40–60, 60–100), `call_up_share_portion` beside the band's mean chance in `baseline_metric_value`, so
+overconfident odds show as a band whose share sits below its chance. `independent_windows_count` keeps one read per
+window length. It measures; it moves nothing.
 
 **Width dials** (`components.WIDTH_DIALS`, in the ledger's scoring order, `engine/range/width_dials.py`; the phone
 calls them Band Wideners: Fed Decision Day, Data Release In The Window, Last 15 Minutes Of The Day, Price Speeding Up,
@@ -530,8 +572,8 @@ lands in (blank `too_few_sessions` while the history holds no such window); `wid
 windows are settled, for the next session: one row per dial x channel x metric x slice.
 `evaluation_id` is the run (`trust_ledger|<data-through day>|<judge>@<version>`); `evaluation_kind` is
 `trust_weight` (the weight row) or `skill_metric`; `evaluated_kind`, `evaluated_name`, `evaluated_version` name the
-dial (`width_dial`, version 1; the promotion ledger's rows say `push_pull_factor`); `judge_name` and `judge_version`
-the test (`dial_band_test@2`; `promotion_ledger@1`); `signal_lane` and `overlap_group_name` are read off the measure the weight
+dial (`width_dial`, version 1; the promotion ledger's rows say `push_pull_factor`, the call ledger's `push_pull_call`);
+`judge_name` and `judge_version` the test (`dial_band_test@2`; `promotion_ledger@1`; `call_ledger@1`); `signal_lane` and `overlap_group_name` are read off the measure the weight
 moves; `horizon_name` the channel and `graded_price_measure` `end_price`; `slice_key` is `whole`, `dial_on` /
 `dial_off` on the coverage rows, `fake_baseline` on the control row; `metric_name` a `trust_ledger` measure and
 `metric_value` its value (`blank_reason` `too_few_sessions` when there is none); `metric_text` holds the verdict:
@@ -673,20 +715,25 @@ The **nightly** (`read_job.run_nightly`, in this order): refused while the sessi
 unserved slots (on the session's own day only; a hand `--nightly` on a later day never marks a past session); the
 session's bars for today and for every live session never rebuilt (closing bars as live when Kaze was live, the
 whole session as rebuilt); the history fits (a rebuilt fit per stored session without one, the live fit for the
-next trading day); every such session rebuilt (77 `history_rebuilt` reads); every open window of every session
-settled; the trust ledger for the next session (138 rows); the parity check (one `nightly_check` snapshot per
-session with both live and rebuilt reads, up to 20 mismatch lines logged; tape and scan differences tolerated); the
+next trading day); every such session rebuilt (77 `history_rebuilt` reads); up to 10 days read live whose reads lack
+some reading's current recipe rebuilt too, oldest first (re-scoring, section 8); every open window of every session
+settled; the trust ledger for the next session (138 rows), the promotion ledger and the call ledger; the parity
+check (one `nightly_check` snapshot per session with both live and rebuilt reads, up to 20 mismatch lines logged;
+tape and scan differences tolerated; a push/pull reading's values are left out where the live and rebuilt reads
+carry different recipes for it, as on a day re-scored under a changed recipe, and the health line counts them); the
 backup; `PRAGMA optimize`; the health line; `nightly_done.txt`. A box asleep at 17:15 catches up at the next :15 at
 or after 17:00 the same day, else the next day's 17:15 (that day's missed slots are then never marked); a weekend
 or holiday launch logs "not due". The health line counts live reads, missed slots, reads whose grading step failed,
-bars, rebuilds, fits, what was settled, the ledger, parity and the backup file, and ends with `WARNING:` phrases
+bars, rebuilds, the days re-scored, fits, what was settled, the ledgers, parity and the backup file, and ends with `WARNING:` phrases
 when the calendar or the holiday list is about to run out (below). The 5-minute job writes about 211 "market
 closed" lines a day outside the session; that noise is expected.
 
 **Hand runs** (`by_hand_log.txt`): `--at` rebuilds one moment (its slot when the moment is a slot's own cut,
 HH:M5:59) and settles the day's ended windows; `--rebuild-day` rebuilds every slot of a session with the whole
 session's bars, then its outcomes and grades (the earlier rebuilt ones replaced with their reads); `--backfill-bars`
-loads every session's SPX bars Mirai holds, once; `--scoreboard`, `--pass-test` and `--trust` only print.
+loads every session's SPX bars Mirai holds, once; `--rescore`, after the close, rebuilds every day read live whose
+reads lack some reading's current recipe, grades them and rewrites the promotion and call ledgers for the next
+session; `--scoreboard`, `--pass-test` and `--trust` only print.
 
 ### Backup and restore
 

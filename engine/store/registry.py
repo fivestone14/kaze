@@ -90,9 +90,11 @@ GRADE_WORD_MEASURE = {"ends_inside": ("was_inside_band", components.BAND, 1),
                       "never_left": ("stayed_inside_rung", None, 1)}
 GRADE_WORDS = tuple(GRADE_WORD_MEASURE)
 POOLED = "pooled"
+# The sides a push/pull call's average can land on.
+CALL_SIDES = ("up", "flat", "down")
 SUBJECT_KINDS = (
     "adjustment", "band", "consumer", "factor", "feed", "horizon", "impact", "kind", "level_type", "login",
-    "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole", "window_minutes")
+    "odds_band", "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole", "window_minutes")
 
 # Feeds: name, what it is, Mirai's file (the template mirai_files reads), how old its newest input may be, and how
 # often it lands: live (a tick about every second), minute (through the session, judged by its age), once_a_day (the
@@ -160,6 +162,7 @@ NO_END_BAR = f"{BARS_MISSING} when the window's last bar never reached the store
 NO_START = f"{NOT_APPLICABLE} when the read had no price; " + NO_END_BAR
 NO_WINDOW_MOVE = f"{NOT_APPLICABLE} when the read had no price to measure from; " + NO_END_BAR
 NO_GRADE = "the band's own reason when the decision was blind; " + NO_WINDOW_MOVE
+NO_CALL_GRADE = f"{NOT_FORMED_REASON} without a net, {TOO_FEW_SESSIONS} without odds; " + NO_WINDOW_MOVE
 # A measure born on the snapshot (or the fit) and copied onto every decision that used it.
 BOTH_TABLES = "collect_observations|reads_decision_values"
 NO_FIT_KNOWN_MEANING = f"{TOO_FEW_SESSIONS} when no fit was known at the cut"
@@ -483,6 +486,17 @@ MEASURES = [
     measure_row("band_used_ratio", "farthest excursion on this side over the end band's half-width; above 1 means "
                 "price broke out that side", "ratio", "number", "label", "band_grade", subjects="band|side",
                 blank=NO_GRADE, low=0, **OUTCOME_VALUE),
+    # how each decision's push/pull call graded (forecast_grade outcomes): on the window's average price
+    measure_row("push_pull_side_landed_word", "where the window's average price landed against the call's flat zone "
+                "(the rung scaled to the average band): up beyond it, down below it, flat inside", "word", "word",
+                "label", "call_grade", words=CALL_SIDES, blank=NO_CALL_GRADE, **OUTCOME_VALUE),
+    measure_row("push_pull_odds_given_probability", "the chance the call gave the side the average landed on",
+                "probability", "number", "label", "call_grade", low=0, high=1, blank=NO_CALL_GRADE, **OUTCOME_VALUE),
+    measure_row("push_pull_no_push_odds_probability", "the chance a call with no push (net 0) would have given that "
+                "side: the baseline the call's odds are scored against", "probability", "number", "label",
+                "call_grade", low=0, high=1, blank=NO_CALL_GRADE, **OUTCOME_VALUE),
+    measure_row("push_pull_net_miss_points", "the window's average move less the net: how far the average landed from "
+                "where the call put it", "points", "number", "label", "call_grade", blank=NO_CALL_GRADE, **OUTCOME_VALUE),
     # The push/pull pipeline's steps per reading (the factor subject names the reading in reading_specs): the raw
     # value in the reading's own unit, how unusual it is at this clock (z, in spreads) and its strength by shape.
     measure_row("push_pull_raw_value", "a reading's raw value in its own unit (reading_specs names the unit); the "
@@ -497,15 +511,20 @@ MEASURES = [
                 "held to ±3 for the clipped shape, points for catch-up", "portion", "number",
                 group="push_pull_reading", subjects="factor", blank="the z's reason", low=-100, high=100,
                 **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_recipe_sha256", "the reading's recipe hash at this read (reading_specs.recipe_hashes, the "
+                "same as its registry component row's): the promotion ledger counts the read for the reading only "
+                "under its current hash", "sha256", "text", group="push_pull_reading", subjects="factor",
+                lane="push_pull", overlap="direction_all_sources"),
     measure_row("push_pull_context_input", "one context input of the wider view (kind names it: trend_ness and its "
                 "three parts, path_straightness, dealer_gamma, rates_tide, vix_level, time_of_day, down_day)", "mixed",
                 "number", group="push_pull_context", subjects="kind",
                 blank="not_formed_yet before the input's bars; the input's feed reason", lane="push_pull",
                 overlap="direction_all_sources"),
     # The pipeline's values on each channel's decision: how much each reading counts and what the channel says.
-    measure_row("push_pull_weight", "a reading's earned weight: swings of points per unit strength, (h·ŵ_hist + n·ŵ_live)"
-                " ÷ (h + n + 40), 0 for a logged reading", "swings_per_strength", "number", group="push_pull_decision",
-                subjects="factor", low=-10, high=10, **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("push_pull_weight", "a reading's earned weight: swings of points per unit strength, (h·ŵ_hist + "
+                "n·k·ŵ_live) ÷ (h + n·k + 40) with k the live fit's share of signal, 0 for a logged reading",
+                "swings_per_strength", "number", group="push_pull_decision", subjects="factor", low=-10, high=10,
+                **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("push_pull_booster", "the wider view's booster on a reading: clip(exp(Σβu), ×0.5, ×2), or the wall's "
                 "clock booster", "ratio", "number", group="push_pull_decision", subjects="factor", low=0.5, high=2,
                 lane="push_pull", overlap="direction_all_sources", **DECISION_VALUE),
@@ -558,8 +577,9 @@ MEASURES = [
                 "number", "health", "trust_ledger", low=0, high=1,
                 blank=f"{TOO_FEW_SESSIONS} under the minimum live sessions", **EVALUATION_VALUE),
     # the promotion ledger's metrics (results_evaluations): one row each per reading weight, nightly
-    measure_row("live_weight_fit", "the slope of the average grade (swings) on a reading's strength over its live "
-                "days: ŵ_live", "swings_per_strength", "number", "health", "promotion_ledger",
+    measure_row("live_weight_fit", "the slope of the average grade (swings) on a reading's strength over its scored "
+                "days, fitted with its family's other readings when it has one: ŵ_live (the Trend's at tn 0.5)",
+                "swings_per_strength", "number", "health", "promotion_ledger",
                 blank=f"{TOO_FEW_SESSIONS} under two live days with a strength", **EVALUATION_VALUE),
     measure_row("live_day_type_a_fit", "the day-type fit's a in w = a + c·tn over live days (the Trend)",
                 "swings_per_strength", "number", "health", "promotion_ledger",
@@ -567,10 +587,38 @@ MEASURES = [
     measure_row("live_day_type_c_fit", "the day-type fit's c in w = a + c·tn over live days (the Trend)",
                 "swings_per_strength", "number", "health", "promotion_ledger",
                 blank=f"{TOO_FEW_SESSIONS} under two live days with a strength", **EVALUATION_VALUE),
-    measure_row("live_days_count", "live days (events for an event reading) that scored the reading since its recipe "
-                "was frozen", "count", "whole_number", "health", "promotion_ledger", low=0, **EVALUATION_VALUE),
+    measure_row("live_weight_noise", "the live weight fit's day-clustered standard error: the noise earned_weights "
+                "discounts the fit by, 1 − (noise ÷ fit)²", "swings_per_strength", "number", "health",
+                "promotion_ledger", low=0, blank=f"{TOO_FEW_SESSIONS} under five days scored", **EVALUATION_VALUE),
+    measure_row("live_day_type_a_noise", "the day-type fit's a's day-clustered standard error (the Trend)",
+                "swings_per_strength", "number", "health", "promotion_ledger", low=0,
+                blank=f"{TOO_FEW_SESSIONS} under five days scored", **EVALUATION_VALUE),
+    measure_row("live_day_type_c_noise", "the day-type fit's c's day-clustered standard error (the Trend)",
+                "swings_per_strength", "number", "health", "promotion_ledger", low=0,
+                blank=f"{TOO_FEW_SESSIONS} under five days scored", **EVALUATION_VALUE),
+    measure_row("live_booster_beta", "a booster input's learned beta for the reading (the slice names the input): its "
+                "strength × input term shrunk by its noise, over the reading's weight, held to ±1", "per_input",
+                "number", "health", "promotion_ledger", low=-1, high=1,
+                blank=f"{TOO_FEW_SESSIONS} while the weight or the term is all noise", **EVALUATION_VALUE),
+    measure_row("live_days_count", "days read live (events for an event reading) that scored the reading under its "
+                "current recipe, live or re-scored", "count", "whole_number", "health", "promotion_ledger", low=0,
+                **EVALUATION_VALUE),
+    measure_row("rescored_days_count", "of those days, the ones scored on rebuilt reads (re-scored under the current "
+                "recipe) rather than the live reads", "count", "whole_number", "health", "promotion_ledger", low=0,
+                **EVALUATION_VALUE),
+    # the call ledger's metrics (results_evaluations): per channel, nightly, over the last 20 sessions' live reads
+    measure_row("call_side_right_portion", "share of leaning calls (net not 0) whose window average landed on the side "
+                "the net leaned, flat landings left out; 0.5 is a coin", "portion", "number", "health", "call_ledger",
+                low=0, high=1, blank=f"{TOO_FEW_SESSIONS} with no leaning call graded", **EVALUATION_VALUE),
+    measure_row("call_log_score_gain", "mean of ln(the call's odds for the side landed) − ln(a net of 0's odds for "
+                "it): above 0 the push/pull's odds beat no push", "nats", "number", "health", "call_ledger",
+                blank=f"{TOO_FEW_SESSIONS} with no call graded", **EVALUATION_VALUE),
+    measure_row("call_up_share_portion", "in one band of the call's chance of up (the slice names it), the share of "
+                "reads whose average landed up; the baseline value is the band's mean chance of up", "portion",
+                "number", "health", "call_ledger", low=0, high=1, blank=f"{TOO_FEW_SESSIONS} with no read in the band",
+                **EVALUATION_VALUE),
     measure_row("promotion_e_value", "the running evidence the reading has skill: the product over days of 1 + bet × "
-                "clip(day score ÷ spread, ±1); 20 promotes, the word says where it stands", "odds", "number",
+                "clip(day score ÷ spread, ±1); 140 promotes, the word says where it stands", "odds", "number",
                 "health", "promotion_ledger", low=0, blank=f"{TOO_FEW_SESSIONS} with no live day scored",
                 **EVALUATION_VALUE),
     measure_row("reversed_e_value", "the same evidence that the reading points the wrong way; 10 demotes", "odds",
@@ -669,6 +717,9 @@ def component_rows():
     rows.append(component_row("trust_test", components.DIAL_TEST[0], "a dial's band interval score gain on live "
                               "windows, on top of the dials earned before it", components.DIAL_TEST_PARAMETERS,
                               version=components.DIAL_TEST[1]))
+    rows.append(component_row("trust_test", components.CALL_LEDGER[0], "the push/pull call graded as a whole on each "
+                              "channel: side landed, log score against no push, chance of up against the share up",
+                              components.CALL_LEDGER_PARAMETERS, version=components.CALL_LEDGER[1]))
     rows.append(component_row("trust_test", components.PROMOTION_LEDGER[0], "a push/pull reading's daily score on the "
                               "average grade from publish + 1 min, its e-value, promotion and demotion",
                               components.PROMOTION_LEDGER_PARAMETERS, version=components.PROMOTION_LEDGER[1]))

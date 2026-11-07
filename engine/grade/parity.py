@@ -1,6 +1,8 @@
 # The nightly's parity check: every live-truth observation of a session against its rebuilt twin, numbers within the
-# stored precision and the rest exactly; tape and scan differences are tolerated because those files land late. The
-# result is written as one nightly_check snapshot per session and summed up in the nightly's health line.
+# stored precision and the rest exactly; tape and scan differences are tolerated because those files land late. A
+# push/pull reading's values are left out where the two reads carry different recipes for it: a day re-scored under
+# a changed recipe differs there by design, not by look-ahead.
+# The result is written as one nightly_check snapshot per session and summed up in the nightly's health line.
 from datetime import date
 
 from engine import session_clock
@@ -31,16 +33,20 @@ def side_value(pair, side):
 
 
 def compare_session(conn, trade_date):
-    """Compared count, the mismatches that count, and the tolerated ones, over a session's live and rebuilt reads."""
-    mismatches, tolerated, compared = [], [], 0
+    """Compared count, the mismatches that count, the tolerated ones and the push/pull values left out for another
+    recipe, over a session's live and rebuilt reads."""
+    mismatches, tolerated, compared, other_recipe = [], [], 0, 0
     for pair in store_queries.parity_pairs(conn, trade_date):
         if pair["rebuilt_blank"] == "not_known_at_read":
+            continue
+        if pair["live_recipe"] != pair["rebuilt_recipe"]:
+            other_recipe += 1
             continue
         compared += 1
         if pair_matches(pair):
             continue
         (tolerated if pair["source_feed_name"] in TOLERATED_FEEDS else mismatches).append(dict(pair))
-    return compared, mismatches, tolerated
+    return compared, mismatches, tolerated, other_recipe
 
 
 def write_check(conn, day, compared, mismatches, tolerated, half_days, written_at):
@@ -65,10 +71,11 @@ def check_sessions(conn, half_days, written_at, mismatch_lines_kept):
     # Returns the health line's phrase and the mismatch lines worth logging (the first few per session).
     summaries, lines = [], []
     for day in store_queries.days_with_live_and_rebuilt_reads(conn):
-        compared, mismatches, tolerated = compare_session(conn, day)
+        compared, mismatches, tolerated, other_recipe = compare_session(conn, day)
         write_check(conn, day, compared, mismatches, tolerated, half_days, written_at)
         summaries.append(f"{day} {compared - len(mismatches)}/{compared} identical, "
-                         f"{len(tolerated)} tape/scan differences tolerated")
+                         f"{len(tolerated)} tape/scan differences tolerated"
+                         + (f", {other_recipe} push/pull values on another recipe left out" if other_recipe else ""))
         lines.extend(f"mismatch {day} {mismatch['cut_at']} {mismatch['measure_name']} {mismatch['subject_key']}: "
                      f"live {side_value(mismatch, 'live')} rebuilt {side_value(mismatch, 'rebuilt')}"
                      for mismatch in mismatches[:mismatch_lines_kept])

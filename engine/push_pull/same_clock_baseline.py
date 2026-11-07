@@ -20,10 +20,10 @@ USUAL_RULES = (USUAL_ZERO, USUAL_SAME_CLOCK)
 TOO_FEW_SESSIONS = "too_few_sessions"
 
 
-def history(conn, trade_date, cut_at, measure_name, pool_minutes=CLOCK_POOL_MINUTES):
+def history(conn, trade_date, cut_at, measure_name, pool_minutes=CLOCK_POOL_MINUTES, recipes=None):
     """Every stored value of a measure at the same clock (±pool_minutes, the whole session at WHOLE_DAY_MINUTES) over
     the past SESSIONS sessions, by subject: {subject_key: [(sessions_ago, value), ...]}, sessions_ago counting 1 for
-    the newest past session."""
+    the newest past session; given the readings' recipes, a past read's value under the current recipe first."""
     minute = session_clock.minute_of_session(cut_at, session_clock.to_eastern(cut_at).date())
     sessions = store_queries.read_sessions_before(conn, trade_date, SESSIONS)
     if not sessions:
@@ -31,7 +31,7 @@ def history(conn, trade_date, cut_at, measure_name, pool_minutes=CLOCK_POOL_MINU
     ages = {day: len(sessions) - index for index, day in enumerate(sessions)}
     by_subject = {}
     for row in store_queries.values_at_same_clock(conn, measure_name, sessions[0], trade_date, cut_at,
-                                                 pool_minutes + 60):
+                                                 pool_minutes + 60, recipes):
         at = session_clock.parse_iso(row["cut_at"])
         if abs(session_clock.minute_of_session(at, session_clock.to_eastern(at).date()) - minute) > pool_minutes:
             continue

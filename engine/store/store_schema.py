@@ -5,7 +5,7 @@
 from engine.session_clock import iso_utc
 from engine.store import components, registry
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 VALUE_COLUMNS_SQL = "value_number REAL, value_bool INTEGER, value_text TEXT, value_at TEXT,"
 ONE_VALUE_OR_BLANK_SQL = """CHECK ((value_number IS NOT NULL) + (value_bool IS NOT NULL) + (value_text IS NOT NULL)
            + (value_at IS NOT NULL) + (blank_reason IS NOT NULL) = 1)"""
@@ -400,10 +400,15 @@ def schema_step_13(conn):
         print(f"kaze: schema step 13 kept the stamps of {kept} SPY session(s) whose watchlist bar file is gone")
 
 
+def schema_step_14(conn):
+    """The ledger table at the code's text: its judged kinds gain the push/pull call (the call ledger), rows kept."""
+    rebuild_tables(conn, LEDGER_TABLES)
+
+
 # Step 9 repeated step 8 for the second verdict word; both numbers stay so a stored version 8 still upgrades.
 SCHEMA_STEPS = {1: schema_step_1, 2: schema_step_2, 3: schema_step_3, 4: schema_step_4, 5: schema_step_5,
                 6: schema_step_6, 7: schema_step_7, 8: schema_step_8, 9: schema_step_8, 10: schema_step_10,
-                11: schema_step_11, 12: schema_step_12, 13: schema_step_13}
+                11: schema_step_11, 12: schema_step_12, 13: schema_step_13, 14: schema_step_14}
 
 
 def upgrade(conn):

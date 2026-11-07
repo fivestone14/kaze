@@ -498,6 +498,20 @@ def write_outcomes(conn, outcomes, values):
         insert_rows(conn, "results_outcome_values", values)
 
 
+def write_outcome_values(conn, values):
+    """Check and add value rows to outcomes already stored (a grade measure filled in on grades written before the
+    measure existed) in one transaction; never replaces."""
+    for value in values:
+        check_measure_value(value)
+    values = list(values)
+    if not values:
+        return 0
+    with conn:
+        attach_to_parent(conn, values, *store_schema.VALUE_TABLE_PARENTS["results_outcome_values"],
+                         {value["outcome_id"] for value in values})
+        return insert_rows(conn, "results_outcome_values", values)
+
+
 def write_evaluations(conn, rows):
     """Write a ledger run in one transaction, replacing every row of the same run; returns the rows written."""
     # The same run is the same judge and data-through day, so a rerun never leaves a stale row behind.

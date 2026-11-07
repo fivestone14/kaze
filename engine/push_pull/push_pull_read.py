@@ -3,14 +3,15 @@
 # (strength × weight × booster × swing); the group sums under their caps; the net push; the odds of up, flat and down
 # on the average grade; the wind and where the band centres move. Only forces add points, the wider view only sizes
 # them, and how far price travels is the range engine's band, never a reading here. Everything lands on the forecast
-# and every step is stored: raw, z and strength as observations on the read, weight, booster, points, net, odds, wind
-# and centres as values on each channel's decision.
+# and every step is stored: raw, z, strength and the reading's recipe hash as observations on the read, weight,
+# booster, points, net, odds, wind and centres as values on each channel's decision.
 from engine.push_pull import context_boosters as ctx, earned_weights, net_and_odds, reading_specs, strength_shapes
 from engine.push_pull import same_clock_baseline as baseline
 from engine.push_pull.read_facts import ReadFacts, Reading
 from engine.store import components, registry, store, store_queries
 
 RAW_MEASURE, Z_MEASURE, STRENGTH_MEASURE = "push_pull_raw_value", "push_pull_z_score", "push_pull_strength"
+RECIPE_MEASURE = "push_pull_recipe_sha256"
 NO_READINGS_TEXT = "even, no reading counts yet"
 # The reading the phone may move between reads with the live price: the trend since the true open.
 LIVE_READING = "trend_since_open"
@@ -19,8 +20,9 @@ LIVE_READING = "trend_since_open"
 def read_forces(conn, snapshot, observations, forecast, cut_at, half_days):
     """Run every reading for a read and put the push/pull block on the forecast; returns the block."""
     facts = ReadFacts(conn, snapshot, observations, forecast, cut_at, half_days)
-    raw_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE)
-    day_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE, baseline.WHOLE_DAY_MINUTES) \
+    recipes = reading_specs.recipe_hashes()
+    raw_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE, recipes=recipes)
+    day_history = baseline.history(conn, facts.trade_date, cut_at, RAW_MEASURE, baseline.WHOLE_DAY_MINUTES, recipes) \
         if any(spec.whole_day_baseline for spec in reading_specs.SPECS) else {}
     context = ctx.context_of(facts, baseline.history(conn, facts.trade_date, cut_at, ctx.CONTEXT_MEASURE))
     ledger = store_queries.push_pull_ledger_known(conn, facts.trade_date, facts.cut_iso)
@@ -66,7 +68,8 @@ def reading_entry(spec, facts, raw_history, context, ledger_entry):
     sized = measured and (z is not None or spec.shape == strength_shapes.CATCH_UP)
     strength = strength_shapes.strength(spec.shape, z, reading.side, reading.value) if sized else None
     weight = earned_weights.weight_for(spec, context.get(ctx.TREND_NESS), ledger_entry)
-    booster = spec.fixed_booster(facts) if spec.fixed_booster else ctx.booster(spec.boosters, context)
+    booster = spec.fixed_booster(facts) if spec.fixed_booster \
+        else ctx.booster(learned_betas(spec, ledger_entry), context)
     points = {name: net_and_odds.points_of(spec, strength, weight, booster, channel["swing"])
               for name, channel in facts.forecast["channels"].items()}
     entry = {
@@ -82,6 +85,13 @@ def reading_entry(spec, facts, raw_history, context, ledger_entry):
                          "spread": spread, "weight": weight, "booster": booster, "shape": spec.shape,
                          "wiggle": strength_shapes.WIGGLE}
     return entry
+
+
+def learned_betas(spec, ledger_entry):
+    """The betas a reading's booster uses: each input its spec names at the promotion ledger's learned beta, or at the
+    spec's starting beta (0, ×1) until one is learned."""
+    learned = (ledger_entry or {}).get("betas") or {}
+    return {name: learned.get(name, beta) for name, beta in spec.boosters.items()}
 
 
 def side_of(points):
@@ -123,7 +133,8 @@ def call_text(odds, counted):
 # ---- Stored rows -------------------------------------------------------------------------------------------------------
 
 def observation_rows(snapshot, block, stamp):
-    """Each reading's raw value, z and strength, and each context input, as observations on the read's snapshot."""
+    """Each reading's raw value, z, strength and recipe hash, and each context input, as observations on the read's
+    snapshot."""
     rows = []
     add = store.row_adder(store.observation_row, snapshot, rows)
     for entry in block["readings"]:
@@ -131,6 +142,7 @@ def observation_rows(snapshot, block, stamp):
         add(RAW_MEASURE, entry["raw"], subject, entry["raw_blank"], **stamp)
         add(Z_MEASURE, entry["z"], subject, entry["z_blank"], **stamp)
         add(STRENGTH_MEASURE, entry["strength"], subject, entry["z_blank"], **stamp)
+        add(RECIPE_MEASURE, reading_specs.recipe_hashes()[entry["name"]], subject, **stamp)
     for kind, value in block["context"].items():
         add(ctx.CONTEXT_MEASURE, value, registry.subject_key(kind=kind), registry.NOT_FORMED_REASON, **stamp)
     return rows
