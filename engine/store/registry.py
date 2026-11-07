@@ -93,8 +93,9 @@ POOLED = "pooled"
 # The sides a push/pull call's average can land on.
 CALL_SIDES = ("up", "flat", "down")
 SUBJECT_KINDS = (
-    "adjustment", "band", "consumer", "factor", "feed", "horizon", "impact", "kind", "level_type", "login",
-    "odds_band", "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole", "window_minutes")
+    "adjustment", "band", "consumer", "delta_band", "factor", "feed", "horizon", "impact", "kind", "level_type",
+    "login", "odds_band", "rung_points", "side", "since", "strike_points", "symbol", "table_column", "whole",
+    "window_minutes")
 
 # Feeds: name, what it is, Mirai's file (the template mirai_files reads), how old its newest input may be, and how
 # often it lands: live (a tick about every second), minute (through the session, judged by its age), once_a_day (the
@@ -322,6 +323,24 @@ MEASURES = [
                 "outright, bullish less bearish; legs of multi-leg packages left out", "count", "whole_number",
                 group="options_urgent_flow", subjects="kind|window_minutes", feed="options_tape", blank=TAPE_BLANK,
                 low=-10000, high=10000, twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("option_contracts_by_delta_count", "same-day option contracts traded from the open to the cut in one "
+                "delta band on one side: delta at the trade from the volatility of its quote's mid, legs of packages "
+                "included, trades before SPX's first finished minute left out", "contracts", "whole_number",
+                "push_pull", "options_delta_ladder", subjects="delta_band|side", feed="options_tape",
+                blank=TAPE_BLANK, low=0, high=50_000_000, twin=TAPE_TWIN),
+    measure_row("option_net_bought_by_delta_count", "same-day option contracts bought less sold from the open to the "
+                "cut in one delta band on one side: single-leg trades with an ask, at or past the ask bought, at or "
+                "past the bid sold, else the nearer side", "contracts", "whole_number", "push_pull",
+                "options_delta_ladder", subjects="delta_band|side", feed="options_tape", blank=TAPE_BLANK,
+                low=-50_000_000, high=50_000_000, twin=TAPE_TWIN),
+    measure_row("option_sentiment_since_open_count", "option sentiment from the open to the cut: calls bought less "
+                "sold, less puts bought less sold, in contracts (the delta ladder's net bought, calls less puts)",
+                "contracts", "whole_number", group="options_sentiment", feed="options_tape", blank=TAPE_BLANK,
+                low=-50_000_000, high=50_000_000, twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("option_sentiment_last_30_minutes_count", "option sentiment over the 30 minutes to the cut: calls "
+                "bought less sold, less puts bought less sold, in contracts", "contracts", "whole_number",
+                group="options_sentiment", feed="options_tape", blank=TAPE_BLANK, low=-50_000_000, high=50_000_000,
+                twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",
                 "whole_number", "health", "tape_health", subjects="feed", feed="options_tape", blank=TAPE_BLANK, low=0),
     measure_row("feed_coverage_last_30_minutes_portion",

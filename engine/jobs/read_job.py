@@ -149,9 +149,15 @@ def write_read(conn, snapshot, observations, bars, cut_at, job):
 
 
 def grade_closed_windows(conn, snapshot, day, cut_at, written_at, forecast):
-    """After a live read: close the day's ended windows and put the windows block on the forecast."""
+    """After a live read: put the delta ladder on the forecast, close the day's ended windows and put the windows
+    block on the forecast."""
     # A crash is logged, stamped grade_failed on the stored read and carried to the phone.
     known_by = store.bars_known_by(snapshot, cut_at)
+    if forecast is not None:
+        try:
+            forecast[live_feed.LADDER] = live_feed.ladder_block(conn, day, cut_at)
+        except Exception:
+            log(JOB_READ, "delta ladder for the phone FAILED\n" + traceback.format_exc().rstrip())
     try:
         windows, grades = grade.close_windows(conn, day, cut_at, written_at, known_by)
         if forecast is not None:

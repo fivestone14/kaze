@@ -111,7 +111,8 @@ def build_read(conn, cut_at, row_origin, written_at, slot, slot_status, calendar
     note_daily_bars(read, conn, day, cut_at)
     collect_options_scan(read, mirai_files.read_native_scans(day, cut_at, file_limits.get("options_scan")),
                          is_open_interest_read(cut_at, day, half_days))
-    collect_options_tape(read, day, cut_at, bars, file_limits.get("options_tape"))
+    collect_options_tape(read, day, cut_at, bars, file_limits.get("options_tape"),
+                         session_clock.session_close(day, half_days))
     collect_overnight(read, mirai_files.read_overnight_futures(day))
     collect_events(read, conn, calendar, day, cut_at, row_origin, written_at)
     collect_headlines(read, mirai_files.read_headlines(day, cut_at, HEADLINE_WINDOW_MINUTES))
@@ -442,8 +443,33 @@ def collect_options_scan(read, scans, keep_open_interest):
                          store.rounded(mirai_files.scan_straddle_points(ruler, "em_open")), blank=blank)
 
 
-def collect_options_tape(read, day, cut_at, bars, max_bytes):
-    """Trade count, call and put premium, bullish share and gap markers over 30 minutes, plus the ATM quotes."""
+def collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars):
+    """The day's same-day trades by delta band and side (contracts traded, contracts bought less sold) and the option
+    sentiment, calls bought less sold less the same for puts, since the open and over the last 30 minutes. A trade
+    is priced off SPX's bars, so the ladder is blank with the bars' reason when they are missing or stale (a lagging
+    bar would leave the newest trades unpriced and the counts short), never a silent 0."""
+    blank = None
+    if counted and not (bars and read.feed_ok("spx_bars")):
+        blank = "feed_stale" if read.feed_states.get("spx_bars", {}).get("status") in ("stale", "late") \
+            else "feed_missing"
+    spot_at_minute_ms = {moment.timestamp() * 1000.0: close for moment, close in minute_closes.items()}
+    ladder = mirai_files.tape_delta_ladder(day, cut_at, spot_at_minute_ms, close_at, max_bytes) \
+        if counted and blank is None else None
+    for _, _, band in mirai_files.DELTA_BANDS:
+        for side in mirai_files.OPTION_SIDES:
+            read.add_observation("option_contracts_by_delta_count", ladder["contracts"][band, side] if ladder else None,
+                                 blank=blank, delta_band=band, side=side)
+            read.add_observation("option_net_bought_by_delta_count",
+                                 ladder["net_bought"][band, side] if ladder else None, blank=blank, delta_band=band,
+                                 side=side)
+    read.add_observation("option_sentiment_since_open_count", ladder["sentiment"] if ladder else None, blank=blank)
+    read.add_observation("option_sentiment_last_30_minutes_count", ladder["sentiment_last_30"] if ladder else None,
+                         blank=blank)
+
+
+def collect_options_tape(read, day, cut_at, bars, max_bytes, close_at):
+    """Trade count, call and put premium, bullish share and gap markers over 30 minutes, the delta ladder and the
+    option sentiment since the open, plus the ATM quotes."""
     window = mirai_files.tape_window_totals(day, cut_at, TAPE_WINDOW_MINUTES, max_bytes)
     read.note_feed("options_tape", window["newest_trade_at"], present=window["present"])
     counted = read.feed_ok("options_tape")
@@ -467,6 +493,7 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes):
     for kind in mirai_files.URGENT_KINDS:
         read.add_observation("urgent_orders_count", urgent.get(kind) if counted else None, kind=kind,
                              window_minutes=TAPE_WINDOW_MINUTES)
+    collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
     coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_FOR_EMPTY_WINDOW) if counted else None

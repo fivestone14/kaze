@@ -59,6 +59,17 @@
         <span id="lean-more-words">—</span><b>See all ›</b></button>
       <p class="block-note" id="lean-note" hidden></p>
     </div>
+    <div class="card ladder-card" id="ladder-card" hidden>
+      <div class="row-between small-bold"><span>Where Options Trade</span><span id="ladder-time">—</span></div>
+      <div class="ladder-stats" id="ladder-stats"></div>
+      <div class="ladder-head"><span>Puts</span><span>Delta</span><span>Calls</span></div>
+      <div id="ladder-rows"></div>
+      <input type="range" class="ladder-slider" id="ladder-slider" min="0" max="0" value="0" step="1"
+             aria-label="Time of day for the option ladder">
+      <p class="faint-small">Contracts traded since the open, by delta when traded. Tick: the mark before.
+        Net: bought less sold.</p>
+      <p class="block-note" id="ladder-note" hidden></p>
+    </div>
     <div class="card strip-card">
       <div class="row-between small-bold"><span>Average Since The Read</span><span id="strip-verdict">—</span></div>
       <svg class="strip" id="strip" viewBox="0 0 312 64" role="img"

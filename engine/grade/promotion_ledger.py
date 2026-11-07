@@ -22,7 +22,7 @@ import math
 import numpy as np
 
 from engine import session_clock
-from engine.push_pull import context_boosters as ctx, reading_specs, same_clock_baseline as baseline
+from engine.push_pull import context_boosters as ctx, reading_specs, same_clock_baseline as baseline, strength_shapes
 from engine.push_pull.earned_weights import signal_share
 from engine.store import components, registry, store, store_queries
 
@@ -176,8 +176,11 @@ def clustered_fit(columns, grades, days):
 
 def weight_columns(read, weight_name, specs):
     """A weight's columns at one read: its summed bare strength (0 when the reading did not speak), and for the Trend
-    that times trend-ness too; None when the read has no trend-ness for the Trend."""
-    strength = sum(sized(read, spec, False) or 0.0 for spec in specs)
+    that times trend-ness too; None when the read has no trend-ness for the Trend. A catch-up reading's points are
+    its strength (in points) × weight with no swing, so its strength is put in swings here, like the grade, and its
+    slope comes out in points per point, the weight its points use."""
+    strength = sum((sized(read, spec, False) or 0.0)
+                   / (read["swing"] if spec.shape == strength_shapes.CATCH_UP else 1.0) for spec in specs)
     columns = {weight_name: strength}
     if specs[0].weight_rule == reading_specs.DAY_TYPE:
         if read["trend_ness"] is None:
@@ -289,7 +292,12 @@ def ledger_rows(conn, through_day, in_force_day, written_at):
             family_size=len(groups), **extra))
         own = own_fit({day: chosen[day] for day in days}, weight_name, specs) if len(days) >= MINIMUM_DAYS_FOR_FIT \
             else None
-        fits, noise = joint.get(weight_name) or own or ({}, {})
+        joint_fit = joint.get(weight_name)
+        # A family fit with no coefficient for this weight (too few reads, or a column that never moved) falls back
+        # to the weight's own fit instead of leaving it blank.
+        if joint_fit is not None and joint_fit[0].get(weight_name) is None:
+            joint_fit = None
+        fits, noise = joint_fit or own or ({}, {})
         if specs[0].weight_rule == reading_specs.DAY_TYPE:
             a, c = fits.get(weight_name), fits.get(weight_name + "|tn")
             add("live_weight_fit", a + c * 0.5 if a is not None and c is not None else None)

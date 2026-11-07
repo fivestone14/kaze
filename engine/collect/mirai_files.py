@@ -28,6 +28,18 @@ URGENT_BURST_STRIKES = 3
 BIG_PRINT_CONTRACTS = 50
 NEAR_MONEY_SHARE = 0.005
 URGENT_KINDS = ("total", "near", "far")
+# The delta ladder: each trade's delta at the moment it traded (Black–Scholes, no rates, the session's close as expiry,
+# SPX's last finished minute as spot, the option's own volatility backed out of its quote's mid by halving), sorted by
+# the delta's size into bands from far out of the money (under 0.10) to in the money (0.60 and over). Bands under 0.25
+# are far out of the money.
+DELTA_BANDS = ((0.0, 0.10, "0_10"), (0.10, 0.25, "10_25"), (0.25, 0.40, "25_40"), (0.40, 0.60, "40_60"),
+               (0.60, 1.01, "60_100"))
+FAR_OUT_BANDS = ("0_10", "10_25")
+OPTION_SIDES = ("call", "put")
+VOLATILITY_LOW, VOLATILITY_HIGH, VOLATILITY_HALVINGS = 0.01, 5.0, 40
+YEAR_MINUTES = 365.0 * 24.0 * 60.0
+MINUTE_MS = 60_000
+SENTIMENT_WINDOW_MINUTES = 30
 # Same-day open interest is kept for strikes within this share of spot; the scan's rows are [strike, calls, puts].
 OPEN_INTEREST_SPOT_SHARE = 0.03
 ES_SYMBOL = "/ES"
@@ -347,6 +359,96 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
             if kind:
                 counts[kind] += bull
     return counts
+
+
+def normal_cdf(x):
+    """The standard normal curve's area below each x (Abramowitz and Stegun 7.1.26, error under 2e-7)."""
+    z = np.abs(x) / np.sqrt(2.0)
+    t = 1.0 / (1.0 + 0.3275911 * z)
+    poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    erf = 1.0 - poly * np.exp(-z * z)
+    return 0.5 * (1.0 + np.sign(x) * erf)
+
+
+def option_value(spot, strike, volatility, years, is_call):
+    """Black–Scholes value with no rates, for arrays."""
+    root = volatility * np.sqrt(years)
+    d1 = (np.log(spot / strike) + 0.5 * root * root) / root
+    d2 = d1 - root
+    calls = spot * normal_cdf(d1) - strike * normal_cdf(d2)
+    return np.where(is_call, calls, calls - spot + strike)
+
+
+def trade_deltas(spot, strike, years, is_call, quote):
+    """Each trade's delta from the volatility that prices its quote, found by halving between 1% and 500%; a quote
+    under the option's floor takes the low end and one over its ceiling the high end."""
+    low, high = np.full(spot.shape, VOLATILITY_LOW), np.full(spot.shape, VOLATILITY_HIGH)
+    for _ in range(VOLATILITY_HALVINGS):
+        middle = (low + high) / 2.0
+        rich = option_value(spot, strike, middle, years, is_call) > quote
+        high, low = np.where(rich, middle, high), np.where(rich, low, middle)
+    volatility = (low + high) / 2.0
+    root = volatility * np.sqrt(years)
+    d1 = (np.log(spot / strike) + 0.5 * root * root) / root
+    return np.where(is_call, normal_cdf(d1), normal_cdf(d1) - 1.0)
+
+
+def tape_deltas(day, spot_at_minute_ms, close_at):
+    """The day's trades' deltas, priced once and kept on the cached tape (NaN until the trade's spot is known): a
+    trade's spot is SPX's close in the minute before its own, read from {minute start in ms: close}."""
+    tape = read_tape_day(day)
+    if "delta" not in tape:
+        tape["delta"] = np.full(tape["ts_ms"].shape, np.nan)
+    close_ms = close_at.timestamp() * 1000.0
+    minute_before = (tape["ts_ms"] // MINUTE_MS - 1) * MINUTE_MS
+    keys = np.array(sorted(spot_at_minute_ms), dtype=float)
+    if not keys.size:
+        return tape["delta"]
+    found = np.minimum(np.searchsorted(keys, minute_before), keys.size - 1)
+    known = keys[found] == minute_before
+    waiting = np.isnan(tape["delta"]) & known & (tape["strike"] > 0) & (tape["ts_ms"] < close_ms)
+    if waiting.any():
+        closes = np.array([spot_at_minute_ms[key] for key in keys], dtype=float)
+        spot = closes[found[waiting]]
+        bid, ask, price = tape["bid"][waiting], tape["ask"][waiting], tape["price"][waiting]
+        quote = np.where((bid > 0) & (ask >= bid), (bid + ask) / 2.0, price)
+        years = (close_ms - tape["ts_ms"][waiting]) / MINUTE_MS / YEAR_MINUTES
+        tape["delta"][waiting] = trade_deltas(spot, tape["strike"][waiting], years, tape["is_call"][waiting] > 0,
+                                              np.maximum(quote, 0.0))
+    return tape["delta"]
+
+
+def tape_delta_ladder(day, cut, spot_at_minute_ms, close_at, max_bytes=None):
+    """The day's same-day trades from the open to the cut by delta band and side: contracts traded (every trade, legs
+    of packages too) and contracts bought less sold (single-leg trades with an ask, a zero bid allowed: at or past the
+    ask bought, at or past the bid sold, else the nearer side), plus the sentiment, calls bought less sold less the
+    same for puts, since the open and over the last 30 minutes. Trades before SPX's first finished minute have no
+    delta and are left out. Returns {contracts: {(band, side): n}, net_bought: {...}, sentiment, sentiment_last_30,
+    trades}."""
+    tape = read_tape_day(day)
+    delta = tape_deltas(day, spot_at_minute_ms, close_at)
+    end_ms = cut.timestamp() * 1000.0
+    open_ms = session_open(day).timestamp() * 1000.0
+    on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
+    inside = on_disk & (tape["ts_ms"] >= open_ms) & (tape["ts_ms"] <= end_ms) & ~np.isnan(delta)
+    price, bid, ask, size = tape["price"], tape["bid"], tape["ask"], tape["size"]
+    quoted = (ask > 0) & (ask >= bid) & ~np.isin(tape["condition"], list(MULTI_LEG_CONDITIONS))
+    side = np.where(quoted, np.where(price >= ask, 1.0, np.where(price <= bid, -1.0, np.sign(price - (bid + ask) / 2))),
+                    0.0)
+    is_call = tape["is_call"] > 0
+    size_of_delta = np.abs(np.nan_to_num(delta))
+    ladder = {"contracts": {}, "net_bought": {}, "trades": int(inside.sum())}
+    for low, high, band in DELTA_BANDS:
+        in_band = inside & (size_of_delta >= low) & (size_of_delta < high)
+        for name, on_side in (("call", is_call), ("put", ~is_call)):
+            cell = in_band & on_side
+            ladder["contracts"][band, name] = int(size[cell].sum())
+            ladder["net_bought"][band, name] = int((size[cell] * side[cell]).sum())
+    recent = inside & (tape["ts_ms"] > end_ms - SENTIMENT_WINDOW_MINUTES * MINUTE_MS)
+    signed = size * side * np.where(is_call, 1.0, -1.0)
+    ladder["sentiment"] = int(signed[inside].sum())
+    ladder["sentiment_last_30"] = int(signed[recent].sum())
+    return ladder
 
 
 def atm_option_mids(day, cut, strike, max_bytes=None):

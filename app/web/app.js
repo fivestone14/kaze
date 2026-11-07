@@ -510,6 +510,7 @@ function render() {
   const focused = active && active.dataset ? active.dataset.factor : null;
   guarded(renderPushPull, "push-pull-note");
   keepFocus(focused);
+  guarded(renderLadder, "ladder-note");
   guarded(renderFeeds, "feeds-note");
   guarded(renderSteps, "steps-note");
   guarded(renderAnswer, "steps-note");
@@ -1311,6 +1312,15 @@ const READING_WORDS = {
                    carry: "may keep going", fade: "these tend to be given back" },
   burst_tilt: { name: "Option order tilt",
                 saw: (r) => `Near-money orders ${r > 0 ? "lead" : "trail"} by ${fmt(Math.abs(r))}` },
+  option_sentiment: { name: "Option bets today",
+                      saw: (r) => `${fmt(Math.abs(r))} contracts net ${r > 0 ? "bullish" : "bearish"} since the open`,
+                      carry: "the bets may be right", fade: "the crowd tends to be wrong" },
+  sentiment_shift: { name: "Latest option bets",
+                     saw: (r) => `${fmt(Math.abs(r))} contracts ${r > 0 ? "bullish" : "bearish"} in 30 min`,
+                     carry: "may keep going", fade: "may be given back" },
+  strike_reach: { name: "How far bets reach",
+                  saw: (r) => `Far-out ${r > 0 ? "calls" : "puts"} lead by ${fmt(Math.abs(r) * 100)}%`,
+                  carry: "the reach may pay", fade: "far bets tend to lose" },
   claude_beyond_base: { name: "Claude's view",
                         saw: (r) => `Leans ${r > 0 ? "up" : "down"}, ${fmt(Math.abs(r) * 100)}% past its usual` },
 };
@@ -1761,6 +1771,59 @@ function feedRow(name, feed) {
   return { status: feed.status === "live" && quiet ? "quiet" : feed.status, words: words.join(" · ") || "Live" };
 }
 
+// The delta ladder's bands in plain words, far out of the money to in the money, as the feed orders them.
+const LADDER_BANDS = { "0_10": ["0–10", "far out"], "10_25": ["10–25", "out of the money"],
+                       "25_40": ["25–40", "near the money"], "40_60": ["40–60", "at the money"],
+                       "60_100": ["60–100", "in the money"] };
+
+/** The Where Options Trade card: the day's same-day option contracts by delta band at a half-hour mark (the slider,
+ *  held at the newest mark until moved), puts left and calls right, the mark before as a tick inside each bar (the
+ *  newest read's mark before is the start of its half hour); above it
+ *  the totals, the put/call ratio, the sentiment with its change since the mark before and the far-out shares. */
+function renderLadder() {
+  note("ladder-note", "");
+  const block = range() ? range().option_ladder : null;
+  const marks = block && block.marks ? block.marks : [];
+  el("ladder-card").hidden = !marks.length;
+  if (!marks.length) return;
+  const slider = el("ladder-slider");
+  const atNewest = Number(slider.value) >= Number(slider.max);
+  slider.max = String(marks.length - 1);
+  if (atNewest || Number(slider.value) > marks.length - 1) slider.value = slider.max;
+  const index = Number(slider.value), mark = marks[index], before = index > 0 ? marks[index - 1] : null;
+  const total = (cells) => cells.reduce((sum, cell) => sum + (cell || 0), 0);
+  const calls = total(mark.contracts.call), puts = total(mark.contracts.put);
+  const farShare = (cells) => {
+    const all = total(cells);
+    return all ? total(block.bands.map((band, at) => (block.far_out.includes(band) ? cells[at] : 0))) / all : null;
+  };
+  const shift = !before ? mark.sentiment : mark.sentiment !== null && before.sentiment !== null
+    ? mark.sentiment - before.sentiment : null;
+  const sentimentClass = mark.sentiment > 0 ? "up" : mark.sentiment < 0 ? "down" : "";
+  el("ladder-time").textContent = `${clock(mark.at)}${index === marks.length - 1 ? " · Newest" : ""}`;
+  const stat = (label, value, extra = "") => `<div><small>${label}</small><b${extra}>${value}</b></div>`;
+  const share = (value) => (value === null ? "—" : `${fmt(value * 100)}%`);
+  el("ladder-stats").innerHTML = stat("Calls", fmt(calls)) + stat("Puts", fmt(puts))
+    + stat("Put/Call", calls ? fmt(puts / calls, 2) : "—")
+    + stat("Net Bullish", mark.sentiment === null ? "—" : fmt(mark.sentiment, 0, true), ` class="${sentimentClass}"`)
+    + stat(before ? `Since ${clock(before.at)}` : "Since The Open",
+           shift === null ? "—" : fmt(shift, 0, true), ` class="${shift > 0 ? "up" : shift < 0 ? "down" : ""}"`)
+    + stat("Far Out C · P", `${share(farShare(mark.contracts.call))} · ${share(farShare(mark.contracts.put))}`);
+  const top = Math.max(1, ...marks.flatMap((entry) => [...entry.contracts.call, ...entry.contracts.put]
+    .map((cell) => cell || 0)));
+  const width = (cell) => `${(((cell || 0) / top) * 100).toFixed(1)}%`;
+  const bar = (side, at) => `<div class="ladder-bar ${side}">`
+    + `<i class="now" style="width:${width(mark.contracts[side][at])}"></i>`
+    + (before ? `<i class="before" style="width:${width(before.contracts[side][at])}"></i>` : "") + "</div>"
+    + `<div class="ladder-num ${side}">${fmt(mark.contracts[side][at] || 0)} · net `
+    + `${fmt(mark.net_bought[side][at] || 0, 0, true)}</div>`;
+  el("ladder-rows").innerHTML = block.bands.map((band, at) => ({ band, at })).reverse().map(({ band, at }) => {
+    const words = LADDER_BANDS[band] || [band, ""];
+    return `<div class="ladder-row"><div>${bar("put", at)}</div>`
+         + `<div class="ladder-band">${words[0]}<small>${words[1]}</small></div><div>${bar("call", at)}</div></div>`;
+  }).join("");
+}
+
 function renderFeeds() {
   const feeds = state.feed && state.feed.feeds ? state.feed.feeds : {};
   const names = Object.keys(feeds);
@@ -1969,6 +2032,7 @@ document.addEventListener("click", (event) => {
     keepFocus(factorRow.dataset.factor);
   }
 });
+el("ladder-slider").addEventListener("input", () => guarded(renderLadder, "ladder-note"));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     closePriceStream();

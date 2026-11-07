@@ -35,7 +35,9 @@ HISTORY_DAYS_FOR_THIRD = 20
 FIXED, DAY_TYPE = "fixed", "day_type"
 # Fit families: readings built from the same input, whose live weights the promotion ledger fits together so each
 # earns only what the others do not already explain. The price family: SPX's own path and the grind that tracks it.
+# The options family: the readings built from the same-day option tape.
 PRICE_FAMILY = "price"
+OPTIONS_FAMILY = "options"
 
 
 class Speaks:
@@ -125,8 +127,9 @@ SPECS = (
          family=PRICE_FAMILY,
          evidence="fade size 0.16 (p 0.33): a 14:30→15:00 burst tends to fade (reversing: the weight is the fade's size)"),
     Spec("gap_across_average", "Gap Across Average", "A", own_path.gap_across_average, "averages",
-         shapes.STEADY, Speaks(from_minute=5, until_minutes_before_close=360), 0.0, LOGGED, spread_floor=1.0,
-         counts="events", evidence="22 events, 77% faded; rare (one day in nine) → logged, never in the net"),
+         shapes.STEADY, Speaks(from_minute=5, until_minutes_before_close=360), +0.07, EARNING, spread_floor=1.0,
+         counts="events", evidence="22 events, 77% faded; rare (one day in nine); slope +0.07 (t 0.2) on the 8 event "
+                                   "days of 2026-07-06→10-23; logged until 2026-11-06, earning since 2026-11-09"),
     # ---- H · heavyweights ---------------------------------------------------------------------------------------------
     Spec("leader_surge_fade", "Leader Surge", "H", heavyweights.leader_surge_fade, "pct_points",
          shapes.REVERSING, Speaks(from_minute=60, until_minutes_before_close=20), +0.10, EARNING,
@@ -152,18 +155,33 @@ SPECS = (
          evidence="IC +0.060 (Holm 0.27); fragile to a one-strike tolerance; clock booster √(195 ÷ min left)"),
     # ---- C · catch-up --------------------------------------------------------------------------------------------------
     Spec("spy_basis", "SPY Basis", "C", catch_up.spy_basis, "points", shapes.CATCH_UP,
-         Speaks(from_minute=10, until_minutes_before_close=15), 0.0, LOGGED, spread_floor=0.1,
-         evidence="IC +0.074 at the bar → 0.027 at publish + 1–2 min, measured on SPY bars Mirai writes only "
-                  "after the close (no live read saw them); since 2026-11-03 read from the minute quotes, untested"),
+         Speaks(from_minute=10, until_minutes_before_close=15), +0.215, EARNING, spread_floor=0.1,
+         evidence="IC +0.074 at the bar → 0.027 at publish + 1–2 min on SPY bars; rebuilt reads 2026-07-06→10-23: "
+                  "+0.215 points per point (t 0.9, 39 days); logged until 2026-11-06, earning since 2026-11-09"),
     # ---- D · option bets -----------------------------------------------------------------------------------------------
     Spec("urgent_orders", "Urgent Orders", "D", option_bets.urgent_orders, "orders", shapes.STEADY,
-         Speaks(from_minute=30, until_minutes_before_close=0), -0.25, LOGGED, spread_floor=8.0,
-         boosters={ctx.DOWN_DAY: 0.0},
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.25, EARNING, spread_floor=8.0,
+         boosters={ctx.DOWN_DAY: 0.0}, family=OPTIONS_FAMILY,
          evidence="w −0.25 (urgent buying is given back) at p 0.002 counting overlapping reads as separate, ~0.2 with "
-                  "the day as the unit; live it reversed (+0.20); logged since 2026-11-04"),
+                  "the day as the unit; live it reversed (+0.20); logged 2026-11-04, earning since 2026-11-09"),
     Spec("burst_tilt", "Burst Tilt", "D", option_bets.burst_tilt, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.28, EARNING, spread_floor=15.0,
-         evidence="w +0.28 in history; near- vs far-money urgency"),
+         family=OPTIONS_FAMILY, evidence="w +0.28 in history; near- vs far-money urgency"),
+    Spec("option_sentiment", "Option Sentiment", "D", option_bets.option_sentiment, "contracts", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.090, EARNING, usual=baseline.USUAL_SAME_CLOCK,
+         spread_floor=2000.0, family=OPTIONS_FAMILY,
+         evidence="w −0.090 (t −0.6) alone, ~0 in the options joint fit, 20 days 2026-09-23→10-23: weak, faintly "
+                  "contrarian"),
+    Spec("sentiment_shift", "Sentiment Shift", "D", option_bets.sentiment_shift, "contracts", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.091, EARNING, spread_floor=1000.0,
+         family=OPTIONS_FAMILY,
+         evidence="w −0.091 (t −1.8) alone, −0.066 (t −1.4) in the options joint fit, 20 days 2026-09-23→10-23: "
+                  "the newest half hour's bets tend to be given back"),
+    Spec("strike_reach", "Strike Reach", "D", option_bets.strike_reach, "share", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=0), +0.095, EARNING, usual=baseline.USUAL_SAME_CLOCK,
+         spread_floor=0.02, family=OPTIONS_FAMILY,
+         evidence="w +0.095 (t 1.2) alone and in the options joint fit, 20 days 2026-09-23→10-23: calls reaching "
+                  "further out than puts lean up"),
     # ---- F · outside view ----------------------------------------------------------------------------------------------
     Spec("claude_beyond_base", "Claude Beyond Base", "F", outside_view.claude_beyond_base, "share",
          shapes.STEADY, Speaks(from_minute=30, until_minutes_before_close=0), +0.06, EARNING, spread_floor=0.05,

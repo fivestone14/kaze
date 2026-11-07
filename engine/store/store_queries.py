@@ -125,6 +125,23 @@ def newest_live_read(conn, trade_date, cut_at_iso, read_lane=None):
         (trade_date, cut_at_iso, read_lane, read_lane)).fetchone()
 
 
+LADDER_MEASURES = ("option_contracts_by_delta_count", "option_net_bought_by_delta_count",
+                   "option_sentiment_since_open_count", "option_sentiment_last_30_minutes_count", "spx_price_points")
+
+
+def option_ladder_series(conn, trade_date, cut_at_iso):
+    """The session's first-built live reads through a cut, oldest first, each with its delta ladder, option
+    sentiments and SPX price: [(cut_at, {(measure, subject_key): value})]; blank values are left out."""
+    reads = {}
+    for row in conn.execute(
+            f"SELECT s.cut_at, o.measure_name, o.subject_key, o.value_number FROM ({FIRST_BUILT_LIVE_READS_SQL}) s "
+            "JOIN collect_observations o ON o.snapshot_rowid = s.snapshot_rowid "
+            f"WHERE s.trade_date = ? AND s.cut_at <= ? AND o.measure_name IN ({', '.join('?' * len(LADDER_MEASURES))}) "
+            "AND o.value_number IS NOT NULL ORDER BY s.cut_at", (trade_date, cut_at_iso, *LADDER_MEASURES)):
+        reads.setdefault(row["cut_at"], {})[row["measure_name"], row["subject_key"]] = row["value_number"]
+    return list(reads.items())
+
+
 def snapshots_with_reason(conn, trade_date, reason):
     """How many of a session's snapshots carry a word in their status reason (a failed step after the write)."""
     return conn.execute("SELECT COUNT(*) FROM collect_snapshots WHERE trade_date = ? "

@@ -22,6 +22,8 @@ CALENDAR_FEED = "event_calendar"
 LOGIN_FIELD_SHORT_NAMES = {"login_state": "state", "login_hours_until_expiry": "hours_left",
                            "login_expires_at": "expires_at"}
 WINDOWS, CURRENT, RUNNING, FINISHED, SCORE = "windows", "current", "running", "finished", "score"
+# The delta ladder through the day: the first live read of each half hour of the session, and the newest read.
+LADDER, LADDER_MARK_MINUTES = "option_ladder", 30
 FAILED = "failed"
 # The forecast keys the phone reads, at the top of the range block, per channel, per push/pull reading and per call.
 RANGE_KEYS = ("price", "read_at", "minutes_left", "speed", "speed_fast", "speed_slow", "straddle", "releases",
@@ -169,8 +171,9 @@ def range_block(forecast):
         picked = {key: channel[key] for key in CHANNEL_KEYS}
         picked["direction"] = {key: channel["direction"][key] for key in DIRECTION_KEYS}
         block["channels"][name] = picked
-    if WINDOWS in forecast:
-        block[WINDOWS] = forecast[WINDOWS]
+    for key in (WINDOWS, LADDER):
+        if key in forecast:
+            block[key] = forecast[key]
     return for_phone(block)
 
 
@@ -217,6 +220,32 @@ def windows_block(conn, day, cut_at, known_by_iso):
         finished[name] = finished_windows(conn, trade_date, name, lane)
     return {CURRENT: current, RUNNING: running, FINISHED: finished,
             SCORE: {name: score_counts(entries) for name, entries in finished.items()}}
+
+
+def ladder_block(conn, day, cut_at):
+    """The delta ladder block of the phone's range feed: the bands from far out of the money to in the money and, at
+    the first live read of each half hour and the newest read (reads whose tape was blank left out), the contracts
+    traded and bought less sold per band on each side since the open (lists in band order), the option sentiment
+    since the open and over 30 minutes, and SPX."""
+    bands = [band for _, _, band in mirai_files.DELTA_BANDS]
+    marks, seen = [], set()
+    series = store_queries.option_ladder_series(conn, day.isoformat(), session_clock.iso_utc(cut_at))
+    for index, (cut_iso, values) in enumerate(series):
+        moment = session_clock.parse_iso(cut_iso)
+        half_hour = session_clock.minute_of_session(moment, day) // LADDER_MARK_MINUTES
+        if (half_hour in seen and index != len(series) - 1) or ("option_contracts_by_delta_count", registry.subject_key(
+                delta_band=bands[0], side=mirai_files.OPTION_SIDES[0])) not in values:
+            continue
+        seen.add(half_hour)
+        cells = lambda measure, side: [values.get((measure, registry.subject_key(delta_band=band, side=side)))
+                                       for band in bands]
+        marks.append({
+            "at": session_clock.iso_eastern(moment), "spx": values.get(("spx_price_points", "whole")),
+            "contracts": {side: cells("option_contracts_by_delta_count", side) for side in mirai_files.OPTION_SIDES},
+            "net_bought": {side: cells("option_net_bought_by_delta_count", side) for side in mirai_files.OPTION_SIDES},
+            "sentiment": values.get(("option_sentiment_since_open_count", "whole")),
+            "sentiment_last_30": values.get(("option_sentiment_last_30_minutes_count", "whole"))})
+    return {"bands": bands, "far_out": list(mirai_files.FAR_OUT_BANDS), "marks": marks}
 
 
 def lane_for_channel(minutes):

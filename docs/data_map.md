@@ -210,6 +210,14 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   signed bursts of three strikes one way inside two seconds plus prints of 50 contracts or more, bought calls and sold
   puts counting up, legs of multi-leg packages left out, a big print only when it took the bid or ask outright, near =
   the strike within 0.5% of SPX)
+- options tape (the delta ladder, from the open to the cut): `option_contracts_by_delta_count` and
+  `option_net_bought_by_delta_count` (delta_band = 0_10, 10_25, 25_40, 40_60, 60_100; side = call, put: contracts
+  traded, legs of packages included, and contracts bought less sold, single-leg trades with an ask, at or past the ask
+  bought, at or past the bid sold, else the nearer side), `option_sentiment_since_open_count` and
+  `option_sentiment_last_30_minutes_count` (calls bought less sold less the same for puts). A trade's delta is taken
+  when it traded: Black–Scholes with no rates, the session's close as expiry, SPX's close in the minute before the
+  trade as spot and the volatility that prices the quote's mid (halving between 1% and 500%); trades before SPX's
+  first finished minute are left out. Each process prices a day's trades once and keeps them on the cached tape.
 - headlines (60-minute window): `headlines_last_60_minutes_count` (kind = all)
 - Mirai's Claude forecast: `mirai_claude_forecast_pct` and `mirai_claude_base_rate_pct` (horizon = 30_minutes,
   to_close; side = up, flat, down), `mirai_claude_read_at`; carried at most 40 minutes
@@ -428,22 +436,26 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | A | `give_back` | the trend's z, clipped ±3 | clipped | 15:45–close, full days | earning, −0.111 |
 | A | `fresh_burst` | last 15 min − 15 min of the day's pace, points | steady | 10:00–close | earning, −0.008 |
 | A | `fade_15_00` | SPX 15:00 − 14:30, points | reversing | 15:00–15:45 | earning, +0.16 (the fade's size) |
-| A | `gap_across_average` | averages (50/100/200-day) the gap crossed, signed against the gap | steady | 09:35–10:00 | logged |
+| A | `gap_across_average` | averages (50/100/200-day) the gap crossed, signed against the gap | steady | 09:35–10:00 | earning, +0.07 |
 | H heavyweights | `leader_surge_fade` | SMH 60-min % − QQQ 60-min %; 0 within 0.25 swing of the high/low | reversing | 10:30–15:40 | earning, +0.10 |
 | H | `grind_at_extreme` | −side × breadth's 60-min change, issues; 0 away from an extreme or after a fast approach | one-sided | 10:30–15:40 | earning, +0.39 |
 | B dealers | `pin_to_centre` | gamma-weighted centre of the same-day strikes within 1% − price, swings | steady | 45→20 min before close | earning, shared 0.525 |
 | B | `dealer_drift` | bn $ dealers must trade as the book decays to expiry | steady, usual = same-clock median | 45→20 min before close | earning, shared with the pin |
 | B | `option_wall_untested` | nearest untested wall's share ÷ (1 + distance in swings), signed towards it | steady, clock booster √(195 ÷ min left) | 10:00 → 50 min before close | earning, +0.06 |
-| C catch-up | `spy_basis` | SPY-implied SPX − SPX at the same minute-quote poll, less today's median, points (`spy_basis_points`; blank before the quotes began, 2026-09-28) | catch-up (points) | 09:40–15:45 | logged |
-| D option bets | `urgent_orders` | signed bursts + clear-side 50-lots over 30 min, multi-leg legs left out | steady | 10:00–close | logged |
+| C catch-up | `spy_basis` | SPY-implied SPX − SPX at the same minute-quote poll, less today's median, points (`spy_basis_points`; blank before the quotes began, 2026-09-28) | catch-up (points) | 09:40–15:45 | earning, +0.215 (points per point) |
+| D option bets | `urgent_orders` | signed bursts + clear-side 50-lots over 30 min, multi-leg legs left out | steady | 10:00–close | earning, −0.25 |
 | D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
+| D | `option_sentiment` | calls bought − sold less puts bought − sold since the open, contracts (`option_sentiment_since_open_count`) | steady, usual = same-clock median | 10:00–close | earning, −0.090 |
+| D | `sentiment_shift` | the same over the last 30 minutes (`option_sentiment_last_30_minutes_count`) | steady | 10:00–close | earning, −0.091 |
+| D | `strike_reach` | share of the day's call contracts with delta under 0.25 − that share of its puts | steady, usual = same-clock median | 10:00–close | earning, +0.095 |
 | F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
 
 A reading outside its speak window is `not_applicable`; a gate shut (the surge at an extreme, the grind away from
 one) reads 0, a value, never a blank; a missing input is blank with that input's reason, never 0.0. **Status:**
 `live` counts in the net from a third of its history size; `earning` counts from 0 and grows only as live days vouch
-for it; `logged` is measured and stored but never joins the net (rare events and the SPY catch-up Kaze cannot act on
-in time). The phone shows every reading, logged ones dimmed.
+for it; `logged` is measured and stored but never joins the net. Every reading is earning since 2026-11-09 (the
+rule: no reading sits logged; each earns its weight in the net from evidence). The phone shows every reading, logged
+ones dimmed.
 
 **How one reading becomes points** (every step stored, `engine/push_pull/push_pull_read.py`):
 
@@ -509,7 +521,10 @@ intercept) over those days and `live_weight_noise` its day-clustered standard er
 G ÷ (G − 1), from five days on: overlapping reads share a day, so the day is the unit); `live_day_type_a_fit` /
 `live_day_type_c_fit` and their noise the Trend's pair; `live_days_count` n. The price family (`reading_specs`: gap,
 trend since open, give-back, fresh burst, 15:00 fade, grind at extreme) is fitted together on one design, so each is
-credited only with what the others do not already explain. A reading whose spec names booster inputs is also fitted
+credited only with what the others do not already explain; so is the options family (urgent orders, burst tilt,
+option sentiment, sentiment shift, strike reach), the readings built from the same-day tape. A family fit with no
+coefficient for a weight falls back to that weight's own fit. A catch-up reading (points with no swing) is fitted
+on its strength in swings, so its slope is in points per point like its weight. A reading whose spec names booster inputs is also fitted
 on its own with a strength × input term per input; each term, shrunk by its noise like the weight, over the reading's
 own weight is its `live_booster_beta` (held to ±1), learned only while that weight is at least half signal; the
 Trend learns none, since its weight a + c·tn changes sign with trend-ness. Until promoted, live days may shrink a weight to 0 but never turn
@@ -640,7 +655,8 @@ replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `c
 `range`: `price`, `read_at`, `minutes_left`, `speed`, `speed_fast`, `speed_slow`, `straddle`, `releases` (the day's
 timed economic releases known at the cut, each `name` and `at`), `fed_decision_at` (the day's Fed decision known at
 the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (the readings: `readings`, one entry per reading in `reading_specs` order with `name`, `label`, `group` (the letter), `status` (live / earning / logged), `in_the_net`, `speaks`, `raw` and `raw_blank`, `unit`, `z` and `z_blank`, `strength`, `weight`, `booster`, `points_by_channel`, `side` (`push`, `pull`, `even`, null without points) and `live`, the rule the phone moves the trend by between reads (`since_price` the true open, `usual`, `spread`, `weight`, `booster`, `shape`, `wiggle`); `context`, the context inputs by kind; `groups`, letter to name; `channels`, per channel `net`, `groups` (points per group after the caps), `odds` (`up`, `flat`, `down`, `sigma`, `edge`), `wind` (`ratio`, `level`, `dots`, `side`), `centres`, `chance_up_if_moves`, `weight_applied`, `text`; the readings list is empty when the push/pull step crashed), `wind`
-(`levels`, each `[name, below]` with the last `below` null, and `dot_steps`), `channels` and `windows`.
+(`levels`, each `[name, below]` with the last `below` null, and `dot_steps`), `channels`, `windows` and
+`option_ladder`.
 
 `channels` is keyed `5_minutes` / `30_minutes` / `60_minutes`; each carries `swing`, `stretch`, `average_stretch`,
 `fit_sessions`, `fit_windows`, `rung_points`, `stays_inside_share`, `options_swing`, `options_check`, `clipped`,
@@ -674,6 +690,14 @@ step crashed); the 5-minute channel follows every read, the 30- and 60-minute ch
   `half_width`, `end`, `high`, `low`, `end_move`, `farthest_up`, `farthest_down`, `grades` (`ends_inside`,
   `average_inside`, `never_left`: true / false, null when ungraded).
 - `score[channel]`: over that channel's `finished` list, per grade word, `yes` and `graded`.
+
+`option_ladder` (the Read page's Where Options Trade card) is built from the store after the live read, from the
+first live read of each half hour of the session and the newest read (reads whose tape was blank left out); a crash
+building it is logged and the key is left out. It carries `bands` (`0_10`, `10_25`, `25_40`, `40_60`, `60_100`, far out
+of the money to in the money), `far_out` (`0_10`, `10_25`) and `marks`, oldest first, each `at` (the read's cut,
+New York time), `spx`, `contracts` and `net_bought` (each `call` and `put`, a list in band order, contracts since the
+open), `sentiment` and `sentiment_last_30` (calls bought less sold less the same for puts). The phone works out the
+totals, the put/call ratio, the far-out shares and the sentiment's change since the mark before.
 
 What the phone works out itself and the feed does not carry: the percent change in the header (price against
 `values.prior_close_points`), the colour of a score (its share against `band_portion`, or `stays_inside_share` for
