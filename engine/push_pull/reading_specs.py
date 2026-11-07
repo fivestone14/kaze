@@ -27,9 +27,9 @@ GROUPS = {
     "F": ("outside_view", "Claude beyond its base rate"),
 }
 # Status: live readings count in the net from a third of their history size; earning ones count from 0 and grow
-# only as live days vouch for them; logged ones are measured and stored but never join the net.
-LIVE, EARNING, LOGGED = "live", "earning", "logged"
-STATUSES = (LIVE, EARNING, LOGGED)
+# only as live days vouch for them. Every reading counts in the net: none is measured and stored only.
+LIVE, EARNING = "live", "earning"
+STATUSES = (LIVE, EARNING)
 # How much history is worth when a reading launches at a third of its tested size: twenty live days.
 HISTORY_DAYS_FOR_THIRD = 20
 # Weight rules: one fixed history size, or the day-type pair a + c·tn (tn = trend-ness) fitted jointly.
@@ -99,10 +99,6 @@ class Spec:
     def weight_name(self):
         """The name the reading's weight is earned and promoted under (shared across a pair when so)."""
         return self.shared_weight or self.name
-
-    @property
-    def in_the_net(self):
-        return self.status != LOGGED
 
 
 SPECS = (

@@ -103,7 +103,9 @@ def channel_forecast(forecast, name, minutes, fits, ratios, history, weights):
     speed, minutes_left, price = forecast["speed"], forecast["minutes_left"], forecast["price"]
     fit = fits[name] if fits else range_fit.empty_fit()
     ratio = ratios[name] if ratios else dict.fromkeys(RATIO_MEASURE)
-    swing = range_fit.swing_points(speed, minutes) if speed is not None else None
+    # A speed of 0 (every bar so far closed at one price, as with a frozen feed) gives no swing rather than a zero one,
+    # so nothing downstream divides by it: the band and the readings blank as not formed.
+    swing = range_fit.swing_points(speed, minutes) if speed else None
     window_minutes = min(minutes, minutes_left) if minutes_left is not None else minutes
     window = {"from": forecast["window_from"], "ends_at": forecast["window_from"] + timedelta(minutes=window_minutes),
               "close_at": forecast["window_from"] + timedelta(minutes=minutes_left) if minutes_left is not None

@@ -452,7 +452,7 @@ main {
 .tabs span { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
 .tabs i { width: 4px; height: 4px; border-radius: 50%; }
 .tabs button[aria-current="page"] i { background: var(--ink); }
-/* The push/pull card's readings: a head per mechanism group, a status chip per reading, logged readings dimmed, and
+/* The push/pull card's readings: a head per mechanism group, a status chip per reading, and
    the odds bar's flat zone between down and up. */
 .odds-bar #odds-flat { background: var(--band); }
 .odds-words { gap: 6px; }
@@ -463,7 +463,6 @@ main {
                          vertical-align: middle; background: var(--band); color: var(--mute); }
 .push-pull-row .status.live { background: var(--green-wash); color: var(--green-deep); }
 .push-pull-row .status.earning { background: var(--purple-wash); color: var(--purple); }
-.push-pull-row.logged .label, .push-pull-row.logged .short { color: var(--mute); }
 
 /* the delta ladder: each band's puts grow left from its label and its calls right; the bands only grow through the
    day, so the mark before sits inside each bar as a cream tick at the length it had then */

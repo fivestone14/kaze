@@ -31,10 +31,10 @@ def capped(total, cap):
 
 def net_of(entries, swing, promoted_groups):
     """The group sums under the young-group cap, the net under the total cap, and the share each group kept, from
-    the entries in the net ({name, group, points}); points None do not count."""
+    the entries ({group, points}); points None do not count."""
     groups = {}
     for entry in entries:
-        if entry["points"] is not None and entry["in_the_net"]:
+        if entry["points"] is not None:
             groups[entry["group"]] = groups.get(entry["group"], 0.0) + entry["points"]
     shares = {}
     for group, total in groups.items():

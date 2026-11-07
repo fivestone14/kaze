@@ -32,7 +32,7 @@ CHANNEL_KEYS = ("swing", "stretch", "average_stretch", "fit_sessions", "fit_wind
                 "stays_inside_share", "options_swing", "options_check", "clipped", "ends_at", "dials",
                 "dials_product", "bands", "status", "reason")
 DIRECTION_KEYS = ("chance_up_if_moves", "weight_applied", "text")
-READING_KEYS = ("name", "label", "group", "status", "in_the_net", "speaks", "raw", "raw_blank", "unit", "shape",
+READING_KEYS = ("name", "label", "group", "status", "speaks", "raw", "raw_blank", "unit", "shape",
                 "z", "z_blank", "strength", "weight", "booster", "points_by_channel", "side", "live")
 CALL_KEYS = ("net", "groups", "odds", "wind", "centres", "chance_up_if_moves", "weight_applied", "text")
 # The finished-window facts the Read page draws, as the window's outcome values name them.

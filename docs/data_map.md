@@ -466,9 +466,8 @@ per reading, one file per mechanism group, each saying only what it measures). B
 A reading outside its speak window is `not_applicable`; a gate shut (the surge at an extreme, the grind away from
 one) reads 0, a value, never a blank; a missing input is blank with that input's reason, never 0.0. **Status:**
 `live` counts in the net from a third of its history size; `earning` counts from 0 and grows only as live days vouch
-for it; `logged` is measured and stored but never joins the net. Every reading is earning since 2026-11-09 (the
-rule: no reading sits logged; each earns its weight in the net from evidence). The phone shows every reading, logged
-ones dimmed.
+for it. Every reading counts in the net and is earning since 2026-11-09 (the rule: no reading is measured and
+stored only; each earns its weight in the net from evidence; the `logged` status was removed on 2026-11-07).
 
 **How one reading becomes points** (every step stored, `engine/push_pull/push_pull_read.py`):
 
@@ -517,7 +516,8 @@ ones dimmed.
 Between reads the phone moves one reading, `trend_since_open`, with the live SPX price by the rule the feed sends
 with it (its true open, usual, spread, weight, booster and shape), re-sums the net under the cap and recomputes the
 odds with the engine's σ_G and edge, so the card follows the tape; every other reading changes only with a read.
-The read's stored call stays what the read said.
+It does so only while the read is live (within six minutes of its cut): on a late read the card holds the read's own
+numbers, since the other readings' values have gone stale. The read's stored call stays what the read said.
 
 **The promotion ledger** (`results_evaluations`, `engine/grade/promotion_ledger.py`; judge `promotion_ledger@1`,
 `evaluated_kind = push_pull_factor`, `evaluated_name` the weight's name, one run a night after the trust ledger,
@@ -668,7 +668,7 @@ replaced by `{status: failed, status_reason, failed_at, session}`, so a stale `c
 
 `range`: `price`, `read_at`, `minutes_left`, `speed`, `speed_fast`, `speed_slow`, `straddle`, `releases` (the day's
 timed economic releases known at the cut, each `name` and `at`), `fed_decision_at` (the day's Fed decision known at
-the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (the readings: `readings`, one entry per reading in `reading_specs` order with `name`, `label`, `group` (the letter), `status` (live / earning / logged), `in_the_net`, `speaks`, `raw` and `raw_blank`, `unit`, `z` and `z_blank`, `strength`, `weight`, `booster`, `points_by_channel`, `side` (`push`, `pull`, `even`, null without points) and `live`, the rule the phone moves the trend by between reads (`since_price` the true open, `usual`, `spread`, `weight`, `booster`, `shape`, `wiggle`); `context`, the context inputs by kind; `groups`, letter to name; `channels`, per channel `net`, `groups` (points per group after the caps), `odds` (`up`, `flat`, `down`, `sigma`, `edge`), `wind` (`ratio`, `level`, `dots`, `side`), `centres`, `chance_up_if_moves`, `weight_applied`, `text`; the readings list is empty when the push/pull step crashed), `wind`
+the cut, null on other days), `band_portion` (0.8, the share the band promises), `push_pull` (the readings: `readings`, one entry per reading in `reading_specs` order with `name`, `label`, `group` (the letter), `status` (live / earning), `speaks`, `raw` and `raw_blank`, `unit`, `z` and `z_blank`, `strength`, `weight`, `booster`, `points_by_channel`, `side` (`push`, `pull`, `even`, null without points) and `live`, the rule the phone moves the trend by between reads (`since_price` the true open, `usual`, `spread`, `weight`, `booster`, `shape`, `wiggle`); `context`, the context inputs by kind; `groups`, letter to name; `channels`, per channel `net`, `groups` (points per group after the caps), `odds` (`up`, `flat`, `down`, `sigma`, `edge`), `wind` (`ratio`, `level`, `dots`, `side`), `centres`, `chance_up_if_moves`, `weight_applied`, `text`; the readings list is empty when the push/pull step crashed), `wind`
 (`levels`, each `[name, below]` with the last `below` null, and `dot_steps`), `channels`, `windows` and
 `option_ladder`.
 

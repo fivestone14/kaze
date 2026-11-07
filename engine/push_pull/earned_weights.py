@@ -27,10 +27,10 @@ def earned(history_size, history_days, live_size, live_days, live_noise):
 
 
 def weight_for(spec, trend_ness, ledger):
-    """A reading's weight at this read: 0 for a logged or demoted reading; else its earned fixed size, or its earned
+    """A reading's weight at this read: 0 for a demoted reading; else its earned fixed size, or its earned
     day-type pair at today's trend-ness. `ledger` is the promotion ledger's entry for the reading's weight name, or
     None."""
-    if spec.status == reading_specs.LOGGED or (ledger and ledger.get("demoted")):
+    if ledger and ledger.get("demoted"):
         return 0.0
     live_days = ledger["live_days"] if ledger else 0
     if spec.weight_rule == reading_specs.DAY_TYPE:

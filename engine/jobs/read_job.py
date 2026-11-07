@@ -292,6 +292,9 @@ def rebuild_session(conn, day, calendar, half_days):
     for slot in session_clock.day_slots(day, half_days):
         bars_total += rebuild_read(conn, session_clock.cut_for_slot(day, slot), slot, calendar, half_days)[2]
         reads += 1
+    # The day's parsed tape (about 100 MB) is done with once its reads are rebuilt; a backfill or a night of re-scoring
+    # would otherwise hold every day's tape at once.
+    mirai_files.TAPE_CACHE.pop(day, None)
     return reads, bars_total
 
 

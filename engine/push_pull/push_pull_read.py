@@ -29,7 +29,7 @@ def read_forces(conn, snapshot, observations, forecast, cut_at, half_days):
     readings = [reading_entry(spec, facts, day_history if spec.whole_day_baseline else raw_history, context,
                               ledger.get(spec.weight_name)) for spec in reading_specs.SPECS]
     promoted_groups = {spec.group for spec in reading_specs.SPECS
-                       if spec.in_the_net and (ledger.get(spec.weight_name) or {}).get("promoted")}
+                       if (ledger.get(spec.weight_name) or {}).get("promoted")}
     channels = {name: channel_block(readings, channel, name, forecast["price"], promoted_groups)
                 for name, channel in forecast["channels"].items()}
     return place_on_forecast(forecast, {"readings": readings, "context": context, "channels": channels,
@@ -74,7 +74,7 @@ def reading_entry(spec, facts, raw_history, context, ledger_entry):
               for name, channel in facts.forecast["channels"].items()}
     entry = {
         "name": spec.name, "label": spec.label, "group": spec.group, "status": spec.status,
-        "in_the_net": spec.in_the_net, "speaks": speaks, "raw": reading.value, "raw_blank": reading.blank,
+        "speaks": speaks, "raw": reading.value, "raw_blank": reading.blank,
         "raw_side": reading.side, "unit": spec.unit, "usual": usual, "spread": spread, "sessions": sessions,
         "z": z, "z_blank": z_blank, "strength": strength, "weight": weight, "booster": booster,
         "points_by_channel": points, "side": side_of(points.get(components.HEADLINE_HORIZON)), "live": None,
@@ -104,9 +104,8 @@ def side_of(points):
 def channel_block(readings, channel, name, price, promoted_groups):
     """One channel's net and outputs from the readings' points on it."""
     swing = channel["swing"]
-    entries = [{"group": entry["group"], "points": entry["points_by_channel"].get(name),
-                "in_the_net": entry["in_the_net"]} for entry in readings]
-    counted = [entry for entry in entries if entry["in_the_net"] and entry["points"] is not None]
+    entries = [{"group": entry["group"], "points": entry["points_by_channel"].get(name)} for entry in readings]
+    counted = [entry for entry in entries if entry["points"] is not None]
     net, groups, shares = net_and_odds.net_of(entries, swing, promoted_groups) if counted and swing else (None, {}, {})
     odds = net_and_odds.odds(net, swing, channel["average_stretch"], channel["stretch"], channel["rung_points"]) \
         if net is not None else None

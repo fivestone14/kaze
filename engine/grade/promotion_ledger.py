@@ -40,8 +40,7 @@ ORIGIN_ORDER = ("live_frozen", "history_rebuilt")
 
 
 def weight_specs():
-    """The specs grouped by the weight they are scored under: {weight name: [specs]}; logged readings are scored too,
-    they just never join the net and never lift a group's cap."""
+    """The specs grouped by the weight they are scored under: {weight name: [specs]}."""
     groups = {}
     for spec in reading_specs.SPECS:
         groups.setdefault(spec.weight_name, []).append(spec)
@@ -115,10 +114,11 @@ def day_scores(chosen, specs):
     for day, (origin, reads) in chosen.items():
         for read in reads:
             strengths = [sized(read, spec, True) for spec in specs]
-            if any(s is None for s in strengths):
+            # A pair's blank member adds nothing, as in the net, where the other's points still count.
+            if all(s is None for s in strengths):
                 continue
             days.setdefault(day, (origin, []))[1].append(
-                (sum(strengths), read["average_from_publish"] / read["swing"], read["trend_ness"],
+                (sum(s or 0.0 for s in strengths), read["average_from_publish"] / read["swing"], read["trend_ness"],
                  claimed_sign(specs[0], read["trend_ness"])))
     return {day: entry for day, entry in days.items() if any(s for s, _, _, _ in entry[1])}
 
@@ -190,11 +190,11 @@ def weight_columns(read, weight_name, specs):
 
 
 def family_fits(sample, groups):
-    """The joint fit of each family's in-the-net weights on the reads of days all of them are scored on (the first
+    """The joint fit of each family's weights on the reads of days all of them are scored on (the first
     origin current for all): {weight name: (fits, noise)} over each weight's columns."""
     families = {}
     for name, specs in groups.items():
-        if specs[0].family and all(spec.in_the_net for spec in specs):
+        if specs[0].family:
             families.setdefault(specs[0].family, []).append(name)
     results = {}
     for members in families.values():
@@ -229,7 +229,7 @@ def own_fit(chosen, weight_name, specs):
     for day, (_, reads) in chosen.items():
         for read in reads:
             cells = weight_columns(read, weight_name, specs)
-            if cells is None or any(read["strengths"].get(spec.name) is None for spec in specs):
+            if cells is None or all(read["strengths"].get(spec.name) is None for spec in specs):
                 continue
             normalised = ctx.normalised_inputs(read["context"])
             for name in inputs:

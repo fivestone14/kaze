@@ -1302,7 +1302,8 @@ const READING_WORDS = {
                    carry: "price may drift to it" },
   dealer_drift: { name: "Dealer hedging",
                   saw: (r, z) => `Dealers ${r > 0 ? "buy" : "sell"} $${fmt(Math.abs(r), 1)}bn`
-                    + (z === null || z === undefined || z === 0 ? "" : `, ${z > 0 ? "more" : "less"} than usual`) },
+                    + (z === null || z === undefined || z === 0 ? ""
+                       : `, ${(z > 0) === (r > 0) ? "more" : "less"} than usual`) },
   option_wall_untested: { name: "Option wall", saw: (r) => `A big option level sits ${r > 0 ? "above" : "below"}`,
                           carry: "price may drift to it" },
   spy_basis: { name: "SPY vs. SPX", saw: (r) => `SPY ran ${fmt(Math.abs(r), 2)} pts ${r > 0 ? "ahead" : "behind"}`,
@@ -1348,7 +1349,7 @@ function readingWords(reading) {
 }
 
 const SIDE_WORDS = { push: "Push", pull: "Pull", even: "Even" };
-const STATUS_WORDS = { live: "Live", earning: "Earning", logged: "Logged" };
+const STATUS_WORDS = { live: "Live", earning: "Earning" };
 
 /** A reading's strength from its z by its shape (the engine's strength_shapes): nothing inside the wiggle, tanh
  *  beyond it, steady following the sign and reversing flipping it. The phone needs only the steady shape live. */
@@ -1360,18 +1361,18 @@ function steadyStrength(z, wiggle) {
 /** The chosen channel's readings in points, as the card draws them: each reading's from the read, with the trend
  *  since the open moved by the live price while ticks arrive, by the rule the engine sends with it (its usual,
  *  spread, weight and booster), so between reads it says what the next read would of that reading. Only readings
- *  in the net add to it; a logged one is shown dimmed. */
+ *  add to it. */
 function pushPullModel() {
   const block = range(), ch = channel();
   const forces = block && block.push_pull;
   if (!block || !ch || !forces || !forces.channels || !forces.channels[state.channel]) return null;
   const swing = ch.swing;
   const call = forces.channels[state.channel];
-  const tick = tickFresh() ? sessionTick() : null;
+  const tick = tickFresh() && isLive() ? sessionTick() : null;
   let live = false, liveDelta = 0;
   const readings = (forces.readings || []).map((entry) => {
     const reading = { name: entry.name, label: entry.label, group: entry.group, status: entry.status,
-                      inNet: entry.in_the_net, speaks: entry.speaks, raw: entry.raw, unit: entry.unit,
+                      speaks: entry.speaks, raw: entry.raw, unit: entry.unit,
                       blank: entry.raw_blank || entry.z_blank, z: entry.z, strength: entry.strength,
                       weight: entry.weight, booster: entry.booster, side: entry.side,
                       points: entry.points_by_channel ? entry.points_by_channel[state.channel] : null };
@@ -1388,30 +1389,37 @@ function pushPullModel() {
     }
     return reading;
   });
-  const counted = readings.filter((reading) => reading.inNet && reading.points !== null
-                                               && reading.points !== undefined);
+  const counted = readings.filter((reading) => reading.points !== null && reading.points !== undefined);
   const pull = counted.reduce((sum, reading) => sum + Math.max(0, -reading.points), 0);
   const push = counted.reduce((sum, reading) => sum + Math.max(0, reading.points), 0);
   // live: the net is summed again from the readings under the engine's own caps (each young group held to its cap,
   // then the total), so it is the net the next read would give; the odds then follow the engine's spread of the
   // average (its sigma and edge) so the card's numbers move with the tape between reads
   let net = call.net === null || call.net === undefined ? null : call.net;
-  if (net !== null && live && swing && liveDelta !== 0) net = cappedNet(counted, swing, forces.caps);
+  const capped = swing ? cappedNet(counted, swing, forces.caps) : { net: null, groups: {} };
+  if (net !== null && live && swing && liveDelta !== 0) net = capped.net;
   const odds = net === null ? null : live && call.odds ? liveOdds(net, call.odds) : call.odds;
-  return { readings, swing, live, pull, push, net, odds, groups: call.groups || {},
+  return { readings, swing, live, pull, push, net, odds, groups: capped.groups,
            weight: call.weight_applied, context: forces.context || {} };
 }
 
 /** The engine's net_of: the readings' points summed per group, a group nobody has promoted held to its cap, the sum
- *  held to the total cap. */
+ *  held to the total cap; when the total cap binds the groups scale down together, so they still sum to the net.
+ *  Returns { net, groups }. */
 function cappedNet(counted, swing, caps) {
   const limits = caps || { young_group_swings: 0.15, total_swings: 0.35, promoted_groups: [] };
   const groups = {};
   counted.forEach((reading) => { groups[reading.group] = (groups[reading.group] || 0) + reading.points; });
-  const total = Object.entries(groups).reduce((sum, [group, points]) => sum
-    + ((limits.promoted_groups || []).includes(group) ? points
-       : clamp(points, -limits.young_group_swings * swing, limits.young_group_swings * swing)), 0);
-  return clamp(total, -limits.total_swings * swing, limits.total_swings * swing);
+  Object.keys(groups).forEach((group) => {
+    if (!(limits.promoted_groups || []).includes(group)) {
+      groups[group] = clamp(groups[group], -limits.young_group_swings * swing, limits.young_group_swings * swing);
+    }
+  });
+  const total = Object.values(groups).reduce((sum, points) => sum + points, 0);
+  const net = clamp(total, -limits.total_swings * swing, limits.total_swings * swing);
+  const share = total === 0 ? 1 : net / total;
+  Object.keys(groups).forEach((group) => { groups[group] *= share; });
+  return { net, groups };
 }
 
 /** The odds of up, flat and down for a live net, with the engine's sigma and edge: the same normal curve it uses. */
@@ -1487,7 +1495,7 @@ function readingFigure(reading) {
   // a percent only for the tanh shapes (−1..1); the clipped give-back and the catch-up's points show as numbers
   const tanhShape = ["steady", "reversing", "one_sided"].includes(reading.shape);
   const strength = reading.strength === null || reading.strength === undefined ? ""
-    : tanhShape ? ` · ${fmt(reading.strength * 100, 0, true)}%` : ` · s ${fmt(reading.strength, 2, true)}`;
+    : tanhShape ? ` · ${fmt(reading.strength * 100, 0, true)}%` : ` · strength ${fmt(reading.strength, 2, true)}`;
   return `${raw}${z}${strength}`;
 }
 
@@ -1496,8 +1504,7 @@ function readingShort(reading) {
   if (reading.points === null || reading.points === undefined) {
     return reading.speaks === false ? "Quiet Now" : reading.blank ? `— · ${titleCase(reading.blank)}` : "—";
   }
-  const how = reading.inNet ? `w ${fmt(reading.weight, 3, true)} × b ${fmt(reading.booster, 2)}` : "Logged · 0 Pts";
-  return reading.inNet ? `${fmt(reading.points, 2, true)} Pts · ${how}` : how;
+  return `${fmt(reading.points, 2, true)} Pts · w ${fmt(reading.weight, 3, true)} × b ${fmt(reading.booster, 2)}`;
 }
 
 /** The card's moving parts at one frame: the wind chip, the net, the tug bar, the odds and each row's bar and words. */
@@ -1538,9 +1545,8 @@ function drawPushPull(model) {
     const row = el("push-pull-rows").querySelector(`[data-factor="${CSS.escape(reading.name)}"]`);
     if (!row) return;
     const side = row.querySelector(".side");
-    side.textContent = reading.side && reading.inNet ? ` · ${SIDE_WORDS[reading.side]}` : "";
-    side.className = `side ${reading.inNet ? reading.side || "" : ""}`;
-    row.classList.toggle("logged", !reading.inNet);
+    side.textContent = reading.side ? ` · ${SIDE_WORDS[reading.side]}` : "";
+    side.className = `side ${reading.side || ""}`;
     row.querySelector(".short").textContent = readingShort(reading);
     row.querySelector(".figure").textContent = readingFigure(reading);
     row.querySelector("svg").innerHTML = factorBar(reading, model.swing);
@@ -1561,7 +1567,7 @@ function leanRanked(model) {
   if (!model) return [];
   const taken = { push: 0, pull: 0 };
   return model.readings
-    .filter((reading) => reading.inNet && reading.points !== null && reading.points !== undefined
+    .filter((reading) => reading.points !== null && reading.points !== undefined
                          && Math.abs(reading.points) >= PUSH_PULL.evenPoints)
     .sort((a, b) => Math.abs(b.points) - Math.abs(a.points))
     .map((reading) => {
@@ -1645,12 +1651,8 @@ function tugBar(model) {
   const { centre, trackLeft, trackRight, top, height, labelY } = PUSH_PULL;
   const parts = [svgRect(trackLeft, top, trackRight - trackLeft, height, height / 2, COLOUR.well)];
   const scale = model && model.swing ? (centre - trackLeft) / (PUSH_PULL.sideSwings * model.swing) : 0;
-  const groups = {};
-  (model ? model.readings : []).forEach((reading) => {
-    if (reading.inNet && reading.points !== null && reading.points !== undefined) {
-      groups[reading.group] = (groups[reading.group] || 0) + reading.points;
-    }
-  });
+  // the groups under the caps (the engine's net_of), so the segments sum to the net the cloud sits at
+  const groups = model ? model.groups : {};
   [[-1, COLOUR.rust], [1, COLOUR.blue]].forEach(([sign, colour]) => {
     if (!model) return;
     const pieces = Object.entries(groups).filter(([, points]) => points * sign > 0)
@@ -1690,16 +1692,16 @@ function cloudMark(x) {
        + `d="M-4.2 2.4h8a2.4 2.4 0 0 0 .2-4.8 3.4 3.4 0 0 0-6.5-.6 2.6 2.6 0 0 0-1.7 5.4z"/>`;
 }
 
-/** One reading row's bar: from the centre, its strength (−1..1) as the share of the half track; a logged reading
- *  draws in grey. */
+/** One reading row's bar: from the centre, its strength (−1..1) as the share of the half track, on the side its
+ *  points lean (its strength's side while its weight is 0); a reading with no points draws in grey. */
 function factorBar(reading, swing) {
   const mid = METER.width / 2, reach = mid - 2;
   const track = svgRect(0, 5, METER.width, 2, 1, COLOUR.rule) + svgLine(mid, 1, mid, 11, COLOUR.faint, 1);
   if (reading.strength === null || reading.strength === undefined || !swing) return track;
   const size = Math.min(Math.abs(reading.strength), 1);
   const width = Math.max(size * reach, 1.5);
-  const leftward = reading.inNet ? (reading.points || 0) < 0 : reading.strength < 0;
-  const colour = !reading.inNet ? COLOUR.mute : reading.side === "push" ? COLOUR.blue
+  const leftward = reading.points ? reading.points < 0 : reading.strength < 0;
+  const colour = reading.side === "push" ? COLOUR.blue
                : reading.side === "pull" ? COLOUR.rust : COLOUR.mute;
   return track + svgRect((leftward ? mid - width : mid).toFixed(1), 3, width.toFixed(1), 6, 3, colour);
 }
@@ -1744,7 +1746,7 @@ function renderPushPull() {
   const model = pushPullModel();
   const counts = { pull: 0, push: 0, even: 0 };
   (model ? model.readings : []).forEach((reading) => {
-    if (reading.inNet && reading.side) counts[reading.side] += 1;
+    if (reading.side) counts[reading.side] += 1;
   });
   el("push-pull-count").innerHTML = `<span class="count-pull">${counts.pull} Pull</span> · `
     + `<span class="count-push">${counts.push} Push</span> · <span class="count-even">${counts.even} Even</span>`;
@@ -1976,7 +1978,7 @@ function renderStepChecks(read, minutes) {
                 + `${leanMeter(chance, METER.small)}</g>`
                 + svgText(3, 32, "Down", `font-size="7" fill="${COLOUR.rust}"`)
                 + svgText(53, 32, "Up", `font-size="7" text-anchor="end" fill="${COLOUR.blue}"`) + `</svg>`,
-                chance === null ? "—" : `Up ${fmt(chance * 100)}%`);
+                chance === null ? "—" : `${fmt(chance * 100)}% Up If It Moves`);
 }
 
 function renderAnswer() {

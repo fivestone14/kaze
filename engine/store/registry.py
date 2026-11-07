@@ -564,7 +564,7 @@ MEASURES = [
                 overlap="direction_all_sources"),
     # The pipeline's values on each channel's decision: how much each reading counts and what the channel says.
     measure_row("push_pull_weight", "a reading's earned weight: swings of points per unit strength, (h·ŵ_hist + "
-                "n·k·ŵ_live) ÷ (h + n·k + 40) with k the live fit's share of signal, 0 for a logged reading",
+                "n·k·ŵ_live) ÷ (h + n·k + 40) with k the live fit's share of signal, 0 for a demoted reading",
                 "swings_per_strength", "number", group="push_pull_decision", subjects="factor", low=-10, high=10,
                 **DECISION_VALUE, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("push_pull_booster", "the wider view's booster on a reading: clip(exp(Σβu), ×0.5, ×2), or the wall's "

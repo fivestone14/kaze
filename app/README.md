@@ -132,13 +132,18 @@ strip (the read's price at the centre, each band's edge number at its edge) move
 the card's edge, where they would touch. Sight's Which Way · Push / Pull card leads with the net push in points
 (`−0.09 Pts Net Pull`, `Pull 0.56 · Push 0.49`) beside the wind chip (a wind that tilts toward the winning side,
 grows with strength and fills four dots: Calm, Light Air, Breeze, Strong Breeze), then the tug bar (pulls stacked left
-in rust, pushes right in blue, one segment per factor, the cloud at the net) and the odds (`51% Below · 49% Above`).
-The seven factor rows sit behind one toggle (`3 Pull · 2 Push · 2 Even · Show Factors`), closed by default and
-remembered for the tab; each row says whether that factor pushes, pulls or sits even, with its bar in points and the
-engine's short answer (`Since Yesterday · Pull … Down 21 Pts`; the words and thresholds are the engine's,
-`docs/data_map.md` section 8), and a tap shows the exact figure (`−21 Since Close`). Every number glides to its new
-value (0.7 s, at once with reduced motion): on each read, and with every live tick, since Since Yesterday follows the
-live price between reads (`· Live` after the totals while it does). The engine's width dials are Band Wideners on every
+in rust, pushes right in blue, one segment per mechanism group under the engine's caps, so the segments sum to the net
+the cloud sits at) and the odds (`24% Down · 51% Flat · 25% Up`). Every reading sits behind one toggle
+(`3 Pull · 2 Push · 14 Even · Show Readings`), closed by default and remembered for the tab, under a head per
+mechanism group; each row gives the reading's plain name and one line on what it saw and, where its points carry or
+fade that, why (`Puts cost 4.2 vol pts more than calls, dearer than usual; the crowd's hedging tends to be wrong`),
+its status chip (Live or Earning), its bar (its strength, on the side its points lean, or its strength's side while
+its weight is 0) and a tap for the exact figures (raw, z, strength, points = w × b). The words live in
+`READING_WORDS` in `app.js`; the readings themselves are the engine's (`docs/data_map.md` section 8). Every number
+glides to its new value (0.7 s, at once with reduced motion): on each read, and with every live tick while the read
+is live, since Move Since The Open follows the live price between reads by the engine's own rule (`· Live` after the
+totals while it does); on a late read the card holds the read's numbers. Steps row 8 gives the chance of up if price
+moves (`73% Up If It Moves`, up ÷ (up + down)), a different number from the odds bar's `Up`. The engine's width dials are Band Wideners on every
 screen: Sight's How Far card lists all five with their standing (`Fed Decision Day · Not Today`, `From 14:00` on a Fed
 day, `Due ×2.6 · Not Counted Yet`; `Data Release In The Window · None Due` or `Due 10:00 ×1.4 · Not Counted Yet`; `Last
 15 Minutes Of The Day · From 15:45` or `Due ×1.36 · Not Counted Yet`; any of them `Counted ×n` once the ledger gives it
