@@ -175,6 +175,8 @@ SYMBOL_MISSING = "provider_refused_symbol when the quote is missing"
 NO_LOGIN_LINE = "not_known_at_read on rebuilt rows or when the auth watch printed ?"
 TAPE_BLANK = "feed_missing when the tape is absent; feed_stale when its newest trade is older than the stale limit"
 TAPE_TWIN = "feed_coverage_last_30_minutes_portion"
+LADDER_BLANK = TAPE_BLANK + ("; feed_missing or feed_stale with SPX's bars, which price each trade; partial_coverage "
+                             "when under 0.9 of the session's minutes so far have a trade in the file")
 
 MEASURES = [
     # clock (no feed: the clock is the clock)
@@ -327,20 +329,31 @@ MEASURES = [
                 "delta band on one side: delta at the trade from the volatility of its quote's mid, legs of packages "
                 "included, trades before SPX's first finished minute left out", "contracts", "whole_number",
                 "push_pull", "options_delta_ladder", subjects="delta_band|side", feed="options_tape",
-                blank=TAPE_BLANK, low=0, high=50_000_000, twin=TAPE_TWIN),
+                blank=LADDER_BLANK, low=0, high=50_000_000, twin=TAPE_TWIN),
     measure_row("option_net_bought_by_delta_count", "same-day option contracts bought less sold from the open to the "
                 "cut in one delta band on one side: single-leg trades with an ask, at or past the ask bought, at or "
                 "past the bid sold, else the nearer side", "contracts", "whole_number", "push_pull",
-                "options_delta_ladder", subjects="delta_band|side", feed="options_tape", blank=TAPE_BLANK,
+                "options_delta_ladder", subjects="delta_band|side", feed="options_tape", blank=LADDER_BLANK,
                 low=-50_000_000, high=50_000_000, twin=TAPE_TWIN),
     measure_row("option_sentiment_since_open_count", "option sentiment from the open to the cut: calls bought less "
                 "sold, less puts bought less sold, in contracts (the delta ladder's net bought, calls less puts)",
-                "contracts", "whole_number", group="options_sentiment", feed="options_tape", blank=TAPE_BLANK,
+                "contracts", "whole_number", group="options_sentiment", feed="options_tape", blank=LADDER_BLANK,
                 low=-50_000_000, high=50_000_000, twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
     measure_row("option_sentiment_last_30_minutes_count", "option sentiment over the 30 minutes to the cut: calls "
                 "bought less sold, less puts bought less sold, in contracts", "contracts", "whole_number",
-                group="options_sentiment", feed="options_tape", blank=TAPE_BLANK, low=-50_000_000, high=50_000_000,
+                group="options_sentiment", feed="options_tape", blank=LADDER_BLANK, low=-50_000_000, high=50_000_000,
                 twin=TAPE_TWIN, **PUSH_PULL_LANE_DEFAULTS),
+    measure_row("option_sided_since_open_count", "same-day option contracts from the open to the cut in "
+                "single-leg trades that took a side (the option sentiment's denominator)", "contracts",
+                "whole_number", "push_pull", "options_sentiment", feed="options_tape", blank=LADDER_BLANK, low=0,
+                high=50_000_000, twin=TAPE_TWIN),
+    measure_row("option_sided_last_30_minutes_count", "same-day option contracts in the 30 minutes to the "
+                "cut in single-leg trades that took a side (the sentiment shift's denominator)", "contracts",
+                "whole_number", "push_pull", "options_sentiment", feed="options_tape", blank=LADDER_BLANK, low=0,
+                high=50_000_000, twin=TAPE_TWIN),
+    measure_row("option_tape_minute_coverage_portion", "share of the session's minutes from the open to the cut with "
+                "at least one same-day trade in the file; under 0.9 the delta ladder is blank as partial_coverage",
+                "portion", "number", "health", "tape_health", feed="options_tape", blank=TAPE_BLANK, low=0, high=1),
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",
                 "whole_number", "health", "tape_health", subjects="feed", feed="options_tape", blank=TAPE_BLANK, low=0),
     measure_row("feed_coverage_last_30_minutes_portion",

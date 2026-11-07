@@ -422,9 +422,10 @@ def tape_delta_ladder(day, cut, spot_at_minute_ms, close_at, max_bytes=None):
     """The day's same-day trades from the open to the cut by delta band and side: contracts traded (every trade, legs
     of packages too) and contracts bought less sold (single-leg trades with an ask, a zero bid allowed: at or past the
     ask bought, at or past the bid sold, else the nearer side), plus the sentiment, calls bought less sold less the
-    same for puts, since the open and over the last 30 minutes. Trades before SPX's first finished minute have no
-    delta and are left out. Returns {contracts: {(band, side): n}, net_bought: {...}, sentiment, sentiment_last_30,
-    trades}."""
+    same for puts, since the open and over the last 30 minutes, with the contracts that took a side over each (the
+    sentiment's denominators), and the share of the session's minutes so far with any trade on file. Trades before
+    SPX's first finished minute have no delta and are left out. Returns {contracts: {(band, side): n}, net_bought:
+    {...}, sentiment, sentiment_last_30, sided, sided_last_30, minute_coverage, trades}."""
     tape = read_tape_day(day)
     delta = tape_deltas(day, spot_at_minute_ms, close_at)
     end_ms = cut.timestamp() * 1000.0
@@ -448,6 +449,12 @@ def tape_delta_ladder(day, cut, spot_at_minute_ms, close_at, max_bytes=None):
     signed = size * side * np.where(is_call, 1.0, -1.0)
     ladder["sentiment"] = int(signed[inside].sum())
     ladder["sentiment_last_30"] = int(signed[recent].sum())
+    ladder["sided"] = int(size[inside & (side != 0)].sum())
+    ladder["sided_last_30"] = int(size[recent & (side != 0)].sum())
+    on_file = on_disk & (tape["ts_ms"] >= open_ms) & (tape["ts_ms"] <= end_ms)
+    minutes = int((end_ms - open_ms) // MINUTE_MS) + 1
+    traded = np.unique((tape["ts_ms"][on_file] - open_ms) // MINUTE_MS).size
+    ladder["minute_coverage"] = min(1.0, traded / minutes) if minutes > 0 else 0.0
     return ladder
 
 

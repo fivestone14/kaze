@@ -34,6 +34,9 @@ HEADLINE_WINDOW_MINUTES = 60
 STRIKE_STEP_POINTS = 5
 TNX_QUOTE_PER_YIELD_PCT = 10
 GAP_MARKERS_FOR_EMPTY_WINDOW = TAPE_WINDOW_MINUTES
+# The delta ladder needs the day's tape from the open: under this share of the session's minutes so far with a trade
+# on file (a full day has a trade in all but about one of its 390 minutes) its totals are left blank.
+LADDER_MINIMUM_MINUTE_COVERAGE = 0.9
 ONE_HOUR = timedelta(hours=1)
 # The per-day files a live read measures first (byte length), so a rebuild of the cut parses the same prefix.
 SOURCE_FILES = {feed: paths.MIRAI_FILES[feed] for feed in registry.FEEDS_WITH_LINE_COUNTS}
@@ -444,10 +447,14 @@ def collect_options_scan(read, scans, keep_open_interest):
 
 
 def collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars):
-    """The day's same-day trades by delta band and side (contracts traded, contracts bought less sold) and the option
-    sentiment, calls bought less sold less the same for puts, since the open and over the last 30 minutes. A trade
-    is priced off SPX's bars, so the ladder is blank with the bars' reason when they are missing or stale (a lagging
-    bar would leave the newest trades unpriced and the counts short), never a silent 0."""
+    """The day's same-day trades by delta band and side (contracts traded, contracts bought less sold), the option
+    sentiment (calls bought less sold less the same for puts) since the open and over the last 30 minutes with the
+    contracts that took a side over each, and the share of the session's minutes so far with any trade on file. A
+    trade is priced off SPX's bars, so the ladder is blank with the bars' reason when they are missing or stale (a
+    lagging bar would leave the newest trades unpriced), never a silent 0; and blank as partial_coverage when under
+    LADDER_MINIMUM_MINUTE_COVERAGE of the session's minutes so far have a trade on file (the recorder was down for
+    much of the day, so its totals since the open are not the day's), which keeps such a day out of the readings'
+    same-clock history."""
     blank = None
     if counted and not (bars and read.feed_ok("spx_bars")):
         blank = "feed_stale" if read.feed_states.get("spx_bars", {}).get("status") in ("stale", "late") \
@@ -455,6 +462,10 @@ def collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, 
     spot_at_minute_ms = {moment.timestamp() * 1000.0: close for moment, close in minute_closes.items()}
     ladder = mirai_files.tape_delta_ladder(day, cut_at, spot_at_minute_ms, close_at, max_bytes) \
         if counted and blank is None else None
+    read.add_observation("option_tape_minute_coverage_portion",
+                         store.rounded(ladder["minute_coverage"]) if ladder else None, blank=blank)
+    if ladder and ladder["minute_coverage"] < LADDER_MINIMUM_MINUTE_COVERAGE:
+        ladder, blank = None, "partial_coverage"
     for _, _, band in mirai_files.DELTA_BANDS:
         for side in mirai_files.OPTION_SIDES:
             read.add_observation("option_contracts_by_delta_count", ladder["contracts"][band, side] if ladder else None,
@@ -462,9 +473,11 @@ def collect_delta_ladder(read, day, cut_at, minute_closes, close_at, max_bytes, 
             read.add_observation("option_net_bought_by_delta_count",
                                  ladder["net_bought"][band, side] if ladder else None, blank=blank, delta_band=band,
                                  side=side)
-    read.add_observation("option_sentiment_since_open_count", ladder["sentiment"] if ladder else None, blank=blank)
-    read.add_observation("option_sentiment_last_30_minutes_count", ladder["sentiment_last_30"] if ladder else None,
-                         blank=blank)
+    for measure, key in (("option_sentiment_since_open_count", "sentiment"),
+                         ("option_sentiment_last_30_minutes_count", "sentiment_last_30"),
+                         ("option_sided_since_open_count", "sided"),
+                         ("option_sided_last_30_minutes_count", "sided_last_30")):
+        read.add_observation(measure, ladder[key] if ladder else None, blank=blank)
 
 
 def collect_options_tape(read, day, cut_at, bars, max_bytes, close_at):

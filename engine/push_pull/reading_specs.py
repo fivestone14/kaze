@@ -167,16 +167,16 @@ SPECS = (
     Spec("burst_tilt", "Burst Tilt", "D", option_bets.burst_tilt, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.28, EARNING, spread_floor=15.0,
          family=OPTIONS_FAMILY, evidence="w +0.28 in history; near- vs far-money urgency"),
-    Spec("option_sentiment", "Option Sentiment", "D", option_bets.option_sentiment, "contracts", shapes.STEADY,
-         Speaks(from_minute=30, until_minutes_before_close=0), -0.090, EARNING, usual=baseline.USUAL_SAME_CLOCK,
-         spread_floor=2000.0, family=OPTIONS_FAMILY,
-         evidence="w −0.090 (t −0.6) alone, ~0 in the options joint fit, 20 days 2026-09-23→10-23: weak, faintly "
-                  "contrarian"),
-    Spec("sentiment_shift", "Sentiment Shift", "D", option_bets.sentiment_shift, "contracts", shapes.STEADY,
-         Speaks(from_minute=30, until_minutes_before_close=0), -0.091, EARNING, spread_floor=1000.0,
+    Spec("option_sentiment", "Option Sentiment", "D", option_bets.option_sentiment, "share", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.138, EARNING, usual=baseline.USUAL_SAME_CLOCK,
+         spread_floor=0.002, family=OPTIONS_FAMILY,
+         evidence="as a share of sided contracts: w −0.138 (t −0.8) alone, −0.075 in the options joint fit, 20 days "
+                  "2026-09-23→10-23: weak, faintly contrarian"),
+    Spec("sentiment_shift", "Sentiment Shift", "D", option_bets.sentiment_shift, "share", shapes.STEADY,
+         Speaks(from_minute=30, until_minutes_before_close=0), -0.063, EARNING, spread_floor=0.005,
          family=OPTIONS_FAMILY,
-         evidence="w −0.091 (t −1.8) alone, −0.066 (t −1.4) in the options joint fit, 20 days 2026-09-23→10-23: "
-                  "the newest half hour's bets tend to be given back"),
+         evidence="as a share of sided contracts: w −0.063 (t −0.8) alone, ~0 in the options joint fit, 20 days "
+                  "2026-09-23→10-23: the newest half hour's bets lean to being given back"),
     Spec("strike_reach", "Strike Reach", "D", option_bets.strike_reach, "share", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.095, EARNING, usual=baseline.USUAL_SAME_CLOCK,
          spread_floor=0.02, family=OPTIONS_FAMILY,

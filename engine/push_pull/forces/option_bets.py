@@ -1,8 +1,9 @@
 # D · Option bets: who bets which way on the same-day tape. Urgent orders (bursts across strikes and 50-lot prints,
 # bullish less bearish over 30 minutes, legs of multi-leg packages left out, big prints only when they took the bid or ask), which the market
 # tends to give back; the burst tilt, near-the-money urgency less far-from-the-money urgency; and from every trade
-# since the open, sorted by its delta: the option sentiment (calls bought less sold, less the same for puts), its
-# shift over the last 30 minutes, and the strike reach (how far out of the money calls trade against puts).
+# since the open, sorted by its delta: the option sentiment (calls bought less sold, less the same for puts, as a
+# share of the contracts that took a side), its shift over the last 30 minutes, and the strike reach (how far out of
+# the money calls trade against puts).
 from engine.collect import collect, mirai_files
 from engine.push_pull.read_facts import Reading
 
@@ -27,19 +28,27 @@ def burst_tilt(read):
 
 
 def option_sentiment(read):
-    """Contracts bought less sold since the open, calls less puts: above 0 the day's option buyers lean up."""
-    value = read.value("option_sentiment_since_open_count")
-    if value is None:
-        return Reading.blank_for(read.blank_reason("option_sentiment_since_open_count"))
-    return Reading(float(value))
+    """Contracts bought less sold since the open, calls less puts, as a share of the contracts that took a side: above
+    0 the day's option buyers lean up. A share holds steady when some trades reach the file late or could not be
+    called bought or sold (older days' quotes left more of them at the mid), where a count would shrink."""
+    return sided_share(read, "option_sentiment_since_open_count", "option_sided_since_open_count")
 
 
 def sentiment_shift(read):
-    """The option sentiment's change over the last 30 minutes: which way the newest bets turned."""
-    value = read.value("option_sentiment_last_30_minutes_count")
-    if value is None:
-        return Reading.blank_for(read.blank_reason("option_sentiment_last_30_minutes_count"))
-    return Reading(float(value))
+    """The option sentiment over the last 30 minutes, as a share of that half hour's contracts that took a side: which
+    way the newest bets turned."""
+    return sided_share(read, "option_sentiment_last_30_minutes_count", "option_sided_last_30_minutes_count")
+
+
+def sided_share(read, net_measure, sided_measure):
+    """A net bought count over the contracts that took a side in the same span; blank with the missing input's reason,
+    or no_activity when nothing took a side."""
+    net, sided = read.value(net_measure), read.value(sided_measure)
+    if net is None or sided is None:
+        return Reading.blank_for(read.blank_reason(net_measure if net is None else sided_measure))
+    if not sided:
+        return Reading.blank_for("no_activity")
+    return Reading(net / sided)
 
 
 def strike_reach(read):

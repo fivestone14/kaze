@@ -214,7 +214,11 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `option_net_bought_by_delta_count` (delta_band = 0_10, 10_25, 25_40, 40_60, 60_100; side = call, put: contracts
   traded, legs of packages included, and contracts bought less sold, single-leg trades with an ask, at or past the ask
   bought, at or past the bid sold, else the nearer side), `option_sentiment_since_open_count` and
-  `option_sentiment_last_30_minutes_count` (calls bought less sold less the same for puts). A trade's delta is taken
+  `option_sentiment_last_30_minutes_count` (calls bought less sold less the same for puts), `option_sided_since_open_count`
+  and `option_sided_last_30_minutes_count` (the contracts that took a side, the sentiment's denominators) and
+  `option_tape_minute_coverage_portion` (the share of the session's minutes so far with any trade in the file). The
+  ladder is blank with SPX's bars' reason when they are missing or stale, and `partial_coverage` under 0.9 of the
+  minutes covered (the recorder was down for much of the day). A trade's delta is taken
   when it traded: Black–Scholes with no rates, the session's close as expiry, SPX's close in the minute before the
   trade as spot and the volatility that prices the quote's mid (halving between 1% and 500%); trades before SPX's
   first finished minute are left out. Each process prices a day's trades once and keeps them on the cached tape.
@@ -445,8 +449,8 @@ per reading, one file per mechanism group, each saying only what it measures). B
 | C catch-up | `spy_basis` | SPY-implied SPX − SPX at the same minute-quote poll, less today's median, points (`spy_basis_points`; blank before the quotes began, 2026-09-28) | catch-up (points) | 09:40–15:45 | earning, +0.215 (points per point) |
 | D option bets | `urgent_orders` | signed bursts + clear-side 50-lots over 30 min, multi-leg legs left out | steady | 10:00–close | earning, −0.25 |
 | D | `burst_tilt` | near-the-money − far urgent orders | steady | 10:00–close | earning, +0.28 |
-| D | `option_sentiment` | calls bought − sold less puts bought − sold since the open, contracts (`option_sentiment_since_open_count`) | steady, usual = same-clock median | 10:00–close | earning, −0.090 |
-| D | `sentiment_shift` | the same over the last 30 minutes (`option_sentiment_last_30_minutes_count`) | steady | 10:00–close | earning, −0.091 |
+| D | `option_sentiment` | calls bought − sold less puts bought − sold since the open, over the contracts that took a side (a share, so late trades and older days' unsided quotes do not shrink it) | steady, usual = same-clock median | 10:00–close | earning, −0.138 |
+| D | `sentiment_shift` | the same over the last 30 minutes | steady | 10:00–close | earning, −0.063 |
 | D | `strike_reach` | share of the day's call contracts with delta under 0.25 − that share of its puts | steady, usual = same-clock median | 10:00–close | earning, +0.095 |
 | F outside view | `claude_beyond_base` | (up − down) − base (up − down), × freshness (1 − age ÷ 30 min, 0 past 30) | steady | each answer; blank once the feed drops it at 40 min | earning, +0.06 |
 
