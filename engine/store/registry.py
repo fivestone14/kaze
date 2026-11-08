@@ -80,9 +80,9 @@ WINDOW_MOVE_MEASURE = {side: f"{side}_move_points" for side in WINDOW_SIDES}
 GRADE_START_PRICE_MEASURE = "spx_price_points"
 AVERAGE_FROM_PUBLISH_MEASURE = "average_move_from_publish_points"
 SPX_SYMBOL = "$SPX"
-SPY_SYMBOL, TEN_YEAR_SYMBOL = "SPY", "$TNX"
+SPY_SYMBOL, TEN_YEAR_SYMBOL, VIX_SYMBOL = "SPY", "$TNX", "$VIX"
 # The symbols the nightly keeps daily bars for, with the instrument kind each is stored under.
-DAILY_BAR_SYMBOLS = {SPX_SYMBOL: "index", TEN_YEAR_SYMBOL: "rate"}
+DAILY_BAR_SYMBOLS = {SPX_SYMBOL: "index", TEN_YEAR_SYMBOL: "rate", VIX_SYMBOL: "index"}
 # The three grade words and what yes means for each: the measure, its band subject (None: the channel's own rung
 # subject) and the stored value that says yes. The scoreboard, the phone and the data map all read this.
 GRADE_WORD_MEASURE = {"ends_inside": ("was_inside_band", components.BAND, 1),
@@ -558,7 +558,7 @@ MEASURES = [
                 "under its current hash", "sha256", "text", group="push_pull_reading", subjects="factor",
                 lane="push_pull", overlap="direction_all_sources"),
     measure_row("push_pull_context_input", "one context input of the wider view (kind names it: trend_ness and its "
-                "three parts, path_straightness, dealer_gamma, rates_tide, vix_level, time_of_day, down_day)", "mixed",
+                "three parts, path_straightness, dealer_gamma, rates_tide, fear_tail, time_of_day, down_day)", "mixed",
                 "number", group="push_pull_context", subjects="kind",
                 blank="not_formed_yet before the input's bars; the input's feed reason", lane="push_pull",
                 overlap="direction_all_sources"),

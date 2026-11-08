@@ -35,7 +35,9 @@ MINIMUM_DAYS_FOR_FIT = 2
 MINIMUM_DAYS_FOR_NOISE = 5
 # A learned beta is held to ±1 (the booster itself is held to ×0.5–×2), and is learned only while the reading's own
 # weight is at least half signal: a booster scales the weight, so it means nothing on a weight that is mostly noise.
-BETA_LIMIT, BETA_MINIMUM_SIGNAL = 1.0, 0.5
+# Nor before twenty scored days: the day-clustered noise runs low on fewer, and an input that moves on few days (the
+# fear tail, on the two spike days of the first ten) would otherwise learn a full-size beta from them.
+BETA_LIMIT, BETA_MINIMUM_SIGNAL, BETA_MINIMUM_DAYS = 1.0, 0.5, 20
 ORIGIN_ORDER = ("live_frozen", "history_rebuilt")
 
 
@@ -243,13 +245,14 @@ def own_fit(chosen, weight_name, specs):
     return clustered_fit({key: np.asarray(values) for key, values in columns.items()}, grades, days)
 
 
-def learned_betas(fit, weight_name, spec):
+def learned_betas(fit, weight_name, spec, days):
     """Each booster input's beta: its strength × input term shrunk by its noise, over the reading's own weight, held
-    to ±1; None while that weight is under half signal or has no noise measured yet. The Trend learns none: its weight
-    a + c·tn changes sign with trend-ness, so one multiplier cannot carry a term fitted at the sample's mean."""
+    to ±1; None under BETA_MINIMUM_DAYS scored days, or while that weight is under half signal or has no noise
+    measured yet. The Trend learns none: its weight a + c·tn changes sign with trend-ness, so one multiplier cannot
+    carry a term fitted at the sample's mean."""
     if fit is None or not spec.boosters:
         return {}
-    if spec.weight_rule == reading_specs.DAY_TYPE:
+    if spec.weight_rule == reading_specs.DAY_TYPE or days < BETA_MINIMUM_DAYS:
         return {name: None for name in sorted(spec.boosters)}
     fits, noise = fit
     weight = fits.get(weight_name)
@@ -308,7 +311,7 @@ def ledger_rows(conn, through_day, in_force_day, written_at):
         else:
             add("live_weight_fit", fits.get(weight_name))
             add("live_weight_noise", noise.get(weight_name))
-        for name, beta in learned_betas(own, weight_name, specs[0]).items():
+        for name, beta in learned_betas(own, weight_name, specs[0], len(days)).items():
             add("live_booster_beta", beta, slice_key=registry.subject_key(kind=name))
         add("live_days_count", float(len(days)))
         add("rescored_days_count", float(sum(1 for origin, _ in days.values() if origin != "live_frozen")))

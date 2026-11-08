@@ -731,7 +731,7 @@ def session_bar_rows(conn, bars, day, row_origin, cut_at, written_at, instrument
 
 
 def daily_bar_rows(conn, today, half_days, written_at):
-    """Daily bars of $SPX and $TNX not yet stored, priced at each day's close (13:00 on the half days the calendar
+    """Daily bars of $SPX, $TNX and $VIX not yet stored, priced at each day's close (13:00 on the half days the calendar
     lists, else 16:00): today's is live_frozen, earlier days are history_rebuilt; each is known at the moment Mirai's
     file stamps the fetch with (its file write)."""
     rows = []

@@ -311,7 +311,7 @@ def write_session_bars(conn, day, row_origin, half_days, written_at):
 
 
 def write_daily_bars(conn, today, half_days, written_at):
-    """Store the daily bars of $SPX and $TNX not stored yet, each known at Mirai's fetch moment."""
+    """Store the daily bars of $SPX, $TNX and $VIX not stored yet, each known at Mirai's fetch moment."""
     return store.write_bars(conn, collect.daily_bar_rows(conn, today, half_days, written_at))
 
 

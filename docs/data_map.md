@@ -47,7 +47,7 @@ gzipped copies of older days read the same way):
 | `options_tape` | `market/spx_same_day_options_raw_day_folders/{day}/tape.jsonl` | 180 s | minute |
 | `futures_bars` | `market/futures_price_bars_by_minute/{day}.jsonl` | 1 day | once_a_day |
 | `watchlist_bars` | `market/watchlist_price_bars_by_minute/{day}.jsonl` (/ES, SPY, SMH, QQQ, $ADD by bar start; written after the close) | 2 days | once_a_day |
-| `daily_bars` | `market/spx_vix_rates_price_bars_by_day/{symbol}.jsonl` ($SPX, $TNX, ten years) | 2 days | once_a_day |
+| `daily_bars` | `market/spx_vix_rates_price_bars_by_day/{symbol}.jsonl` ($SPX, $TNX, $VIX, ten years) | 2 days | once_a_day |
 | `event_calendar` | `settings/market_event_calendar_by_event.json` | 100 days | hand_kept |
 | `claude_forecast` | `spx/claude_forecast/claude_forecast_answers_by_read/{day}.jsonl` | 40 min | minute |
 | `news_headlines` | `market/news_headlines_by_article/{day}.jsonl` | 30 min | minute |
@@ -109,7 +109,7 @@ same file shape. `engine/store/store.py` shapes, checks and writes rows; `store_
   commit and health counts.
 - `collect_observations`: one measure x subject at one cut, with its feed's status and age at the cut.
 - `collect_market_prices`: one bar with the moment it was known: SPX's and SPY's 1-minute bars (`price_kind = bar`),
-  the daily bars of $SPX and $TNX (`price_kind = day`, priced at the session's close).
+  the daily bars of $SPX, $TNX and $VIX (`price_kind = day`, priced at the session's close).
 - `collect_calendar_and_events`: one dated fact: a scheduled event or a half-day session, with when the station
   first held it.
 - `reads_decisions`: one decision header: a `range_forecast` per channel, with its window and status.
@@ -244,7 +244,7 @@ One observation per measure and subject; `registry_measures` is the list. By gro
   `level_distance_from_price_points` (level_type; the wall less the read price, a width input with no dial yet)
 - push/pull readings (section 8): `push_pull_raw_value`, `push_pull_z_score`, `push_pull_strength` (factor = the
   reading's name in `reading_specs.py`) and `push_pull_context_input` (kind = trend_ness and its three parts,
-  path_straightness, dealer_gamma, rates_tide, vix_level, time_of_day, down_day)
+  path_straightness, dealer_gamma, rates_tide, fear_tail, time_of_day, down_day)
 - nightly check: `reads_compared_count`, `values_mismatched_count`, `tolerated_mismatches_count`,
   `rebuild_identical_portion`
 - nightly history fit: `stretch_multiplier` and `stretch_recipe_name` (band = 80, average_80; horizon),
@@ -500,7 +500,9 @@ stored only; each earns its weight in the net from evidence; the `logged` status
    same-clock ranks, `straightness_since_open`, `side_share_since_open`, `closeness_to_extreme`, eased in by a ramp
    from 0 at 10:00 to 1 at 12:30, 0.5 before), `path_straightness` (the 30-minute path), `dealer_gamma` (+1 positive,
    −1 negative), `rates_tide` (the 10-year yield's 20-session change as a z against 250 sessions, floor 5 bp),
-   `vix_level`, `time_of_day` (share of the session gone), `down_day` (+1 below the prior close, −1 above it).
+   `fear_tail` (where VIX sits on its own past year: the z of ln VIX at the read against the logs of the past 252
+   daily `$VIX` closes, at least 120; 2017→2026 it sized days, ×0.64 deep calm to ×2.5 in a spike, and never their
+   direction), `time_of_day` (share of the session gone), `down_day` (+1 below the prior close, −1 above it).
 6. **Points** `push_pull_points` (factor, per channel) = strength × weight × booster × the channel's swing; a catch-up
    reading's weight is a plain ratio on its points. **Group sums** `push_pull_group_points` (kind = the group's name):
    a group nobody has promoted yet is held to ±0.15 swing; the **net** `push_pull_net_points` is the groups' sum held
@@ -540,7 +542,8 @@ family fit with no
 coefficient for a weight falls back to that weight's own fit. A catch-up reading (points with no swing) is fitted
 on its strength in swings, so its slope is in points per point like its weight. A reading whose spec names booster inputs is also fitted
 on its own with a strength × input term per input; each term, shrunk by its noise like the weight, over the reading's
-own weight is its `live_booster_beta` (held to ±1), learned only while that weight is at least half signal; the
+own weight is its `live_booster_beta` (held to ±1), learned only from 20 scored days on (the day-clustered noise
+runs low on fewer, and an input like the fear tail moves on few days) and while that weight is at least half signal; the
 Trend learns none, since its weight a + c·tn changes sign with trend-ness. Until promoted, live days may shrink a weight to 0 but never turn
 it against its history's sign.
 

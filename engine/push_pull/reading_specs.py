@@ -39,6 +39,11 @@ FIXED, DAY_TYPE = "fixed", "day_type"
 # The options family: the readings built from the same-day option tape.
 PRICE_FAMILY = "price"
 OPTIONS_FAMILY = "options"
+# The fear tail (VIX on its own past year) may boost every family reading but the Trend: their weights come from the
+# family fit, so its strength × fear term only learns the booster, and the Trend's day-type weight carries no learned
+# beta. Each starts at 0 (×1): 2017→2026 daily bars showed no fear effect worth a head start (the gap's carry, once
+# put in swings, gained +0.03 per fear z, t 0.6, and −0.03 leaving out 2020).
+FEAR = {ctx.FEAR_TAIL: 0.0}
 
 
 class Speaks:
@@ -104,7 +109,7 @@ class Spec:
 SPECS = (
     # ---- A · own path ------------------------------------------------------------------------------------------------
     Spec("gap", "Gap", "A", own_path.gap, "points", shapes.STEADY, Speaks(from_minute=35, until_minutes_before_close=20),
-         +0.047, EARNING, spread_floor=8.0, family=PRICE_FAMILY,
+         +0.047, EARNING, spread_floor=8.0, boosters=FEAR, family=PRICE_FAMILY,
          evidence="w +0.047 (p 0.15); the printed open shows ~77% of the true gap"),
     Spec("trend_since_open", "Trend Since Open", "A", own_path.trend_since_open, "points", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=20), -0.37, EARNING, spread_floor=4.0,
@@ -113,15 +118,16 @@ SPECS = (
          evidence="w = −0.37 + 0.59·tn (joint fit): carries on trend days, fades on range days; fails Holm"),
     Spec("give_back", "Give-Back", "A", own_path.give_back, "points", shapes.CLIPPED,
          Speaks(from_minutes_before_close=15, sits_out_half_days=True), -0.111, EARNING, spread_floor=4.0,
-         family=PRICE_FAMILY,
+         boosters=FEAR, family=PRICE_FAMILY,
          evidence="β −0.111 (p 0.004 counting overlapping reads as separate; ~0.1 with the day as the unit) on "
                   "clip(z of the trend, ±3); earning since 2026-11-04"),
     Spec("fresh_burst", "Fresh Burst", "A", own_path.fresh_burst, "points", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.008, EARNING, spread_floor=2.0,
-         family=PRICE_FAMILY, evidence="w −0.008: the newest 15 minutes beyond the day's pace say little"),
+         boosters=FEAR, family=PRICE_FAMILY,
+         evidence="w −0.008: the newest 15 minutes beyond the day's pace say little"),
     Spec("fade_15_00", "15:00 Fade", "A", own_path.fade_15_00, "points", shapes.REVERSING,
          Speaks(from_minute=330, until_minutes_before_close=15), +0.16, EARNING, spread_floor=2.0,
-         family=PRICE_FAMILY,
+         boosters=FEAR, family=PRICE_FAMILY,
          evidence="fade size 0.16 (p 0.33): a 14:30→15:00 burst tends to fade (reversing: the weight is the fade's size)"),
     Spec("gap_across_average", "Gap Across Average", "A", own_path.gap_across_average, "averages",
          shapes.STEADY, Speaks(from_minute=5, until_minutes_before_close=360), +0.07, EARNING, spread_floor=1.0,
@@ -134,7 +140,7 @@ SPECS = (
          evidence="IC +0.09 (p 0.02) raw; 0 near the day's high or low (reversing: the weight is the fade's size)"),
     Spec("grind_at_extreme", "Grind At Extreme", "H", heavyweights.grind_at_extreme, "issues", shapes.ONE_SIDED,
          Speaks(from_minute=60, until_minutes_before_close=20), +0.39, EARNING, spread_floor=60.0,
-         half_life_sessions=20, gated=True, whole_day_baseline=True, family=PRICE_FAMILY,
+         half_life_sessions=20, gated=True, whole_day_baseline=True, boosters=FEAR, family=PRICE_FAMILY,
          evidence="IC 0.06; the conditional form of Trend (r 0.81 when it fires); joint fit +0.39"),
     # ---- B · dealers --------------------------------------------------------------------------------------------------
     Spec("pin_to_centre", "Pin To Centre", "B", dealers.pin_to_centre, "swings", shapes.STEADY,
@@ -158,31 +164,31 @@ SPECS = (
     # ---- D · option bets -----------------------------------------------------------------------------------------------
     Spec("urgent_orders", "Urgent Orders", "D", option_bets.urgent_orders, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.25, EARNING, spread_floor=8.0,
-         boosters={ctx.DOWN_DAY: 0.0}, family=OPTIONS_FAMILY,
+         boosters={ctx.DOWN_DAY: 0.0, **FEAR}, family=OPTIONS_FAMILY,
          evidence="w −0.25 (urgent buying is given back) at p 0.002 counting overlapping reads as separate, ~0.2 with "
                   "the day as the unit; live it reversed (+0.20); logged 2026-11-04, earning since 2026-11-09"),
     Spec("burst_tilt", "Burst Tilt", "D", option_bets.burst_tilt, "orders", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.28, EARNING, spread_floor=15.0,
-         family=OPTIONS_FAMILY, evidence="w +0.28 in history; near- vs far-money urgency"),
+         boosters=FEAR, family=OPTIONS_FAMILY, evidence="w +0.28 in history; near- vs far-money urgency"),
     Spec("option_sentiment", "Option Sentiment", "D", option_bets.option_sentiment, "share", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.138, EARNING, usual=baseline.USUAL_SAME_CLOCK,
-         spread_floor=0.002, family=OPTIONS_FAMILY,
+         spread_floor=0.002, boosters=FEAR, family=OPTIONS_FAMILY,
          evidence="as a share of sided contracts: w −0.138 (t −0.8) alone, −0.075 in the options joint fit, 20 days "
                   "2026-09-23→10-23: weak, faintly contrarian"),
     Spec("sentiment_shift", "Sentiment Shift", "D", option_bets.sentiment_shift, "share", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), -0.063, EARNING, spread_floor=0.005,
-         family=OPTIONS_FAMILY,
+         boosters=FEAR, family=OPTIONS_FAMILY,
          evidence="as a share of sided contracts: w −0.063 (t −0.8) alone, ~0 in the options joint fit, 20 days "
                   "2026-09-23→10-23: the newest half hour's bets lean to being given back"),
     Spec("strike_reach", "Strike Reach", "D", option_bets.strike_reach, "share", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=0), +0.095, EARNING, usual=baseline.USUAL_SAME_CLOCK,
-         spread_floor=0.02, family=OPTIONS_FAMILY,
+         spread_floor=0.02, boosters=FEAR, family=OPTIONS_FAMILY,
          evidence="w +0.095 (t 1.2) alone and in the options joint fit, 20 days 2026-09-23→10-23: calls reaching "
                   "further out than puts lean up"),
     # ---- E · option prices ---------------------------------------------------------------------------------------------
     Spec("put_insurance", "Put Insurance", "E", option_prices.put_insurance, "pct", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=15), +0.175, EARNING, usual=baseline.USUAL_SAME_CLOCK,
-         spread_floor=0.3, family=OPTIONS_FAMILY,
+         spread_floor=0.3, boosters=FEAR, family=OPTIONS_FAMILY,
          evidence="w +0.175 (t 3.1) alone, +0.207 (t 3.4) in the options joint fit, +0.192 (t 2.6) beside the price "
                   "and option readings, 15 of 20 days its way, +0.156..+0.215 leaving out any one day, 20 days "
                   "2026-09-23→10-23: protection dearer than usual for the time of day leans up (the hedging is "

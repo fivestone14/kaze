@@ -14,8 +14,8 @@ CONTEXT_MEASURE = "push_pull_context_input"
 TIDE_SESSIONS, TIDE_HISTORY_SESSIONS, TIDE_FLOOR_BASIS_POINTS = 20, 250, 5.0
 
 BOOSTER_FLOOR, BOOSTER_CEILING = 0.5, 2.0
-TREND_NESS, PATH_STRAIGHTNESS, DEALER_GAMMA, RATES_TIDE, VIX_LEVEL, TIME_OF_DAY, DOWN_DAY = (
-    "trend_ness", "path_straightness", "dealer_gamma", "rates_tide", "vix_level", "time_of_day", "down_day")
+TREND_NESS, PATH_STRAIGHTNESS, DEALER_GAMMA, RATES_TIDE, FEAR_TAIL, TIME_OF_DAY, DOWN_DAY = (
+    "trend_ness", "path_straightness", "dealer_gamma", "rates_tide", "fear_tail", "time_of_day", "down_day")
 # The three same-clock ranks trend-ness averages, each stored so past sessions can be ranked against.
 STRAIGHTNESS_SINCE_OPEN, SIDE_SHARE, CLOSENESS_TO_EXTREME, TREND_RANK_MEAN = (
     "straightness_since_open", "side_share_since_open", "closeness_to_extreme", "trend_rank_mean")
@@ -24,7 +24,10 @@ TREND_NESS_PARTS = (STRAIGHTNESS_SINCE_OPEN, SIDE_SHARE, CLOSENESS_TO_EXTREME)
 RAMP_FROM_MINUTE, RAMP_FULL_MINUTE = 30, 180
 # The wall's fixed clock booster: √(195 ÷ minutes left), 195 being the half-session at which it reads ×1.
 WALL_CLOCK_MINUTES = 195
-VIX_USUAL = 18.0
+# The fear tail: where VIX sits on its own past year, the z of ln(VIX now) against the logs of the past 252
+# daily closes (mean and standard deviation; at least 120 closes). Tested 2017→2026: the tail says how big and how
+# jumpy days get, never which way SPX goes, so it only sizes forces (spikes, z > 2, fade back in ~10 sessions).
+FEAR_TAIL_SESSIONS, FEAR_TAIL_MINIMUM_SESSIONS = 252, 120
 
 
 def trend_ness_parts(closes, true_open, high, low):
@@ -70,14 +73,14 @@ def trend_ness(rank_of_mean, minute_of_session):
 
 def normalised_inputs(context):
     """Each context input as u_j, centred so that the usual case reads 0: tn − 0.5, straightness − 0.5, gamma ±1,
-    the rates tide z, ln(VIX ÷ 18), time of day − 0.5 (share of the session gone), down day +1 (below the prior close)
-    / −1 (above it)."""
+    the rates tide z, the fear tail z, time of day − 0.5 (share of the session gone), down day +1 (below the prior
+    close) / −1 (above it)."""
     return {
         TREND_NESS: context[TREND_NESS] - 0.5 if context.get(TREND_NESS) is not None else 0.0,
         PATH_STRAIGHTNESS: context[PATH_STRAIGHTNESS] - 0.5 if context.get(PATH_STRAIGHTNESS) is not None else 0.0,
         DEALER_GAMMA: context.get(DEALER_GAMMA) or 0.0,
         RATES_TIDE: context.get(RATES_TIDE) or 0.0,
-        VIX_LEVEL: math.log(context[VIX_LEVEL] / VIX_USUAL) if context.get(VIX_LEVEL) else 0.0,
+        FEAR_TAIL: context.get(FEAR_TAIL) or 0.0,
         TIME_OF_DAY: context[TIME_OF_DAY] - 0.5 if context.get(TIME_OF_DAY) is not None else 0.0,
         DOWN_DAY: context.get(DOWN_DAY) or 0.0,
     }
@@ -109,6 +112,18 @@ def rates_tide(ten_year_closes):
     return changes[-1] / max(spread, TIDE_FLOOR_BASIS_POINTS)
 
 
+def fear_tail(vix, vix_closes):
+    """VIX's place on its own past year: (ln VIX − mean) ÷ standard deviation over the logs of the past
+    FEAR_TAIL_SESSIONS daily closes, so a VIX high for its year reads above 0 whatever the year's level; None without a
+    quote or under FEAR_TAIL_MINIMUM_SESSIONS closes."""
+    logs = [math.log(close) for close in vix_closes[-FEAR_TAIL_SESSIONS:] if close and close > 0]
+    if not vix or vix <= 0 or len(logs) < FEAR_TAIL_MINIMUM_SESSIONS:
+        return None
+    mean = sum(logs) / len(logs)
+    spread = math.sqrt(sum((value - mean) ** 2 for value in logs) / (len(logs) - 1))
+    return (math.log(vix) - mean) / spread if spread > 0 else None
+
+
 def context_of(facts, history):
     """Every context input of a read, plus trend-ness's three parts and mean rank: {kind: value or None}. `history` is
     the same-clock history of the stored context inputs ({subject_key: [(sessions_ago, value)]})."""
@@ -124,7 +139,8 @@ def context_of(facts, history):
         PATH_STRAIGHTNESS: path["straightness"] if path else None,
         DEALER_GAMMA: 1.0 if gamma_word == "positive" else -1.0 if gamma_word == "negative" else None,
         RATES_TIDE: rates_tide(facts.daily_closes(registry.TEN_YEAR_SYMBOL)),
-        VIX_LEVEL: facts.value("vix_calendar_year_pct", symbol="$VIX"),
+        FEAR_TAIL: fear_tail(facts.value("vix_calendar_year_pct", symbol=registry.VIX_SYMBOL),
+                             facts.daily_closes(registry.VIX_SYMBOL)),
         TIME_OF_DAY: facts.minute / facts.session_length if facts.session_length else None,
         DOWN_DAY: float(facts.down_day) if facts.price is not None and facts.prior_close is not None else None,
     }
