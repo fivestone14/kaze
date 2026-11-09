@@ -113,9 +113,10 @@ SPECS = (
          evidence="w +0.047 (p 0.15); the printed open shows ~77% of the true gap"),
     Spec("trend_since_open", "Trend Since Open", "A", own_path.trend_since_open, "points", shapes.STEADY,
          Speaks(from_minute=30, until_minutes_before_close=20), -0.37, EARNING, spread_floor=4.0,
-         weight_rule=DAY_TYPE, day_type=(-0.37, 0.59), boosters={ctx.PATH_STRAIGHTNESS: 0.0, ctx.DEALER_GAMMA: 0.0},
-         family=PRICE_FAMILY,
-         evidence="w = −0.37 + 0.59·tn (joint fit): carries on trend days, fades on range days; fails Holm"),
+         weight_rule=DAY_TYPE, day_type=(-0.37, 0.59), family=PRICE_FAMILY,
+         evidence="w = −0.37 + 0.59·tn (joint fit): carries on trend days, fades on range days; fails Holm. No "
+                  "boosters: a day-type weight learns no betas, so straightness and dealer gamma sat at ×1 on every "
+                  "read (removed 2026-11-08; trend × gamma sign t 0.3 on 89 days)"),
     Spec("give_back", "Give-Back", "A", own_path.give_back, "points", shapes.CLIPPED,
          Speaks(from_minutes_before_close=15, sits_out_half_days=True), -0.111, EARNING, spread_floor=4.0,
          boosters=FEAR, family=PRICE_FAMILY,
