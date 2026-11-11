@@ -206,7 +206,7 @@ One observation per measure and subject; `registry_measures` is the list. By gro
 - options tape (30-minute window): `options_trades_last_30_minutes_count`,
   `options_call_premium_last_30_minutes_usd`, `options_put_premium_last_30_minutes_usd`,
   `bullish_portion_of_sided_premium`, `tape_gap_markers_last_30_minutes_count`,
-  `feed_coverage_last_30_minutes_portion`, `urgent_orders_count` (kind = total, near, far; window_minutes = 30:
+  `feed_coverage_last_30_minutes_portion` (the lower of 1 minus gap markers over 30 and the share of the window's minutes with a trade on file), `urgent_orders_count` (kind = total, near, far; window_minutes = 30:
   signed bursts of three strikes one way inside two seconds plus prints of 50 contracts or more, bought calls and sold
   puts counting up, legs of multi-leg packages left out, a big print only when it took the bid or ask outright, near =
   the strike within 0.5% of SPX)

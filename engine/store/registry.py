@@ -367,7 +367,8 @@ MEASURES = [
     measure_row("tape_gap_markers_last_30_minutes_count", "collector gap markers inside the 30-minute window", "count",
                 "whole_number", "health", "tape_health", subjects="feed", feed="options_tape", blank=TAPE_BLANK, low=0),
     measure_row("feed_coverage_last_30_minutes_portion",
-                "share of the 30-minute window the feed covered: 1 minus gap markers over 30 (one per lost minute)",
+                "share of the 30-minute window the feed covered: the lower of 1 minus gap markers over 30 (one per "
+                "lost minute) and, for the options tape, the share of the window's minutes with a trade on file",
                 "portion", "number", "health", "feed_coverage", subjects="feed", blank=TAPE_BLANK, low=0, high=1),
     # headlines (the poller leaves no poll stamps, so the count has no coverage twin)
     measure_row("headlines_last_60_minutes_count", "headlines captured in the 60 minutes to the cut", "count",

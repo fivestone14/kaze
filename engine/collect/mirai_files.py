@@ -301,10 +301,15 @@ def gap_moment(line):
 
 
 def tape_window_totals(day, cut, minutes, max_bytes=None):
-    """Trade count, call and put premium, sided bull and bear premium, gap markers and newest trade in the window."""
+    """Trade count, call and put premium, sided bull and bear premium, gap markers and newest trade in the window,
+    plus the share of the window's whole minutes (those inside the session) with a trade on file: the recorder writes
+    a gap marker only while it is running and failing, so a stretch it was not recording at all (a restart, a feed it
+    never had) leaves no marker and shows only as minutes with no trade."""
     tape = read_tape_day(day)
     end_ms = int(cut.timestamp() * 1000)
     start_ms = end_ms - minutes * 60 * 1000
+    first_ms = max(start_ms, int(session_open(day).timestamp() * 1000))
+    whole_minutes = max(0, (end_ms - first_ms) // MINUTE_MS)
     on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
     inside = on_disk & (tape["ts_ms"] >= start_ms) & (tape["ts_ms"] <= end_ms)
     premium = tape["price"] * tape["size"] * CONTRACT_MULTIPLIER
@@ -317,7 +322,11 @@ def tape_window_totals(day, cut, minutes, max_bytes=None):
     newest_ms = tape["ts_ms"][on_disk & (tape["ts_ms"] <= end_ms)]
     gaps = [gap_at for gap_at, gap_offset in tape["gaps"]
             if window_start <= gap_at <= cut and (max_bytes is None or gap_offset <= max_bytes)]
+    in_session = inside & (tape["ts_ms"] >= first_ms)
+    traded_minutes = np.unique(np.minimum((tape["ts_ms"][in_session] - first_ms) // MINUTE_MS,
+                                          whole_minutes - 1)).size if whole_minutes else 0
     return {
+        "minutes_with_trades_portion": traded_minutes / whole_minutes if whole_minutes else None,
         "present": tape["present"],
         "trades": int(inside.sum()),
         "calls_usd": float(premium[inside & is_call].sum()),

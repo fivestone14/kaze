@@ -528,7 +528,12 @@ def collect_options_tape(read, day, cut_at, bars, max_bytes, close_at):
     collect_skew(read, day, cut_at, minute_closes, close_at, max_bytes, counted, bars)
     read.add_observation("tape_gap_markers_last_30_minutes_count", window["gaps"] if counted else None,
                          feed="options_tape")
+    # The lower of two views of the window: 1 minus the recorder's gap markers (a minute it tried and failed), and
+    # the share of the window's minutes with a trade on file (a stretch it was not recording leaves no marker; on
+    # 2026-11-11 the tape restarted at 11:04 and the 11:05 read scored a window with under 2 minutes of tape as 1.0).
     coverage = max(0.0, 1 - window["gaps"] / GAP_MARKERS_FOR_EMPTY_WINDOW) if counted else None
+    if coverage is not None and window["minutes_with_trades_portion"] is not None:
+        coverage = store.rounded(min(coverage, window["minutes_with_trades_portion"]))
     read.add_observation("feed_coverage_last_30_minutes_portion", coverage, source="options_tape", feed="options_tape")
     if not bars:
         for side in ("call", "put"):
