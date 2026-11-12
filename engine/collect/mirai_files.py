@@ -20,6 +20,15 @@ CALENDAR_WARNING_DAYS = 14
 HALF_DAY_EVENT_KIND = "HALF_DAY_CLOSE"
 # Vendor trade-condition codes 130-144 mark legs of multi-leg packages, which have no clear buyer or seller side.
 MULTI_LEG_CONDITIONS = range(130, 145)
+# From 2026-11-11 the tape is rebuilt from Schwab's stream (rows marked src = schwab_stream), which sends no condition
+# code. A package's legs are priced so the whole package lands on a legal tick, so a single leg often prints between
+# the ticks an option may trade on alone (5 cents under 3 dollars, 10 cents from 3 dollars). Measured on the
+# provider's tape of 2026-11-05 and 11-06 (package legs 24-25% of rows): every off-tick row was a package leg, and the
+# rule caught 71-73% of them; on that tape merged into one-second rows as Schwab sends it, 79-82% of the off-tick
+# volume was package legs and the rule caught about half of all package volume.
+REBUILT_TAPE_SOURCE = "schwab_stream"
+LEGAL_TICK_CENTS_UNDER_3 = 5
+LEGAL_TICK_CENTS_FROM_3 = 10
 CONTRACT_MULTIPLIER = 100
 # Urgent orders: a burst is three or more strikes hit on one side inside a two-second bin; a big print is fifty
 # contracts or more; near the money is within half a percent of SPX.
@@ -256,7 +265,7 @@ def read_tape_day(day):
         return TAPE_CACHE[day]
     path = day_file_path(FILES["options_tape"], day)
     columns = {"ts_ms": [], "offset": [], "strike": [], "is_call": [], "price": [], "size": [], "bid": [], "ask": [],
-               "condition": []}
+               "condition": [], "package": [], "print_size": []}
     gaps, skipped, offset = [], 0, 0
     if path is not None:
         with open_bytes(path) as handle:
@@ -283,12 +292,27 @@ def read_tape_day(day):
                 columns["bid"].append(trade.get("bid") or 0.0)
                 columns["ask"].append(trade.get("ask") or 0.0)
                 columns["condition"].append(trade.get("condition") or 0)
+                columns["package"].append(is_package_leg(trade))
+                # the size of one trade: the row's size, or on a rebuilt row (which can merge several trades) the size
+                # of its newest single trade when the recorder knew it
+                columns["print_size"].append(trade.get("last_size") or trade.get("size") or 0)
         SKIPPED_LINES[path] = skipped
     tape = {name: np.array(values, dtype=float) for name, values in columns.items()}
     tape["present"] = path is not None
     tape["gaps"] = [gap for gap in gaps if gap[0] is not None]
     TAPE_CACHE[day] = tape
     return tape
+
+
+def is_package_leg(trade):
+    """True for a leg of a multi-leg package: the provider's condition code, or on a rebuilt row a price off the legal
+    tick (see REBUILT_TAPE_SOURCE)."""
+    if (trade.get("condition") or 0) in MULTI_LEG_CONDITIONS:
+        return True
+    if trade.get("src") != REBUILT_TAPE_SOURCE:
+        return False
+    cents = round(float(trade["price"]) * 100)
+    return cents % (LEGAL_TICK_CENTS_UNDER_3 if cents < 300 else LEGAL_TICK_CENTS_FROM_3) != 0
 
 
 def gap_moment(line):
@@ -314,7 +338,7 @@ def tape_window_totals(day, cut, minutes, max_bytes=None):
     inside = on_disk & (tape["ts_ms"] >= start_ms) & (tape["ts_ms"] <= end_ms)
     premium = tape["price"] * tape["size"] * CONTRACT_MULTIPLIER
     is_call = tape["is_call"] > 0
-    sided = inside & ~np.isin(tape["condition"], list(MULTI_LEG_CONDITIONS)) & (tape["bid"] > 0) & (tape["ask"] > 0)
+    sided = inside & (tape["package"] == 0) & (tape["bid"] > 0) & (tape["ask"] > 0)
     mid = (tape["bid"] + tape["ask"]) / 2.0
     above = sided & (tape["price"] > mid)
     below = sided & (tape["price"] < mid)
@@ -344,7 +368,8 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
     one two-second bin, counted once when the third strike lands) and big prints, in total and split by whether
     the trade's strike sat near the money (a trade before SPX's first bar counts in the total only); legs of multi-leg
     packages are left out (59-80% of big prints were spread legs, whose side says nothing), a big print counts only
-    when it took the bid or the ask outright, and a big print that completes a burst counts as both."""
+    when it took the bid or the ask outright, and a big print that completes a burst counts as both. A big print is
+    judged on one trade's size: on a rebuilt row that merges several trades, the newest one's (print_size)."""
     # A trade's side is the quote side it took (at or past the ask bought, at or past the bid sold, else the nearer
     # side); bought calls and sold puts are bullish. spx_close_at(ts_ms) gives SPX at the trade's minute.
     tape = read_tape_day(day)
@@ -353,7 +378,7 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
     on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
     usable = (on_disk & (tape["ts_ms"] >= start_ms) & (tape["ts_ms"] <= end_ms) & (tape["bid"] > 0)
               & (tape["ask"] >= tape["bid"]) & (tape["price"] >= tape["bid"]) & (tape["price"] <= tape["ask"])
-              & (tape["strike"] > 0) & ~np.isin(tape["condition"], list(MULTI_LEG_CONDITIONS)))
+              & (tape["strike"] > 0) & (tape["package"] == 0))
     counts = dict.fromkeys(URGENT_KINDS, 0)
     bins = {}
     for index in np.flatnonzero(usable)[np.argsort(tape["ts_ms"][usable], kind="stable")]:
@@ -370,7 +395,8 @@ def tape_urgent_orders(day, cut, minutes, spx_close_at, max_bytes=None):
             strikes.add(float(tape["strike"][index]))
             completes_burst = len(strikes) == URGENT_BURST_STRIKES
         clear_side = price >= ask or price <= bid
-        for _ in range(int(tape["size"][index] >= BIG_PRINT_CONTRACTS and clear_side) + int(completes_burst)):
+        big = tape["print_size"][index] >= BIG_PRINT_CONTRACTS
+        for _ in range(int(big and clear_side) + int(completes_burst)):
             counts["total"] += bull
             if kind:
                 counts[kind] += bull
@@ -484,7 +510,7 @@ def tape_delta_ladder(day, cut, spot_at_minute_ms, close_at, max_bytes=None):
     on_disk = tape["offset"] <= max_bytes if max_bytes is not None else np.ones(tape["offset"].shape, dtype=bool)
     inside = on_disk & (tape["ts_ms"] >= open_ms) & (tape["ts_ms"] <= end_ms) & ~np.isnan(delta)
     price, bid, ask, size = tape["price"], tape["bid"], tape["ask"], tape["size"]
-    quoted = (ask > 0) & (ask >= bid) & ~np.isin(tape["condition"], list(MULTI_LEG_CONDITIONS))
+    quoted = (ask > 0) & (ask >= bid) & (tape["package"] == 0)
     side = np.where(quoted, np.where(price >= ask, 1.0, np.where(price <= bid, -1.0, np.sign(price - (bid + ask) / 2))),
                     0.0)
     is_call = tape["is_call"] > 0
